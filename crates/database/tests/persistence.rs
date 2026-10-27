@@ -311,6 +311,7 @@ async fn invalid_model_output_settles_failed_without_publishing_segments() {
             )
             .unwrap(),
         ),
+        store.clone(),
     );
     let unsupported = service
         .run(ProcessRequest {
@@ -780,6 +781,7 @@ async fn dictate_fixture(
             )
             .unwrap(),
         ),
+        store.clone(),
     ));
     let service = DictationService::new(capture, processing, settings, spy.clone(), store.clone());
     let control = DictationControl::default();
@@ -919,6 +921,7 @@ async fn retry_links_new_run_and_refuses_live_completed_or_changed_model() {
         Arc::new(UncertainEngine),
         store.clone(),
         ownership,
+        store.clone(),
     );
     let mut prior = ProcessingRun {
         id: uuid::Uuid::new_v4().to_string(),
@@ -1147,6 +1150,7 @@ fn meeting_service(
         engine,
         store.clone(),
         ownership.clone(),
+        store.clone(),
     ));
     parakeet_application::meeting::MeetingService::new(
         Arc::new(parakeet_application::capture::CaptureService::new(
@@ -1422,6 +1426,7 @@ async fn meeting_revision_change_between_preflight_and_run_is_refused() {
         engine.clone(),
         store.clone(),
         ownership.clone(),
+        store.clone(),
     ));
     let service = parakeet_application::meeting::MeetingService::new(
         Arc::new(parakeet_application::capture::CaptureService::new(
@@ -1441,4 +1446,410 @@ async fn meeting_revision_change_between_preflight_and_run_is_refused() {
     );
     assert!(store.detail("r").await.unwrap().unwrap().runs.is_empty());
     assert!(engine.calls.lock().unwrap().is_empty());
+}
+
+#[derive(Default)]
+struct GatedControlEngine {
+    started: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+    active: std::sync::atomic::AtomicBool,
+}
+#[async_trait::async_trait]
+impl parakeet_application::processing::SpeechProcessing for GatedControlEngine {
+    async fn process(
+        &self,
+        _: &parakeet_application::processing::ProcessRequest,
+        _: &AudioTrack,
+        _: &ProcessingRun,
+    ) -> Result<parakeet_application::processing::EngineOutput, parakeet_application::CapabilityError>
+    {
+        unreachable!("controlled test path")
+    }
+    async fn process_controlled(
+        &self,
+        _: &parakeet_application::processing::ProcessRequest,
+        track: &AudioTrack,
+        run: &ProcessingRun,
+        control: parakeet_application::processing_control::ProcessingControl,
+    ) -> Result<parakeet_application::processing::EngineOutput, parakeet_application::CapabilityError>
+    {
+        self.active.store(true, std::sync::atomic::Ordering::SeqCst);
+        control.publish(
+            parakeet_application::processing_control::ProcessingStage::Transcribing,
+            5000,
+            Some(10000),
+            1,
+            Some(50),
+        );
+        self.started.notify_one();
+        self.release.notified().await;
+        self.active
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        Ok(parakeet_application::processing::EngineOutput {
+            segments: vec![TranscriptSegment {
+                id: format!("{}:new", run.id),
+                recording_id: run.recording_id.clone(),
+                run_id: run.id.clone(),
+                track_id: Some(track.id.clone()),
+                ordinal: 0,
+                start_ms: Some(2800),
+                end_ms: Some(3800),
+                text: "Unpublished cancelled output".into(),
+                speaker_claim: None,
+                evidence: json!({"simulated":true}),
+            }],
+            intervals: vec![],
+            raw: json!({"simulated":true}),
+            metrics: json!({}),
+        })
+    }
+}
+fn controlled_service(
+    tmp: &tempfile::TempDir,
+    store: std::sync::Arc<SqliteStore>,
+    engine: std::sync::Arc<dyn parakeet_application::processing::SpeechProcessing>,
+    writes: std::sync::Arc<dyn parakeet_application::processing::RunWrites>,
+    control: std::sync::Arc<dyn parakeet_application::processing_control::RunControlWrites>,
+) -> std::sync::Arc<parakeet_application::processing::ProcessingService> {
+    std::sync::Arc::new(parakeet_application::processing::ProcessingService::new(
+        store.clone(),
+        writes,
+        std::sync::Arc::new(FixtureModels),
+        engine,
+        store,
+        std::sync::Arc::new(
+            parakeet_infrastructure::jobs::FileProcessingOwnership::for_database(
+                &tmp.path().join("test.db"),
+            )
+            .unwrap(),
+        ),
+        control,
+    ))
+}
+fn controlled_request() -> parakeet_application::processing::ProcessRequest {
+    parakeet_application::processing::ProcessRequest {
+        recording_id: "r".into(),
+        track_id: "track".into(),
+        model: "fixture".into(),
+        start_ms: 0,
+        duration_ms: None,
+        word_timestamps: false,
+    }
+}
+async fn wait_settled(store: &SqliteStore, id: &str) -> ProcessingRun {
+    use parakeet_application::jobs::ProcessingQueries;
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let r = store.run(id).await.unwrap().unwrap();
+            if r.status != "running" {
+                break r;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap()
+}
+#[tokio::test]
+async fn cancelling_and_dropping_waiter_keeps_worker_owned_until_exit() {
+    use parakeet_application::{jobs::*, processing_control::*};
+    use std::sync::{Arc, atomic::Ordering};
+    let (tmp, store) = database().await;
+    let mut b = bundle();
+    b.tracks[0].available = true;
+    store.import(&b).await.unwrap();
+    let store = Arc::new(store);
+    let engine = Arc::new(GatedControlEngine::default());
+    let service = controlled_service(
+        &tmp,
+        store.clone(),
+        engine.clone(),
+        store.clone(),
+        store.clone(),
+    );
+    let work = service.clone();
+    let waiter = tokio::spawn(async move { work.run(controlled_request()).await });
+    engine.started.notified().await;
+    let id = store.pending_runs().await.unwrap()[0].id.clone();
+    let control = ProcessingControlService::new(store.clone(), store.clone());
+    assert!(control.cancel(&id).await.unwrap().requested);
+    assert!(service.retry(&id).await.is_err());
+    waiter.abort();
+    let _ = waiter.await;
+    let ownership = Arc::new(
+        parakeet_infrastructure::jobs::FileProcessingOwnership::for_database(
+            &tmp.path().join("test.db"),
+        )
+        .unwrap(),
+    );
+    assert!(ownership.try_acquire(&id).await.unwrap().is_none());
+    let recovery = ProcessingRecoveryService::new(store.clone(), store.clone(), ownership.clone());
+    assert_eq!(recovery.recover().await.unwrap().active, vec![id.clone()]);
+    assert!(engine.active.load(Ordering::SeqCst));
+    engine.release.notify_one();
+    let r = wait_settled(&store, &id).await;
+    assert_eq!(r.status, "interrupted");
+    assert!(!engine.active.load(Ordering::SeqCst));
+    assert!(r.configuration["cancellation_requested_at"].is_string());
+    assert_eq!(
+        r.result["unpublished_segments"].as_array().unwrap().len(),
+        1
+    );
+    let d = store.detail("r").await.unwrap().unwrap();
+    assert_eq!(d.segments.len(), 1);
+    assert_eq!(d.segments[0].text, "Original evidence");
+    assert!(!control.cancel(&id).await.unwrap().requested);
+}
+struct TerminalCancellationRace(std::sync::Arc<SqliteStore>);
+#[async_trait::async_trait]
+impl parakeet_application::processing::RunWrites for TerminalCancellationRace {
+    async fn start(&self, r: &ProcessingRun) -> Result<(), parakeet_application::PersistenceError> {
+        self.0.start(r).await
+    }
+    async fn finish(
+        &self,
+        r: &ProcessingRun,
+        s: &[TranscriptSegment],
+    ) -> Result<(), parakeet_application::PersistenceError> {
+        use parakeet_application::processing_control::RunControlWrites;
+        if r.status == "completed" {
+            assert!(self.0.request_cancellation(&r.id, "terminal-race").await?);
+        }
+        self.0.finish(r, s).await
+    }
+}
+#[tokio::test]
+async fn cancellation_wins_atomic_completion_race_without_publishing_output() {
+    use parakeet_application::jobs::ProcessingQueries;
+    use std::sync::Arc;
+    let (tmp, store) = database().await;
+    let mut b = bundle();
+    b.tracks[0].available = true;
+    store.import(&b).await.unwrap();
+    let store = Arc::new(store);
+    let service = controlled_service(
+        &tmp,
+        store.clone(),
+        Arc::new(UncertainEngine),
+        Arc::new(TerminalCancellationRace(store.clone())),
+        store.clone(),
+    );
+    assert!(matches!(
+        service.run(controlled_request()).await,
+        Err(parakeet_application::processing::ProcessingError::Cancelled(_))
+    ));
+    let d = store.detail("r").await.unwrap().unwrap();
+    assert_eq!(d.runs[0].status, "interrupted");
+    assert_eq!(
+        d.runs[0].configuration["cancellation_requested_at"],
+        "terminal-race"
+    );
+    assert!(store.pending_runs().await.unwrap().is_empty());
+    assert_eq!(d.segments[0].text, "Original evidence");
+}
+#[tokio::test]
+async fn progress_is_monotonic_and_old_runs_refuse_cancellation() {
+    use parakeet_application::jobs::ProcessingQueries;
+    use parakeet_application::processing_control::*;
+    use std::sync::Arc;
+    let (_tmp, store) = database().await;
+    store.import(&bundle()).await.unwrap();
+    let store = Arc::new(store);
+    let mut r = ProcessingRun {
+        id: uuid::Uuid::new_v4().to_string(),
+        recording_id: "r".into(),
+        kind: "transcription".into(),
+        model: "fixture".into(),
+        model_revision: "test".into(),
+        status: "running".into(),
+        started_at: "fixture".into(),
+        completed_at: None,
+        configuration: json!({"ownership_protocol":"file-lock-v1"}),
+        result: serde_json::Value::Null,
+        error: None,
+    };
+    store.start(&r).await.unwrap();
+    let service = ProcessingControlService::new(store.clone(), store.clone());
+    assert!(matches!(
+        service.cancel(&r.id).await,
+        Err(ControlProcessingError::Conflict(_))
+    ));
+    r.id = uuid::Uuid::new_v4().to_string();
+    r.configuration["control_protocol"] = json!(CONTROL_PROTOCOL);
+    store.start(&r).await.unwrap();
+    let c = ProcessingControl::default();
+    c.publish(
+        ProcessingStage::Transcribing,
+        1000,
+        Some(10000),
+        0,
+        Some(10),
+    );
+    let old = c.snapshot();
+    c.publish(ProcessingStage::Transcribing, 5000, Some(10000), 1, None);
+    let next = c.snapshot();
+    assert!(store.save_progress(&r.id, &next).await.unwrap());
+    assert!(!store.save_progress(&r.id, &old).await.unwrap());
+    assert_eq!(
+        store.run(&r.id).await.unwrap().unwrap().result["progress"]["audio_completed_ms"],
+        5000
+    );
+    assert!(service.cancel(&r.id).await.unwrap().requested);
+    assert!(service.cancel(&r.id).await.unwrap().requested);
+    assert_eq!(
+        store.control_state(&r.id).await.unwrap().unwrap().status,
+        "running"
+    );
+}
+
+struct BrokenProgress {
+    store: std::sync::Arc<SqliteStore>,
+    failed: tokio::sync::Notify,
+}
+#[async_trait::async_trait]
+impl parakeet_application::processing_control::RunControlWrites for BrokenProgress {
+    async fn save_progress(
+        &self,
+        _: &str,
+        _: &parakeet_application::processing_control::RunProgress,
+    ) -> Result<bool, parakeet_application::PersistenceError> {
+        self.failed.notify_one();
+        Err(parakeet_application::PersistenceError::new(
+            std::io::Error::other("injected progress storage failure"),
+        ))
+    }
+    async fn request_cancellation(
+        &self,
+        id: &str,
+        at: &str,
+    ) -> Result<bool, parakeet_application::PersistenceError> {
+        self.store.request_cancellation(id, at).await
+    }
+}
+#[tokio::test]
+async fn progress_write_failure_drains_worker_before_releasing_ownership() {
+    use parakeet_application::jobs::*;
+    use std::sync::{Arc, atomic::Ordering};
+    let (tmp, store) = database().await;
+    let mut b = bundle();
+    b.tracks[0].available = true;
+    store.import(&b).await.unwrap();
+    let store = Arc::new(store);
+    let engine = Arc::new(GatedControlEngine::default());
+    let progress = Arc::new(BrokenProgress {
+        store: store.clone(),
+        failed: tokio::sync::Notify::new(),
+    });
+    let service = controlled_service(
+        &tmp,
+        store.clone(),
+        engine.clone(),
+        store.clone(),
+        progress.clone(),
+    );
+    let work = service.clone();
+    let task = tokio::spawn(async move { work.run(controlled_request()).await });
+    engine.started.notified().await;
+    progress.failed.notified().await;
+    let id = store.pending_runs().await.unwrap()[0].id.clone();
+    assert!(!task.is_finished());
+    assert!(engine.active.load(Ordering::SeqCst));
+    let ownership = parakeet_infrastructure::jobs::FileProcessingOwnership::for_database(
+        &tmp.path().join("test.db"),
+    )
+    .unwrap();
+    assert!(ownership.try_acquire(&id).await.unwrap().is_none());
+    engine.release.notify_one();
+    assert!(matches!(
+        task.await.unwrap(),
+        Err(parakeet_application::processing::ProcessingError::Persistence(_))
+    ));
+    let run = store.run(&id).await.unwrap().unwrap();
+    assert_eq!(run.status, "interrupted");
+    assert!(run.error.unwrap().contains("persistence failed"));
+    assert!(!engine.active.load(Ordering::SeqCst));
+}
+
+#[tokio::test]
+async fn cancellation_stops_remaining_sources_in_both_recording_workflows() {
+    use parakeet_application::{
+        capture::CaptureService, jobs::ProcessingQueries, meeting::MeetingService,
+        processing::TranscribeRecordingInput, processing_control::ProcessingControlService,
+    };
+    use std::sync::Arc;
+    for meeting in [false, true] {
+        let (tmp, store) = database().await;
+        let mut b = bundle();
+        b.tracks[0].available = true;
+        let mut second = b.tracks[0].clone();
+        second.id = "second-track".into();
+        second.kind = TrackKind::Microphone;
+        b.tracks.push(second);
+        store.import(&b).await.unwrap();
+        let store = Arc::new(store);
+        let engine = Arc::new(GatedControlEngine::default());
+        let processing = controlled_service(
+            &tmp,
+            store.clone(),
+            engine.clone(),
+            store.clone(),
+            store.clone(),
+        );
+        let service = MeetingService::new(
+            Arc::new(CaptureService::new(Arc::new(FixtureCapture), store.clone())),
+            store.clone(),
+            store.clone(),
+            Arc::new(FixtureModels),
+            processing.clone(),
+            Arc::new(
+                parakeet_infrastructure::jobs::FileProcessingOwnership::for_database(
+                    &tmp.path().join("test.db"),
+                )
+                .unwrap(),
+            ),
+        );
+        let waiter = tokio::spawn(async move {
+            if meeting {
+                assert!(service.finalize("r", None).await.is_err());
+            } else {
+                let error = processing
+                    .recording(TranscribeRecordingInput {
+                        id: "r".into(),
+                        model: "fixture".into(),
+                    })
+                    .await
+                    .unwrap_err();
+                assert_eq!(error.kind(), "cancelled");
+            }
+        });
+        engine.started.notified().await;
+        let id = store.pending_runs().await.unwrap()[0].id.clone();
+        ProcessingControlService::new(store.clone(), store.clone())
+            .cancel(&id)
+            .await
+            .unwrap();
+        engine.release.notify_one();
+        tokio::time::timeout(std::time::Duration::from_secs(2), waiter)
+            .await
+            .unwrap()
+            .unwrap();
+        let detail = store.detail("r").await.unwrap().unwrap();
+        assert_eq!(
+            detail.runs.len(),
+            1,
+            "cancellation must not start the other source"
+        );
+        assert_eq!(detail.runs[0].status, "interrupted");
+        assert_eq!(detail.segments.len(), 1, "original evidence survives");
+        if meeting {
+            assert_eq!(
+                detail.recording.metadata["meeting_finalization"]["status"],
+                "failed"
+            );
+            assert_eq!(
+                detail.recording.metadata["meeting_finalization"]["completed"],
+                json!([])
+            );
+        }
+    }
 }

@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT status, json_extract(data,'$.configuration.cancellation_requested_at') AS \"cancellation_requested_at: String\" FROM runs WHERE id=?1\n",
+  "describe": {
+    "columns": [
+      {
+        "name": "status",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "cancellation_requested_at: String",
+        "ordinal": 1,
+        "type_info": "Null"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      null
+    ]
+  },
+  "hash": "992f568130f972fe85bc339a11cf8230554371ae0b3740dfe3501d2d054888d2"
+}

@@ -90,6 +90,8 @@ enum Command {
 }
 #[derive(Subcommand)]
 enum Jobs {
+    Show { id: String },
+    Cancel { id: String },
     Pending,
     Recover,
     Retry { id: String },
@@ -492,7 +494,7 @@ fn writes(command: &Command) -> bool {
     matches!(
         command,
         Command::Jobs {
-            command: Jobs::Recover | Jobs::Retry { .. }
+            command: Jobs::Recover | Jobs::Retry { .. } | Jobs::Cancel { .. }
         } | Command::Meetings {
             command: Meetings::Import { dry_run: false, .. }
                 | Meetings::ImportSourceDb { dry_run: false, .. }
@@ -759,6 +761,7 @@ async fn execute(cli: Cli) -> anyhow::Result<Value> {
         engine.clone(),
         store.clone(),
         ownership.clone(),
+        store.clone(),
     ));
     let speakers = SpeakerService::new(
         store.clone(),
@@ -790,6 +793,22 @@ async fn execute(cli: Cli) -> anyhow::Result<Value> {
     );
     let result = match cli.command {
         Command::Jobs { command } => match command {
+            Jobs::Show { id } => value(
+                parakeet_application::processing_control::ProcessingControlService::new(
+                    store.clone(),
+                    store.clone(),
+                )
+                .show(&id)
+                .await?,
+            ),
+            Jobs::Cancel { id } => value(
+                parakeet_application::processing_control::ProcessingControlService::new(
+                    store.clone(),
+                    store.clone(),
+                )
+                .cancel(&id)
+                .await?,
+            ),
             Jobs::Pending => value(recovery.pending().await?),
             Jobs::Recover => value(recovery.recover().await?),
             Jobs::Retry { id } => value(processing.retry(&id).await?),
@@ -1393,11 +1412,17 @@ fn kind(error: &anyhow::Error) -> &'static str {
         {
             return e.kind();
         }
+        if let Some(e) =
+            cause.downcast_ref::<parakeet_application::processing_control::ControlProcessingError>()
+        {
+            return e.kind();
+        }
         if cause.is::<ValidationError>() {
             return "invalid_input";
         }
         if let Some(error) = cause.downcast_ref::<ProcessingError>() {
             return match error {
+                ProcessingError::Cancelled(_) => "cancelled",
                 ProcessingError::NotFound(_) => "not_found",
                 ProcessingError::Unavailable(_) => "source",
                 ProcessingError::Conflict(_) => "conflict",
@@ -1460,6 +1485,7 @@ async fn main() {
                 "not_found" => 3,
                 "confirmation_required" => 4,
                 "conflict" => 5,
+                "cancelled" => 6,
                 _ => 1,
             });
         }

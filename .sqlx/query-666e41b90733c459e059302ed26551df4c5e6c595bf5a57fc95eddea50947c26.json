@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE runs SET data=json_set(data,'$.configuration.cancellation_requested_at',coalesce(json_extract(data,'$.configuration.cancellation_requested_at'),?2))\nWHERE id=?1 AND status='running' AND json_extract(data,'$.configuration.control_protocol')='processing-control-v1'\n",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "666e41b90733c459e059302ed26551df4c5e6c595bf5a57fc95eddea50947c26"
+}

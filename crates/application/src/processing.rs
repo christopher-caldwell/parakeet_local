@@ -1,8 +1,11 @@
 use super::*;
 use crate::jobs::{OWNERSHIP_PROTOCOL, ProcessingOwnership, ProcessingQueries};
+use crate::processing_control::*;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProcessingError {
+    #[error("processing cancelled; retained run {0}")]
+    Cancelled(String),
     #[error("recording or track not found: {0}")]
     NotFound(String),
     #[error("source track unavailable or changed: {0}")]
@@ -35,6 +38,18 @@ pub struct EngineOutput {
 }
 #[async_trait]
 pub trait SpeechProcessing: Send + Sync {
+    fn cancellation_mode(&self, _model: &str) -> &'static str {
+        "at_engine_boundary"
+    }
+    async fn process_controlled(
+        &self,
+        request: &ProcessRequest,
+        track: &AudioTrack,
+        run: &ProcessingRun,
+        _control: ProcessingControl,
+    ) -> Result<EngineOutput, CapabilityError> {
+        self.process(request, track, run).await
+    }
     async fn process(
         &self,
         request: &ProcessRequest,
@@ -76,6 +91,7 @@ pub struct ProcessingService {
     engine: Arc<dyn SpeechProcessing>,
     runs: Arc<dyn ProcessingQueries>,
     ownership: Arc<dyn ProcessingOwnership>,
+    control_writes: Arc<dyn RunControlWrites>,
 }
 impl ProcessingService {
     pub fn new(
@@ -85,6 +101,7 @@ impl ProcessingService {
         engine: Arc<dyn SpeechProcessing>,
         runs: Arc<dyn ProcessingQueries>,
         ownership: Arc<dyn ProcessingOwnership>,
+        control_writes: Arc<dyn RunControlWrites>,
     ) -> Self {
         Self {
             queries,
@@ -93,6 +110,7 @@ impl ProcessingService {
             engine,
             runs,
             ownership,
+            control_writes,
         }
     }
     pub async fn run(&self, request: ProcessRequest) -> Result<ProcessingRun, ProcessingError> {
@@ -183,7 +201,7 @@ impl ProcessingService {
             status: "running".into(),
             started_at: now(),
             completed_at: None,
-            configuration: json!({"request":request,"track":track,"receipt":receipt(),"ownership_protocol":OWNERSHIP_PROTOCOL,"retry_of_run_id":retry_of.map(|r| &r.id),"meeting_finalization_id":finalization.map(|(id,_)|id)}),
+            configuration: json!({"request":request,"track":track,"receipt":receipt(),"ownership_protocol":OWNERSHIP_PROTOCOL,"control_protocol":CONTROL_PROTOCOL,"cancellation_mode":self.engine.cancellation_mode(&request.model),"retry_of_run_id":retry_of.map(|r| &r.id),"meeting_finalization_id":finalization.map(|(id,_)|id)}),
             result: Value::Null,
             error: None,
         };
@@ -192,44 +210,161 @@ impl ProcessingService {
                 ProcessingError::Conflict("new run ownership is already held".into())
             })?;
         self.writes.start(&run).await?;
-        let output = self
-            .engine
-            .process(&request, track, &run)
-            .await
-            .and_then(|output| {
-                let mut ids=std::collections::BTreeSet::new();
-                for s in &output.segments {
-                    s.validate().map_err(CapabilityError::new)?;
-                    if s.recording_id!=run.recording_id || s.run_id!=run.id || s.track_id.as_deref()!=Some(track.id.as_str()) || !ids.insert(&s.id) {
+        let engine = self.engine.clone();
+        let writes = self.writes.clone();
+        let queries = self.runs.clone();
+        let control_writes = self.control_writes.clone();
+        let track = track.clone();
+        // The driver owns the lease independently of its caller. Dropping a UI
+        // waiter must not release ownership while a blocking SDK still runs.
+        tokio::spawn(async move {
+            let _lease = _lease;
+            let control = ProcessingControl::default();
+            let mut persistence_failure = None;
+            let mut saved_sequence = None;
+            let output = {
+                let worker = engine.process_controlled(&request, &track, &run, control.clone());
+                tokio::pin!(worker);
+                loop {
+                    tokio::select! {
+                        result = &mut worker => break result,
+                        _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
+                            match queries.control_state(&run.id).await {
+                                Ok(Some(state)) if state.cancellation_requested_at.is_some() => control.request_cancellation(),
+                                Ok(Some(_)) => {},
+                                Ok(None) => {
+                                    control.request_cancellation();
+                                    persistence_failure = Some(PersistenceError::new(std::io::Error::other("active run disappeared")));
+                                },
+                                Err(e) => {
+                                    control.request_cancellation();
+                                    persistence_failure = Some(e);
+                                },
+                            }
+                            let progress = control.snapshot();
+                            if saved_sequence != Some(progress.sequence) && persistence_failure.is_none() {
+                                match control_writes.save_progress(&run.id, &progress).await {
+                                    Ok(true) => saved_sequence = Some(progress.sequence),
+                                    Ok(false) => {
+                                        control.request_cancellation();
+                                        persistence_failure = Some(PersistenceError::new(std::io::Error::other("active progress was not saved")));
+                                    },
+                                    Err(e) => {
+                                        control.request_cancellation();
+                                        persistence_failure = Some(e);
+                                    },
+                                }
+                            }
+                        }
+                    }
+                }
+            };
+            // Observe a request that raced with the final worker callback.
+            if queries.control_state(&run.id).await?.is_some_and(|s| s.cancellation_requested_at.is_some()) {
+                control.request_cancellation();
+            }
+            let output = output.and_then(|output| {
+                let mut ids = std::collections::BTreeSet::new();
+                for segment in &output.segments {
+                    segment.validate().map_err(CapabilityError::new)?;
+                    if segment.recording_id != run.recording_id || segment.run_id != run.id
+                        || segment.track_id.as_deref() != Some(track.id.as_str()) || !ids.insert(&segment.id) {
                         return Err(CapabilityError::message("engine returned a segment outside its recording/run/track or a duplicate ID"));
                     }
                 }
-                for i in &output.intervals {
-                    i.validate().map_err(CapabilityError::new)?;
-                    if i.track_id.as_deref()!=Some(track.id.as_str()) {return Err(CapabilityError::message("engine returned speaker activity for a different track"));}
+                for interval in &output.intervals {
+                    interval.validate().map_err(CapabilityError::new)?;
+                    if interval.track_id.as_deref() != Some(track.id.as_str()) {
+                        return Err(CapabilityError::message("engine returned speaker activity for a different track"));
+                    }
                 }
                 Ok(output)
             });
-        match output {
-            Ok(output) => {
-                run.status = "completed".into();
-                run.completed_at = Some(now());
-                run.result =
-                    json!({"raw":output.raw,"intervals":output.intervals,"metrics":output.metrics});
-                self.writes.finish(&run, &output.segments).await?;
-                Ok(run)
+            run.completed_at = Some(now());
+            let mut segments = vec![];
+            let mut engine_error = None;
+            match output {
+                Ok(output) => {
+                    segments = output.segments;
+                    run.status = "completed".into();
+                    run.result = json!({"raw":output.raw,"intervals":output.intervals,"metrics":output.metrics});
+                },
+                Err(error) => {
+                    run.status = "failed".into();
+                    run.error = Some(error.to_string());
+                    run.result = json!({"worker_error":error.to_string()});
+                    engine_error = Some(error);
+                },
             }
-            Err(error) => {
-                run.status = "failed".into();
-                run.completed_at = Some(now());
-                run.error = Some(error.to_string());
-                self.writes.finish(&run, &[]).await?;
-                Err(error.into())
+            if control.is_cancelled() {
+                run.status = "interrupted".into();
+                run.error = Some(if persistence_failure.is_some() {
+                    "Stopped after progress/control persistence failed; source audio and completed chunks retained"
+                } else {
+                    "Cancellation requested; worker stopped, source audio and completed chunk artifacts retained"
+                }.into());
+                if !segments.is_empty() {
+                    run.result["unpublished_segments"] = json!(segments);
+                }
+                segments.clear();
             }
+            let mut progress = control.snapshot();
+            progress.sequence += 1;
+            progress.stage = match run.status.as_str() {
+                "completed" => ProcessingStage::Completed,
+                "interrupted" => ProcessingStage::Interrupted,
+                _ => ProcessingStage::Failed,
+            };
+            run.result["progress"] = json!(progress);
+            if let Err(error) = writes.finish(&run, &segments).await {
+                if run.status != "interrupted" && queries.control_state(&run.id).await?.is_some_and(|s| s.cancellation_requested_at.is_some()) {
+                    // The SQL write arbitrates cancellation versus completion.
+                    run.status = "interrupted".into();
+                    run.error = Some("Cancellation won terminal settlement; worker stopped, output retained without publication".into());
+                    run.result["unpublished_segments"] = json!(segments);
+                    progress.stage = ProcessingStage::Interrupted;
+                    run.result["progress"] = json!(progress);
+                    writes.finish(&run, &[]).await?;
+                } else {
+                    return Err(ProcessingError::Persistence(error));
+                }
+            }
+            if let Some(error) = persistence_failure {
+                return Err(ProcessingError::Persistence(error));
+            }
+            match run.status.as_str() {
+                "completed" => Ok(run),
+                "interrupted" => Err(ProcessingError::Cancelled(run.id)),
+                _ => Err(ProcessingError::Engine(engine_error.unwrap_or_else(|| CapabilityError::message(run.error.unwrap_or_else(|| "processing failed".into()))))),
+            }
+        }).await.map_err(|e| ProcessingError::Engine(CapabilityError::new(e)))?
+    }
+}
+#[derive(Debug, thiserror::Error)]
+pub enum RetryProcessingError {
+    #[error(transparent)]
+    Persistence(#[from] PersistenceError),
+    #[error("{0}")]
+    Processing(#[from] ProcessingError),
+    #[error("{0}")]
+    NotFound(String),
+    #[error("{0}")]
+    Conflict(String),
+    #[error("{0}")]
+    Invalid(String),
+}
+impl RetryProcessingError {
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Persistence(_) => "persistence",
+            Self::Processing(ProcessingError::Cancelled(_)) => "cancelled",
+            Self::Processing(_) => "nested",
+            Self::NotFound(_) => "not_found",
+            Self::Conflict(_) => "conflict",
+            Self::Invalid(_) => "invalid_input",
         }
     }
 }
-operation_error!(RetryProcessingError,sources{Persistence:PersistenceError=>"persistence",Processing:ProcessingError=>"nested"},values{NotFound=>"not_found",Conflict=>"conflict",Invalid=>"invalid_input"});
 impl ProcessingService {
     pub async fn retry(&self, run_id: &str) -> Result<ProcessingRun, RetryProcessingError> {
         let prior = self
@@ -258,7 +393,31 @@ impl ProcessingService {
             .await?)
     }
 }
-operation_error!(TranscribeRecordingError,sources{Read:PersistenceError=>"persistence",Processing:ProcessingError=>"nested"},values{NotFound=>"not_found",Unavailable=>"source",Incomplete=>"processing"});
+#[derive(Debug, thiserror::Error)]
+pub enum TranscribeRecordingError {
+    #[error(transparent)]
+    Read(#[from] PersistenceError),
+    #[error("{0}")]
+    Processing(#[from] ProcessingError),
+    #[error("{0}")]
+    NotFound(String),
+    #[error("{0}")]
+    Unavailable(String),
+    #[error("{0}")]
+    Incomplete(String),
+}
+impl TranscribeRecordingError {
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Read(_) => "persistence",
+            Self::Processing(ProcessingError::Cancelled(_)) => "cancelled",
+            Self::Processing(_) => "nested",
+            Self::NotFound(_) => "not_found",
+            Self::Unavailable(_) => "source",
+            Self::Incomplete(_) => "processing",
+        }
+    }
+}
 #[derive(Debug, Clone)]
 pub struct TranscribeRecordingInput {
     pub id: String,
@@ -302,6 +461,9 @@ impl ProcessingService {
                 .await
             {
                 Ok(run) => results.push(run),
+                Err(error @ ProcessingError::Cancelled(_)) => {
+                    return Err(TranscribeRecordingError::Processing(error));
+                }
                 Err(error) => failures.push(json!({"track_id":track.id,"error":error.to_string()})),
             }
         }

@@ -16,6 +16,20 @@ pub trait ProcessingOwnership: Send + Sync {
 pub trait ProcessingQueries: Send + Sync {
     async fn pending_runs(&self) -> Result<Vec<ProcessingRun>, PersistenceError>;
     async fn run(&self, id: &str) -> Result<Option<ProcessingRun>, PersistenceError>;
+    async fn control_state(
+        &self,
+        id: &str,
+    ) -> Result<Option<crate::processing_control::RunControlState>, PersistenceError> {
+        Ok(self
+            .run(id)
+            .await?
+            .map(|r| crate::processing_control::RunControlState {
+                status: r.status,
+                cancellation_requested_at: r.configuration["cancellation_requested_at"]
+                    .as_str()
+                    .map(str::to_owned),
+            }))
+    }
 }
 #[async_trait]
 pub trait RecoveryWrites: Send + Sync {

@@ -1,4 +1,5 @@
 mod activity;
+mod job_control;
 mod library;
 #[cfg(feature = "performance")]
 mod performance;
@@ -88,6 +89,8 @@ struct Workbench {
     processing: Arc<ProcessingService>,
     recovery: Arc<parakeet_application::jobs::ProcessingRecoveryService>,
     pending_jobs: Vec<ProcessingRun>,
+    job_control: Arc<parakeet_application::processing_control::ProcessingControlService>,
+    job_monitor_running: bool,
     suggestions: Vec<SpeakerSuggestion>,
     suggestion_review: Option<SpeakerSuggestionReview>,
     match_score: Entity<InputState>,
@@ -238,6 +241,7 @@ impl Workbench {
     ) {
         self.status = label.into();
         self.pending += 1;
+        self.monitor_jobs(cx);
         self.start_heartbeat(cx);
         cx.notify();
         let handle = self.runtime.spawn(future);
@@ -394,7 +398,7 @@ impl Workbench {
                         }
                         this.status = "Ready".into();
                     }
-                    Ok(Err(e)) => {this.status=format!("Failed: {e:#}");this.last_error=Some(this.status.clone());},
+                    Ok(Err(e)) => {if e.chain().any(|cause|matches!(cause.downcast_ref::<ProcessingError>(),Some(ProcessingError::Cancelled(_)))){this.status="Processing cancelled. Source audio and saved chunks are retained.".into();}else{this.status=format!("Failed: {e:#}");this.last_error=Some(this.status.clone());}},
                     Err(e) => {this.status=format!("Background task failed: {e}");this.last_error=Some(this.status.clone());},
                 };
                 cx.notify();
@@ -881,6 +885,7 @@ impl Render for Workbench {
                     );
                 }
                 for run in &self.pending_jobs {
+                    content = content.child(self.processing_job(run, cx));
                     let recording = self
                         .records
                         .iter()
@@ -1878,6 +1883,12 @@ fn main() -> anyhow::Result<()> {
             Arc::new(parakeet_infrastructure::audio::LocalAudioIdentity),
         ),
     );
+    let job_control = Arc::new(
+        parakeet_application::processing_control::ProcessingControlService::new(
+            store.clone(),
+            store.clone(),
+        ),
+    );
     let speakers = Arc::new(SpeakerService::new(
         store.clone(),
         store.clone(),
@@ -1897,6 +1908,7 @@ fn main() -> anyhow::Result<()> {
         engine,
         store.clone(),
         ownership.clone(),
+        store.clone(),
     ));
     let clusters = Arc::new(
         parakeet_application::cluster_edits::ClusterEditingService::new(
@@ -2084,6 +2096,8 @@ fn main() -> anyhow::Result<()> {
                             processing,
                             recovery,
                             pending_jobs: vec![],
+                            job_control,
+                            job_monitor_running: false,
                             suggestions: vec![],
                             suggestion_review: None,
                             match_score,

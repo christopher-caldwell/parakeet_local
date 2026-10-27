@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE runs SET status=?2,data=CASE\nWHEN json_extract(data,'$.configuration.cancellation_requested_at') IS NOT NULL\nTHEN json_set(?3,'$.configuration.cancellation_requested_at',json_extract(data,'$.configuration.cancellation_requested_at'))\nELSE ?3 END\nWHERE id=?1 AND status='running'\nAND (json_extract(data,'$.configuration.cancellation_requested_at') IS NULL OR ?2='interrupted')\n",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "9ec8e310d68383c1a59f5b65d22f4bb8ea88ff375ef16365c10dce9034c305ec"
+}

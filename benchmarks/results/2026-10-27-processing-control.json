@@ -1,0 +1,54 @@
+{
+  "date": "2026-10-27",
+  "scope": "local processing control and cancellation; public audio; one Mac mini, no accuracy claim",
+  "cli_binary_sha256": "887f03b9f932c74587015722f5e9d4a27908414616a8d187f7a2ff0c7b42356c",
+  "fixture_audio_ms": 634578,
+  "whisper": {
+    "cancellation_to_exit_seconds": 0.13719454099918948,
+    "exit_code": 6,
+    "completed_chunks_retained": 2,
+    "cancelled_segments_published": 0,
+    "source_unchanged": true,
+    "linked_retry_completed": true,
+    "retry_text_and_timing_equal_to_prior": true,
+    "retry_segments": 46,
+    "all_raw_fields_exactly_equal": false,
+    "within_source_chunk_resume": false
+  },
+  "nemotron": {
+    "cancellation_to_exit_seconds": 0.13747512500049197,
+    "exit_code": 6,
+    "owned_child_exited": true,
+    "prepared_pcm_bytes_retained": 40611636,
+    "source_unchanged": true,
+    "completed_speech_clip_ms": 11000,
+    "completed_speech_intervals_equal_to_prior": true,
+    "completed_speech_intervals": 3
+  },
+  "native": {
+    "observed_live_source_progress": true,
+    "observed_cli_job_progress_in_background_jobs": true,
+    "background_jobs_observed_terminal_removal": true,
+    "cancellation_feedback_survived_detail_refresh": true,
+    "cache_after_abort_reused": true,
+    "cache_after_abort_segments": 1,
+    "pending_jobs": 0
+  },
+  "automated": {
+    "workspace_tests_passed": 78,
+    "workspace_tests_failed": 0,
+    "opt_in_tests_skipped": 2
+  },
+  "source_audit": {
+    "original_artifacts_checked": 48,
+    "changed": 0,
+    "confirmed_examples_unchanged": 3
+  },
+  "limits": [
+    "Speakrs stops at an engine boundary",
+    "Whisper initialization stops at a safe boundary",
+    "Retry restarts the source; completed chunks are retained but not reused",
+    "Single observations; no cancellation latency SLA",
+    "No new microphone, physical keyboard, M3 or personal identity acceptance evidence"
+  ]
+}

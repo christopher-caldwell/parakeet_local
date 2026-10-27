@@ -37,7 +37,7 @@ Ordinary operations do not migrate databases or download weights. SQLx checked-q
 
 ## Useful commands
 
-All normal results are JSON envelopes (`schema_version: 1`, `ok`, `data` or `error`). Progress is stderr. Help/version are plain text. Exit codes: 0 success, 2 invalid input, 3 missing entity, 4 confirmation required, 5 conflict, 1 other failure. Use `--data-root` and optionally `--database` to isolate experiments. `--json` is accepted; JSON is already the default.
+All normal results are JSON envelopes (`schema_version: 1`, `ok`, `data` or `error`). Progress is stderr. Help/version are plain text. Exit codes: 0 success, 2 invalid input, 3 missing entity, 4 confirmation required, 5 conflict, 6 cancelled processing, 1 other failure. Use `--data-root` and optionally `--database` to isolate experiments. `--json` is accepted; JSON is already the default.
 
 ```sh
 target/debug/parakeet --data-root .local/app meetings discover
@@ -67,7 +67,7 @@ Speakers expose profile creation/rename/deletion, verified `enroll`, `examples`,
 
 `speakers review-suggestion ID` returns a saved comparison and its fully covered current transcript segments. GPUI also supports comparison creation, evidence playback, explicit confirmation/replacement, rejection and undo. No comparison decision becomes verified enrollment data.
 
-`jobs pending` is read-only. `jobs recover` explicitly marks abandoned ownership-aware runs interrupted while preserving active/older unmanaged runs and original evidence. `jobs retry RUN_ID` creates a linked new speech run from a failed/interrupted request with the same pinned model revision. GPUI has a Processing jobs screen and retry controls in recent recording history. See [recovery semantics and evidence](docs/processing-recovery.md).
+`jobs pending` and `jobs show RUN_ID` are read-only. `jobs cancel RUN_ID` durably requests cancellation; ownership remains active until the worker exits. CLI and native controls expose observed progress and preserve source audio/completed chunk evidence. See [control semantics and verification](docs/processing-control.md). `jobs recover` explicitly marks abandoned ownership-aware runs interrupted while preserving active/older unmanaged runs and original evidence. `jobs retry RUN_ID` creates a linked new speech run from a failed/interrupted request with the same pinned model revision. GPUI has a Processing jobs screen and retry controls in recent recording history. See [recovery semantics and evidence](docs/processing-recovery.md).
 
 `capture devices`, `permissions` and `recoverable` are inspections. `capture record` needs an explicit microphone UID and/or `--system`; `capture recover` is restricted to this application's own capture directories. `dictation listen` starts the configured native hold bindings. `dictation history` and `dictation show ID` expose retained results. `dictation audio-settings` without flags is read-only; `--microphone-uid UID`, `--clear-microphone` and `--system true|false` change only the requested preferences. Shortcut settings accept editable JSON through `shortcuts set FILE` and are also editable in GPUI. `meetings play-segment RECORDING_ID SEGMENT_ID` resolves playback from the shared timeline service.
 

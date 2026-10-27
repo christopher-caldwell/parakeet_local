@@ -21,7 +21,7 @@ fs2 = "0.4"
 libc = "0.2"
 url = "2"
 hound = "3.5"
-whisper-rs = { version = "=0.16.0", features = ["metal"] }
+whisper-rs = { version = "=0.16.0", features = ["metal", "raw-api"] }
 speakrs = { version = "=0.7.0", default-features = false, features = ["coreml", "cpu"] }
 
 [dev-dependencies]

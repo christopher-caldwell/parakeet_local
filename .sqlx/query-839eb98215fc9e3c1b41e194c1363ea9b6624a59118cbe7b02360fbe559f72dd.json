@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE runs SET data=json_set(data,'$.result',json_set(coalesce(json_extract(data,'$.result'),'{}'),'$.progress',json(?2)))\nWHERE id=?1 AND status='running' AND json_extract(data,'$.configuration.control_protocol')='processing-control-v1'\nAND coalesce(json_extract(data,'$.result.progress.sequence'),-1)<json_extract(?2,'$.sequence')\n",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "839eb98215fc9e3c1b41e194c1363ea9b6624a59118cbe7b02360fbe559f72dd"
+}

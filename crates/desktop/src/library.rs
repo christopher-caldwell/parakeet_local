@@ -29,7 +29,7 @@ fn track_name(kind: &TrackKind) -> &'static str {
         TrackKind::File => "Audio file",
     }
 }
-fn time_label(ms: Option<i64>) -> String {
+pub(super) fn time_label(ms: Option<i64>) -> String {
     match ms {
         Some(ms) if ms >= 0 => {
             let sec = ms / 1000;
@@ -1057,6 +1057,13 @@ impl Workbench {
                 .disabled(self.pending > 0)
                 .on_click(cx.listener(move |this, _, _, cx| this.finalize_meeting(id.clone(), cx))),
         );
+        for run in self
+            .pending_jobs
+            .iter()
+            .filter(|r| r.recording_id == detail.recording.id)
+        {
+            view = view.child(self.processing_job(run, cx));
+        }
         for track in &detail.tracks {
             let id = track.id.clone();
             let selected = self.selected_track.as_deref() == Some(id.as_str());
@@ -1200,6 +1207,13 @@ impl Workbench {
             "Processing history",
             "Original results and errors remain available after reprocessing.",
         ));
+        for run in self
+            .pending_jobs
+            .iter()
+            .filter(|r| r.recording_id == detail.recording.id)
+        {
+            view = view.child(self.processing_job(run, cx));
+        }
         if let Some(plan) = detail.recording.metadata.get("meeting_finalization") {
             view = view.child(caption(format!(
                 "Final transcription: {} · {} · {}/{} sources complete",
@@ -1287,7 +1301,15 @@ impl Workbench {
                     )))
                     .child(caption(format!("Run {}", run.id)))
                     .when_some(run.error.clone(), |row, error| {
-                        row.child(div().text_color(rgb(DANGER)).child(error))
+                        row.child(
+                            div()
+                                .text_color(rgb(if run.status == "interrupted" {
+                                    WARNING
+                                } else {
+                                    DANGER
+                                }))
+                                .child(error),
+                        )
                     })
                     .when(
                         ["failed", "interrupted"].contains(&run.status.as_str())

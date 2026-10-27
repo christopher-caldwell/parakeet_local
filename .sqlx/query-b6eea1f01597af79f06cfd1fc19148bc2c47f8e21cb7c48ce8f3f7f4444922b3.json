@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE runs SET status='interrupted',data=CASE\nWHEN json_extract(data,'$.configuration.cancellation_requested_at') IS NOT NULL\nTHEN json_set(?2,'$.configuration.cancellation_requested_at',json_extract(data,'$.configuration.cancellation_requested_at'))\nELSE ?2 END\nWHERE id=?1 AND status='running' AND json_extract(data,'$.configuration.ownership_protocol')='file-lock-v1'\n",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "b6eea1f01597af79f06cfd1fc19148bc2c47f8e21cb7c48ce8f3f7f4444922b3"
+}

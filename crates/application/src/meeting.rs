@@ -388,6 +388,7 @@ impl MeetingService {
         if plan.failures.is_empty() {
             for track_id in plan.track_ids.clone() {
                 let previous = plan.clone();
+                let mut cancelled = false;
                 plan.completed.retain(|c| c.track_id != track_id);
                 if !detail
                     .tracks
@@ -447,14 +448,21 @@ impl MeetingService {
                                 run_id: run.id,
                             });
                         }
-                        Err(e) => plan.failures.push(MeetingTrackFailure {
-                            track_id: Some(track_id.clone()),
-                            message: e.to_string(),
-                        }),
+                        Err(e) => {
+                            cancelled =
+                                matches!(e, crate::processing::ProcessingError::Cancelled(_));
+                            plan.failures.push(MeetingTrackFailure {
+                                track_id: Some(track_id.clone()),
+                                message: e.to_string(),
+                            });
+                        }
                     }
                 }
                 plan.updated_at = now();
                 self.save(&previous, &plan).await?;
+                if cancelled {
+                    break;
+                }
             }
         }
         let prior = plan.clone();

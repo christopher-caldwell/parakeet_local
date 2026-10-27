@@ -4,6 +4,22 @@ use parakeet_application::jobs::{ProcessingQueries, RecoveryWrites};
 use parakeet_application::processing::RunWrites;
 #[async_trait]
 impl ProcessingQueries for SqliteStore {
+    async fn control_state(
+        &self,
+        id: &str,
+    ) -> Result<Option<parakeet_application::processing_control::RunControlState>, PersistenceError>
+    {
+        Ok(sqlx::query_file!("src/runs/control.sql", id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(PersistenceError::new)?
+            .map(
+                |r| parakeet_application::processing_control::RunControlState {
+                    status: r.status,
+                    cancellation_requested_at: r.cancellation_requested_at,
+                },
+            ))
+    }
     async fn pending_runs(&self) -> Result<Vec<ProcessingRun>, PersistenceError> {
         sqlx::query_file!("src/runs/pending.sql")
             .fetch_all(&self.pool)
@@ -90,5 +106,30 @@ impl RunWrites for SqliteStore {
         }
         tx.commit().await.map_err(PersistenceError::new)?;
         Ok(())
+    }
+}
+
+#[async_trait]
+impl parakeet_application::processing_control::RunControlWrites for SqliteStore {
+    async fn save_progress(
+        &self,
+        id: &str,
+        p: &parakeet_application::processing_control::RunProgress,
+    ) -> Result<bool, PersistenceError> {
+        let data = encode(p)?;
+        Ok(sqlx::query_file!("src/runs/progress.sql", id, data)
+            .execute(&self.pool)
+            .await
+            .map_err(PersistenceError::new)?
+            .rows_affected()
+            == 1)
+    }
+    async fn request_cancellation(&self, id: &str, at: &str) -> Result<bool, PersistenceError> {
+        Ok(sqlx::query_file!("src/runs/cancel.sql", id, at)
+            .execute(&self.pool)
+            .await
+            .map_err(PersistenceError::new)?
+            .rows_affected()
+            == 1)
     }
 }

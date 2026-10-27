@@ -14,3 +14,5 @@ pub mod native;
 mod native_models;
 
 mod word_timing;
+
+mod whisper_control;

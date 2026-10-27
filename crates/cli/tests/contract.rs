@@ -272,3 +272,18 @@ fn meeting_finalization_commands_keep_provisioning_and_consent_explicit() {
     assert!(!root.join("captures").exists());
     assert!(!root.join("capture.lock").exists());
 }
+
+#[test]
+fn job_inspection_and_control_keep_read_only_and_mutating_commands_distinct() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("app");
+    assert_eq!(run(&root, &["jobs", "show", "missing"]).0, 1);
+    assert!(!root.exists());
+    assert_eq!(run(&root, &["db", "create"]).0, 0);
+    assert_eq!(run(&root, &["db", "migrate"]).0, 0);
+    let (code, data) = run(&root, &["jobs", "show", "missing"]);
+    assert_eq!(code, 3);
+    assert_eq!(data["error"]["kind"], "not_found");
+    assert_eq!(run(&root, &["jobs", "cancel", "missing"]).0, 3);
+    assert!(!root.join("parakeet.db.processing-leases").exists());
+}
