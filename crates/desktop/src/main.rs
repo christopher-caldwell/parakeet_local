@@ -31,7 +31,7 @@ enum Update {
     Library(Vec<Recording>),
     Detail(RecordingDetail),
     Profiles(Vec<SpeakerProfile>),
-    Examples(Vec<VoiceExampleSummary>),
+    Examples(String, Vec<VoiceExampleSummary>),
     Candidates(Vec<EnrollmentCandidate>),
     RefreshSelected,
     Models(Vec<ModelInfo>),
@@ -159,7 +159,11 @@ impl Workbench {
                 match result {
                     Ok(Ok(update)) => {
                         match update {
-                            Update::Examples(e) => this.examples = e,
+                            Update::Examples(profile_id, examples) => {
+                                if this.selected_profile.as_deref() == Some(profile_id.as_str()) {
+                                    this.examples = examples;
+                                }
+                            }
                             Update::Candidates(c) => this.candidates = c,
                             Update::RefreshSelected => {
                                 if let Some(id) = this.requested_recording.clone() {
@@ -233,6 +237,9 @@ impl Workbench {
                                     this.examples.clear();
                                 }
                                 this.profiles = p;
+                                if let Some(id) = this.selected_profile.clone() {
+                                    this.load_examples(id, cx);
+                                }
                             }
                             Update::Models(m) => this.model_list = m,
                             Update::Dictations(receipts) => this.dictations = receipts,
@@ -392,6 +399,17 @@ impl Workbench {
         self.task(
             "Loading speaker profiles",
             async move { Ok(Update::Profiles(service.profiles().await?)) },
+            cx,
+        );
+    }
+    fn load_examples(&mut self, profile_id: String, cx: &mut Context<Self>) {
+        let service = self.speakers.clone();
+        self.task(
+            "Loading verified examples",
+            async move {
+                let examples = service.examples(Some(&profile_id)).await?;
+                Ok(Update::Examples(profile_id, examples))
+            },
             cx,
         );
     }
@@ -947,8 +965,13 @@ impl Render for Workbench {
             Area::Speakers => {
                 content=content.child(div().text_xl().child("Verified speaker examples")).child("Choose a person, return to a recording, play a clean 3–30 second track-local interval, then enroll it here.")
      .child(div().flex().gap_2().child(field(&self.person_name)).child(button("add-person","Create person").on_click(cx.listener(|this,_,_,cx|{let name=this.person_name.read(cx).value().to_string();let service=this.speakers.clone();this.task("Creating speaker profile",async move{service.create(&name).await?;Ok(Update::Profiles(service.profiles().await?))},cx);}))));
+                content = content.child(
+                    button("refresh-people", "Refresh people and examples")
+                        .on_click(cx.listener(|this, _, _, cx| this.refresh_profiles(cx))),
+                );
                 for p in &self.profiles {
                     let id = p.id.clone();
+                    let name = p.name.clone();
                     content = content.child(
                         button(
                             p.id.clone(),
@@ -962,10 +985,17 @@ impl Render for Workbench {
                                 p.name
                             ),
                         )
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.selected_profile = Some(id.clone());
-                            cx.notify();
-                        })),
+                        .on_click(cx.listener(
+                            move |this, _, window, cx| {
+                                this.selected_profile = Some(id.clone());
+                                this.examples.clear();
+                                this.person_name.update(cx, |input, cx| {
+                                    input.set_value(name.clone(), window, cx)
+                                });
+                                this.load_examples(id.clone(), cx);
+                                cx.notify();
+                            },
+                        )),
                     );
                 }
                 content = content.child(
@@ -989,6 +1019,7 @@ impl Render for Workbench {
                                 }
                             };
                             let service = this.speakers.clone();
+                            let profile_id = profile.clone();
                             let input = Enrollment {
                                 profile_id: profile,
                                 recording_id: d.recording.id.clone(),
@@ -1001,7 +1032,8 @@ impl Render for Workbench {
                                 "Extracting local verified embedding",
                                 async move {
                                     service.enroll(input).await?;
-                                    Ok(Update::Message("Verified example saved on-device".into()))
+                                    let examples = service.examples(Some(&profile_id)).await?;
+                                    Ok(Update::Examples(profile_id, examples))
                                 },
                                 cx,
                             );
@@ -1088,13 +1120,14 @@ impl Render for Workbench {
                         content.child(
                             div()
                                 .flex()
+                                .flex_col()
                                 .gap_2()
                                 .child(format!(
-                                    "{} · {} · {}–{}ms",
+                                    "{} · {} · {:.1}–{:.1}s",
                                     example.model,
                                     example.capture_domain,
-                                    example.start_ms,
-                                    example.end_ms
+                                    example.start_ms as f64 / 1000.,
+                                    example.end_ms as f64 / 1000.
                                 ))
                                 .child(button(("example-play", index), "Play").on_click(
                                     cx.listener(move |this, _, _, cx| {
@@ -1129,9 +1162,9 @@ impl Render for Workbench {
                                                 "Removing voice example",
                                                 async move {
                                                     service.remove_example(&id).await?;
-                                                    Ok(Update::Examples(
-                                                        service.examples(Some(&profile)).await?,
-                                                    ))
+                                                    let examples =
+                                                        service.examples(Some(&profile)).await?;
+                                                    Ok(Update::Examples(profile, examples))
                                                 },
                                                 cx,
                                             );

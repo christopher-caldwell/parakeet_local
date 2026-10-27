@@ -24,4 +24,19 @@ cat > "$bundle/Contents/Info.plist" <<'PLIST'
 <key>NSHighResolutionCapable</key><true/>
 </dict></plist>
 PLIST
+# Finder can add this metadata after opening the generated bundle, and codesign
+# refuses it on the next build. Restrict cleanup to these non-security attributes
+# inside our build product; preserve provenance and quarantine attributes.
+python3 - "$bundle" <<'PY'
+import subprocess, sys
+from pathlib import Path
+bundle = Path(sys.argv[1])
+for item in [bundle, *bundle.rglob('*')]:
+    if item.is_symlink():
+        continue
+    attributes = subprocess.check_output(['/usr/bin/xattr', str(item)], text=True).splitlines()
+    for attribute in ('com.apple.FinderInfo', 'com.apple.ResourceFork'):
+        if attribute in attributes:
+            subprocess.run(['/usr/bin/xattr', '-d', attribute, str(item)], check=True)
+PY
 codesign --force --deep --sign - "$bundle"

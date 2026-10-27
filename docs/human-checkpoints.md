@@ -2,13 +2,13 @@
 
 The existing recordings have already been imported and processed. No new dictation is needed for the next step.
 
-## First: identify three short clips
+## First checkpoint completed: three short clips
 
-Listen to [A](../.local/enrollment-checkpoint/candidate-A.wav), [B](../.local/enrollment-checkpoint/candidate-B.wav) and [C](../.local/enrollment-checkpoint/candidate-C.wav). Together they contain approximately 22.4 seconds. Reply with a name for each recognizable voice, or **Unknown**. If a clip contains multiple people or is unclear, leave it Unknown.
+The user identified [A](../.local/enrollment-checkpoint/candidate-A.wav), [B](../.local/enrollment-checkpoint/candidate-B.wav) and [C](../.local/enrollment-checkpoint/candidate-C.wav), approximately 22.4 seconds total. All three exact intervals were enrolled through the application service. The three profile names, stable IDs, explicit confirmation and embedding provenance remain in the private library and `.local/enrollment-checkpoint/` receipts, outside Git.
 
-Only the exact confirmed intervals will become verified local examples. Reusing a name assigns examples to one stable profile; Unknown saves no example. A microphone source is not assumed to be the user. Clip hashes and original track-local ranges are recorded in `.local/enrollment-checkpoint/candidates.json`; no names or embeddings are committed to Git.
+Only the exact confirmed intervals became verified examples. The full containing speaker clusters were not labeled or enrolled. A microphone source is not assumed to be the user. Clip hashes were checked before enrollment; original track-local ranges are recorded in `.local/enrollment-checkpoint/candidates.json`.
 
-After receiving labels, the agent can enroll those intervals, propose additional independent examples and inspect cross-recording matches. One short sample is insufficient to certify an identity threshold. Unverified matching predictions remain predictions, and tuning material must stay separate from final evaluation.
+Twelve separate, nonoverlapping candidate intervals were compared locally, producing inspectable suggestion receipts. All remained Unknown under the explicit diagnostic policy (score 0.9, margin 0.05, two verified references). Each identity currently has one confirmed example. None of these predictions became enrollment data, and these unlabeled comparisons do not measure accuracy. One short sample is insufficient to certify a personal identity threshold. Future independent confirmed examples can support tuning; separate labeled material must remain held out for evaluation.
 
 The GPUI Speakers screen also supports playing candidates, choosing/creating a profile, confirming enrollment and removing an incorrect example. The CLI exposes the same services. Detailed suggestion/cluster edits currently use CLI.
 

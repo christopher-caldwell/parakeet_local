@@ -12,7 +12,7 @@ Scope: initial repository implementation, reviewed against installed Rust Playbo
 | Variable-schema third-party SQL and ownership PRAGMAs | DEFAULT DEVIATION WITH JUSTIFICATION | Runtime SQL limited to whitelisted MacParakeet projections and operational schema/ownership introspection; source is read-only |
 | PostgreSQL database-owner/runtime-role separation | NOT APPLICABLE | Local SQLite application; explicit create/migrate and ownership guard replace server role mechanics |
 | Test and verification evidence | COMPLIANT WITH RULE | 41 passing tests, Clippy, SQLx check, real models/files, hardware limits documented separately |
-| Personal speaker identity and comparative accuracy | INSUFFICIENT EVIDENCE | No human labels yet; imported labels never used as truth; strict recognition smoke failure retained |
+| Personal speaker identity and comparative accuracy | INSUFFICIENT EVIDENCE | Three exact clips now human-confirmed; separate comparison intervals remain unverified; imported labels never used as truth; strict recognition smoke failure retained |
 | Actual microphone, physical keyboards, M3 | NOT EXERCISED | Platform adapter and simulated logic exist; eventual physical checkpoint documented |
 | Swift/Core ML interoperability | DEFAULT DEVIATION WITH JUSTIFICATION | Small isolated native bridges and selected FluidAudio source needed for working system audio/AX/Core ML with available SDK; no SDK types leak into core |
 | Private source preservation and external AI consent | COMPLIANT WITH RULE | Source adapter read-only, 48 unchanged artifact fingerprints, unauthorized routes rejected; no remote AI invocation |
