@@ -12,3 +12,5 @@ pub mod evaluation;
 pub mod native;
 
 mod native_models;
+
+mod word_timing;

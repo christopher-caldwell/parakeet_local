@@ -16,7 +16,7 @@ pub struct DiarizationScore {
     pub score_overlap: bool,
 }
 // Maximum weight one-to-one assignment (Hungarian algorithm), padded with unmatched speakers.
-fn assignment(weights: &[Vec<f64>], columns: usize) -> Vec<Option<usize>> {
+pub(crate) fn assignment(weights: &[Vec<f64>], columns: usize) -> Vec<Option<usize>> {
     let n = weights.len().max(columns);
     if n == 0 {
         return vec![];
@@ -235,6 +235,9 @@ pub fn word_error_rate(reference: &str, hypothesis: &str) -> Option<f64> {
     if r.is_empty() {
         return None;
     }
+    Some(word_error_count(&r, &h) as f64 / r.len() as f64)
+}
+pub(crate) fn word_error_count(r: &[&str], h: &[&str]) -> usize {
     let mut prev: Vec<usize> = (0..=h.len()).collect();
     for (i, word) in r.iter().enumerate() {
         let mut row = vec![i + 1; h.len() + 1];
@@ -245,7 +248,7 @@ pub fn word_error_rate(reference: &str, hypothesis: &str) -> Option<f64> {
         }
         prev = row;
     }
-    Some(prev[h.len()] as f64 / r.len() as f64)
+    prev[h.len()]
 }
 /// Reproducible orthographic normalization only: no semantic or number rewriting.
 pub fn normalize_wer(text: &str, protocol: &str) -> Result<String, ValidationError> {

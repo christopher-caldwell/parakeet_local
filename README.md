@@ -53,6 +53,10 @@ target/debug/parakeet --data-root .local/app meetings export RECORDING_ID --form
 target/debug/parakeet --data-root .local/app meetings play RECORDING_ID --track TRACK_ID --start-ms 10000 --duration-ms 5000
 target/debug/parakeet --data-root .local/app transcribe RECORDING_ID --track TRACK_ID --model selected-asr
 target/debug/parakeet --data-root .local/app transcribe-all RECORDING_ID --model selected-diarization
+# Explicit experimental model-estimated word evidence, separate from corrections:
+target/debug/parakeet --data-root .local/app transcribe RECORDING_ID --track TRACK_ID --word-timestamps
+# Read-only anonymous speaker-word evaluation, without a database:
+target/debug/parakeet benchmark score-speakers reference.json prediction.json
 ```
 
 `meetings import --dry-run` inspects candidates without opening or creating a destination database. Mutating imports are additive and idempotent. Re-import does not refresh or overwrite local overrides. Processing creates new runs and retains old output/corrections. `transcribe-all` attempts every available authoritative source, preserves partial results, and reports failure if any source fails. Relinking is explicit and requires a matching saved content hash (or a still-readable unchanged original to establish one). Dry-run leaves saved locators untouched. Fingerprint legacy references before moving them; a missing source without an identity hash is refused. Native Library controls use the same operations. Playback and exports are deliberate side effects; exports are returned in JSON rather than silently writing arbitrary files.
@@ -76,3 +80,5 @@ Speakers expose profile creation/rename/deletion, verified `enroll`, `examples`,
 See [verification](docs/verification.md), [audio models](docs/audio-models.md), [speaker recognition](docs/speaker-recognition.md), and [the human checkpoint](docs/human-checkpoints.md). [Benchmark preparation and recognition probes](benchmarks/README.md) live in `scripts/` and `benchmarks/`. Public numeric summaries contain no personal transcript content; complete local run receipts remain in ignored storage.
 
 Native screen/audio permissions, physical keyboard delivery, supported target editors, and human voice identity are separate acceptance checks. The current direct Accessibility insertion adapter works with TextEdit; unsupported editors retain text and report failure. Clipboard fallback and interrupted-paste recovery are implemented with bounded typed snapshots, target checks and readback, but actual fallback event delivery into a real editor is unverified. `dictation recover-clipboard` recovers only owned journaled transactions and does not initialize a database; the native Dictation screen has the same action. See [clipboard privacy and limits](docs/privacy.md). This project does not yet establish better personal transcription or speaker accuracy than MacParakeet.
+
+The [speaker-word evaluation report](docs/speaker-word-evaluation.md) records cpWER, paired segment/experimental-word results and their limits. Experimental word estimates stay off by default and do not certify named identity or timestamp accuracy.

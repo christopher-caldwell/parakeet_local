@@ -5,6 +5,8 @@ use uuid::Uuid;
 pub mod evaluation;
 pub mod gestures;
 pub mod recognition;
+pub mod speaker_wer;
+pub mod word_timing;
 
 pub fn stable_id(namespace: &str, key: &str) -> String {
     Uuid::new_v5(

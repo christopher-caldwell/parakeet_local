@@ -83,6 +83,8 @@ pub struct RecordingDetail {
     pub runs: Vec<ProcessingRun>,
     pub corrections: Vec<Correction>,
     pub attributions: Vec<parakeet_domain::reconciliation::SegmentAttribution>,
+    #[serde(default)]
+    pub word_attributions: Vec<parakeet_domain::word_timing::WordAttribution>,
     pub unmapped_corrected_segments: Vec<String>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -308,6 +310,12 @@ impl LibraryService {
         }
         let intervals = latest.into_values().flatten().collect::<Vec<_>>();
         d.attributions = parakeet_domain::reconciliation::reconcile(&d.segments, &intervals);
+        d.word_attributions = parakeet_domain::word_timing::reconcile_words(
+            &d.segments,
+            &intervals,
+            &d.attributions,
+            &d.tracks,
+        );
         Ok(d)
     }
     pub async fn tracks(&self, id: &str) -> Result<Vec<Value>, InspectTracksError> {
@@ -352,6 +360,8 @@ impl LibraryService {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelInfo {
+    #[serde(default)]
+    pub experimental_word_timestamps: bool,
     pub id: String,
     pub category: String,
     pub revision: String,
@@ -564,6 +574,7 @@ impl MediaService {
 }
 
 pub mod evaluation;
+pub mod scoring;
 
 #[async_trait]
 pub trait AudioPlayback: Send + Sync {

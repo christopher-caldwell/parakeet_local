@@ -99,6 +99,7 @@ struct Workbench {
     speaker_mode: SpeakerMode,
     show_location_tools: bool,
     show_run_history: bool,
+    show_word_evidence: bool,
     records: Vec<Recording>,
     detail: Option<RecordingDetail>,
     profiles: Vec<SpeakerProfile>,
@@ -427,7 +428,7 @@ impl Workbench {
             cx,
         );
     }
-    fn process(&mut self, diarize: bool, cx: &mut Context<Self>) {
+    fn process(&mut self, diarize: bool, word_timestamps: bool, cx: &mut Context<Self>) {
         let Some(d) = &self.detail else {
             return;
         };
@@ -448,6 +449,7 @@ impl Workbench {
             .into(),
             start_ms: 0,
             duration_ms: None,
+            word_timestamps,
         };
         self.task(
             "Processing locally; navigation remains available",
@@ -677,7 +679,16 @@ impl Render for Workbench {
                         cx.listener(move |this, _, window, cx| this.open(id.clone(), window, cx)),
                     ));
                 }
-                let mut reader = div().flex_1().min_w_0().h_full().flex().flex_col().gap_3();
+                let mut reader = div()
+                    .flex_1()
+                    .min_w_0()
+                    .min_h_0()
+                    .h_full()
+                    .id("library-reader")
+                    .overflow_y_scroll()
+                    .flex()
+                    .flex_col()
+                    .gap_3();
                 if let Some(d) = &self.detail {
                     let id = d.recording.id.clone();
                     reader = reader
@@ -877,17 +888,19 @@ impl Render for Workbench {
                                 .flex()
                                 .gap_2()
                                 .child(button("transcribe", "Transcribe selected source").on_click(
-                                    cx.listener(|this, _, _, cx| this.process(false, cx)),
+                                    cx.listener(|this, _, _, cx| this.process(false, false, cx)),
                                 ))
                                 .child(button("diarize", "Diarize selected source").on_click(
-                                    cx.listener(|this, _, _, cx| this.process(true, cx)),
+                                    cx.listener(|this, _, _, cx| this.process(true, false, cx)),
                                 )),
-                        );
+                        )
+                        .child(button("word-evidence", if self.show_word_evidence { "Hide word timing and original evidence" } else { "Show word timing and original evidence" }).on_click(cx.listener(|this,_,_,cx|{this.show_word_evidence = !this.show_word_evidence;cx.notify();})))
+                        .when(self.show_word_evidence, |reader| reader
+                            .child(button("transcribe-estimated-words", "Transcribe with experimental word timing").on_click(cx.listener(|this,_,_,cx|this.process(false,true,cx))))
+                            .child("Word times are model estimates. Ambiguous speech stays Unknown; corrections remain attached to original segments. Evidence previews show up to 100 original words per segment."));
                     let mut transcript = div()
-                        .flex_1()
-                        .min_h_0()
+                        .flex_shrink_0()
                         .id("transcript")
-                        .overflow_y_scroll()
                         .flex()
                         .flex_col()
                         .gap_3();
@@ -966,9 +979,49 @@ impl Render for Workbench {
                                     }
                                 )))
                                 .child(words)
+                                .when(self.show_word_evidence, |row| {
+                                    let evidence = d
+                                        .word_attributions
+                                        .iter()
+                                        .filter(|w| w.segment_id == s.id)
+                                        .take(100)
+                                        .map(|w| {
+                                            let timing = match (w.word.start_ms, w.word.end_ms) {
+                                                (Some(a), Some(b)) => format!(
+                                                    "{:.2}–{:.2}s",
+                                                    a as f64 / 1000.,
+                                                    b as f64 / 1000.
+                                                ),
+                                                _ => "untimed".into(),
+                                            };
+                                            let voice = if w.attribution.state
+                                                == "anonymous_model_attribution"
+                                            {
+                                                w.attribution
+                                                    .anonymous_speakers
+                                                    .iter()
+                                                    .map(|id| anonymous_label(id))
+                                                    .collect::<Vec<_>>()
+                                                    .join(", ")
+                                            } else {
+                                                "Unknown".into()
+                                            };
+                                            format!("{} [{timing}; {voice}]", w.word.text)
+                                        })
+                                        .collect::<Vec<_>>()
+                                        .join(" · ");
+                                    row.child(div().text_sm().text_color(rgb(0x99aebc)).child(
+                                        if evidence.is_empty() {
+                                            "No word timing evidence for this segment".into()
+                                        } else {
+                                            format!("Original estimated words: {evidence}")
+                                        },
+                                    ))
+                                })
                                 .child(
                                     div()
                                         .flex()
+                                        .flex_wrap()
                                         .gap_2()
                                         .child(
                                             button(
@@ -2434,6 +2487,7 @@ fn main() -> anyhow::Result<()> {
                         speaker_mode: SpeakerMode::Profiles,
                         show_location_tools: false,
                         show_run_history: false,
+                        show_word_evidence: false,
                         records,
                         detail: None,
                         profiles,

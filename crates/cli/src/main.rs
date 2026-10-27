@@ -223,6 +223,9 @@ struct ProcessArgs {
     start_ms: i64,
     #[arg(long)]
     duration_ms: Option<i64>,
+    /// Preserve experimental model-estimated word timing; does not force speaker identity.
+    #[arg(long)]
+    word_timestamps: bool,
 }
 impl ProcessArgs {
     fn request(self) -> ProcessRequest {
@@ -232,6 +235,7 @@ impl ProcessArgs {
             model: self.model,
             start_ms: self.start_ms,
             duration_ms: self.duration_ms,
+            word_timestamps: self.word_timestamps,
         }
     }
 }
@@ -395,6 +399,12 @@ enum Media {
 }
 #[derive(Subcommand)]
 enum Benchmark {
+    ScoreSpeakers {
+        reference: PathBuf,
+        prediction: PathBuf,
+        #[arg(long, default_value = "english_case_punctuation")]
+        normalization: String,
+    },
     Run {
         suite: PathBuf,
     },
@@ -645,27 +655,47 @@ async fn execute(cli: Cli) -> anyhow::Result<Value> {
             command: Media::Inspect { url },
         } => return Ok(media.inspect(url).await?),
         Command::Benchmark {
-            command: Benchmark::Score { .. } | Benchmark::Report { .. },
+            command:
+                Benchmark::Score { .. } | Benchmark::ScoreSpeakers { .. } | Benchmark::Report { .. },
         } => {
             return match &cli.command {
                 Command::Benchmark { command } => match command {
+                    Benchmark::ScoreSpeakers {
+                        reference,
+                        prediction,
+                        normalization,
+                    } => value(
+                        parakeet_application::scoring::ScoringService::new(Arc::new(
+                            parakeet_infrastructure::evaluation::EvaluationFiles {
+                                root: root.join("evaluations"),
+                            },
+                        ))
+                        .speaker_words(parakeet_application::scoring::ScoreSpeakerWordsInput {
+                            reference: reference.clone(),
+                            prediction: prediction.clone(),
+                            normalization: normalization.clone(),
+                        })
+                        .await?,
+                    ),
                     Benchmark::Score {
                         reference,
                         prediction,
                         collar_ms,
                         ignore_overlap,
-                    } => {
-                        let r: Vec<SpeakerInterval> =
-                            serde_json::from_slice(&tokio::fs::read(reference).await?)?;
-                        let h: Vec<SpeakerInterval> =
-                            serde_json::from_slice(&tokio::fs::read(prediction).await?)?;
-                        value(parakeet_domain::evaluation::score_diarization(
-                            &r,
-                            &h,
-                            *collar_ms,
-                            !ignore_overlap,
-                        )?)
-                    }
+                    } => value(
+                        parakeet_application::scoring::ScoringService::new(Arc::new(
+                            parakeet_infrastructure::evaluation::EvaluationFiles {
+                                root: root.join("evaluations"),
+                            },
+                        ))
+                        .diarization(parakeet_application::scoring::ScoreDiarizationInput {
+                            reference: reference.clone(),
+                            prediction: prediction.clone(),
+                            collar_ms: *collar_ms,
+                            score_overlap: !ignore_overlap,
+                        })
+                        .await?,
+                    ),
                     Benchmark::Report { path } => {
                         Ok(serde_json::from_slice(&tokio::fs::read(path).await?)?)
                     }
@@ -987,6 +1017,7 @@ async fn execute(cli: Cli) -> anyhow::Result<Value> {
                         model: "selected-diarization".into(),
                         start_ms,
                         duration_ms,
+                        word_timestamps: false,
                     })
                     .await?,
             ),
@@ -1237,6 +1268,7 @@ fn kind(error: &anyhow::Error) -> &'static str {
         macro_rules! classify {($($type:ty),*)=>{$(if let Some(error)=cause.downcast_ref::<$type>(){let kind=error.kind();if kind!="nested"{return kind;}})*};}
         classify!(
             ImportRecordingsError,
+            parakeet_application::scoring::ScoreEvaluationError,
             parakeet_application::audio_locations::FingerprintAudioError,
             parakeet_application::audio_locations::RelinkAudioError,
             ListRecordingsError,

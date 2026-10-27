@@ -107,6 +107,7 @@ impl LibraryQueries for SqliteStore {
             runs,
             corrections,
             attributions: vec![],
+            word_attributions: vec![],
             unmapped_corrected_segments: vec![],
         };
         tx.commit().await.map_err(PersistenceError::new)?;

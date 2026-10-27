@@ -23,6 +23,8 @@ pub struct ProcessRequest {
     pub model: String,
     pub start_ms: i64,
     pub duration_ms: Option<i64>,
+    #[serde(default)]
+    pub word_timestamps: bool,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EngineOutput {
@@ -140,6 +142,12 @@ impl ProcessingService {
             return Err(ProcessingError::Unavailable(track.path.clone()));
         }
         let model = self.models.readiness(&request.model).await?;
+        if request.word_timestamps && !model.experimental_word_timestamps {
+            return Err(ValidationError(
+                "selected model does not support experimental word timestamps".into(),
+            )
+            .into());
+        }
         if retry_of.is_some_and(|old| old.model_revision != model.revision) {
             return Err(ProcessingError::Conflict("model revision changed; start an explicit new transcription instead of retrying old settings".into()));
         }
@@ -270,6 +278,7 @@ impl ProcessingService {
                     model: model.into(),
                     start_ms: 0,
                     duration_ms: None,
+                    word_timestamps: false,
                 })
                 .await
             {

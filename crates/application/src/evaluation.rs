@@ -99,6 +99,7 @@ impl EvaluationService {
                     model: model.clone(),
                     start_ms: 0,
                     duration_ms: None,
+                    word_timestamps: false,
                 };
                 let result = match self.processing.run(request).await {
                     Ok(run) => {

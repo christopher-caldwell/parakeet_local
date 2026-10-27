@@ -7,6 +7,39 @@ use std::path::{Path, PathBuf};
 pub struct EvaluationFiles {
     pub root: PathBuf,
 }
+async fn bounded_input(path: &Path) -> Result<Vec<u8>, CapabilityError> {
+    use tokio::io::AsyncReadExt;
+    const LIMIT: usize = 8 * 1024 * 1024;
+    let file = tokio::fs::File::open(path)
+        .await
+        .map_err(CapabilityError::new)?;
+    let mut bytes = Vec::new();
+    file.take((LIMIT + 1) as u64)
+        .read_to_end(&mut bytes)
+        .await
+        .map_err(CapabilityError::new)?;
+    if bytes.len() > LIMIT {
+        return Err(CapabilityError::message("scoring input exceeds 8 MiB"));
+    }
+    Ok(bytes)
+}
+#[async_trait]
+impl parakeet_application::scoring::ScoringInputReader for EvaluationFiles {
+    async fn speaker_transcript(
+        &self,
+        path: &Path,
+    ) -> Result<parakeet_application::scoring::SpeakerTranscriptEvidence, CapabilityError> {
+        use sha2::{Digest, Sha256};
+        let bytes = bounded_input(path).await?;
+        Ok(parakeet_application::scoring::SpeakerTranscriptEvidence {
+            transcript: serde_json::from_slice(&bytes).map_err(CapabilityError::new)?,
+            sha256: format!("{:x}", Sha256::digest(&bytes)),
+        })
+    }
+    async fn intervals(&self, path: &Path) -> Result<Vec<SpeakerInterval>, CapabilityError> {
+        serde_json::from_slice(&bounded_input(path).await?).map_err(CapabilityError::new)
+    }
+}
 #[async_trait]
 impl EvaluationArtifacts for EvaluationFiles {
     async fn load_suite(&self, path: &Path) -> Result<EvaluationSuite, CapabilityError> {

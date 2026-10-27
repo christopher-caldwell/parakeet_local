@@ -148,6 +148,7 @@ impl ModelFiles {
             }
         }
         Ok(ModelInfo {
+            experimental_word_timestamps: id.starts_with("whisper-"),
             id: id.into(),
             category: category.into(),
             revision: revision.into(),

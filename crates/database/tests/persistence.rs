@@ -231,6 +231,7 @@ impl parakeet_application::LocalModels for FixtureModels {
         id: &str,
     ) -> Result<parakeet_application::ModelInfo, parakeet_application::CapabilityError> {
         Ok(parakeet_application::ModelInfo {
+            experimental_word_timestamps: false,
             id: id.into(),
             category: "asr".into(),
             revision: "test".into(),
@@ -311,6 +312,19 @@ async fn invalid_model_output_settles_failed_without_publishing_segments() {
             .unwrap(),
         ),
     );
+    let unsupported = service
+        .run(ProcessRequest {
+            recording_id: "r".into(),
+            track_id: "track".into(),
+            model: "fixture".into(),
+            start_ms: 0,
+            duration_ms: Some(5000),
+            word_timestamps: true,
+        })
+        .await
+        .unwrap_err();
+    assert!(unsupported.to_string().contains("does not support"));
+    assert!(store.detail("r").await.unwrap().unwrap().runs.is_empty());
     assert!(
         service
             .run(ProcessRequest {
@@ -318,7 +332,8 @@ async fn invalid_model_output_settles_failed_without_publishing_segments() {
                 track_id: "track".into(),
                 model: "fixture".into(),
                 start_ms: 0,
-                duration_ms: Some(5000)
+                duration_ms: Some(5000),
+                word_timestamps: false,
             })
             .await
             .is_err()

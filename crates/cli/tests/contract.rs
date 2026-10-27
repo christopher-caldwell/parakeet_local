@@ -162,3 +162,39 @@ fn clipboard_recovery_without_a_journal_does_not_initialize_storage() {
     assert_eq!(result["data"]["restored"], 0);
     assert!(!root.exists());
 }
+
+#[test]
+fn speaker_word_scoring_uses_verified_evidence_without_initializing_storage() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("absent");
+    let reference = tmp.path().join("reference.json");
+    let prediction = tmp.path().join("prediction.json");
+    let mut truth = json!({"dataset":"synthetic fixture","labels":"synthetic","audio_sha256":"ab".repeat(32),"streams":[{"speaker":"a","text":"one three"},{"speaker":"b","text":"two four"}]});
+    let mut hypothesis = json!({"dataset":"synthetic fixture","labels":"model_prediction","audio_sha256":"ab".repeat(32),"streams":[{"speaker":"x","text":"one two"},{"speaker":"y","text":"three four"}]});
+    std::fs::write(&reference, serde_json::to_vec(&truth).unwrap()).unwrap();
+    std::fs::write(&prediction, serde_json::to_vec(&hypothesis).unwrap()).unwrap();
+    let command = [
+        "benchmark",
+        "score-speakers",
+        reference.to_str().unwrap(),
+        prediction.to_str().unwrap(),
+    ];
+    let (code, result) = run(&root, &command);
+    assert_eq!(code, 0);
+    assert_eq!(result["data"]["score"]["cpwer"], 0.5);
+    assert_eq!(result["data"]["score"]["errors"], 2);
+    assert_eq!(
+        result["data"]["reference_sha256"].as_str().unwrap().len(),
+        64
+    );
+    assert!(!root.exists());
+    hypothesis["audio_sha256"] = json!("cd".repeat(32));
+    std::fs::write(&prediction, serde_json::to_vec(&hypothesis).unwrap()).unwrap();
+    assert_eq!(run(&root, &command).0, 2);
+    hypothesis["audio_sha256"] = truth["audio_sha256"].clone();
+    std::fs::write(&prediction, serde_json::to_vec(&hypothesis).unwrap()).unwrap();
+    truth["labels"] = json!("unverified_personal");
+    std::fs::write(&reference, serde_json::to_vec(&truth).unwrap()).unwrap();
+    assert_eq!(run(&root, &command).0, 2);
+    assert!(!root.exists());
+}

@@ -44,3 +44,15 @@ python3 benchmarks/prepare_asr_expanded.py --archive .local/public/librispeech/d
 The VoxConverse filter yields 16 entries, including the earlier three. Set the copied diarization suite's `models` to `["nemotron3-fast128"]` to reproduce the fixed-preset run. Run each ASR model separately in a copied one-model suite to measure reuse across all 24 utterances. Use an explicitly provisioned isolated root with deliberately installed/verified model copies, then `benchmark run SUITE.json`; no benchmark implicitly installs weights. The [expanded numeric report](results/2026-10-27-expanded-public.json) includes hashes, errors, counts and resource measurements; no audio/transcript text is included.
 
 The opt-in Rust cache probe requires `PARAKEET_MODEL_PROBE_ROOT` and `PARAKEET_MODEL_PROBE_AUDIO` as **absolute paths** to disposable model copies and a public audio file. Run `scripts/cargo test -p parakeet-infrastructure --test model_cache -- --ignored --nocapture`. It temporarily removes/restores the copy's verification receipt, checks stable output and waits 75 seconds for idle eviction. Do not point it at a live personal model root. It performs no downloads. Ordinary workspace tests skip this environment-dependent probe; its separate execution is recorded in verification.
+
+## Speaker-attributed word diagnostics
+
+`benchmark score-speakers REFERENCE.json PREDICTION.json` computes anonymous-stream cpWER through the shared application service without database initialization. [Input/protocol and limitations](../docs/speaker-word-evaluation.md) are explicit. For external scorer verification, deliberately install `meeteval==0.4.3` in an isolated Python environment and run `python benchmarks/check_speaker_wer.py --output .local/speaker-wer-oracle.json` using that interpreter. The fixed seed generates 250 cases; no speech/network inference is involved.
+
+```sh
+# Fresh independent roots; explicit APFS clones of already-installed verified models:
+python3 benchmarks/speaker_words_pipeline.py --root .local/speaker-word-eval --models-source .local/app/models --run
+python3 benchmarks/speaker_words_pipeline.py --root .local/speaker-word-estimated --models-source .local/app/models --word-timestamps --run
+```
+
+The preparer refuses an existing database/audio target, makes six different public utterances into two synthetic conversations, and records source placements/hashes. `--word-timestamps` also records the same-ASR segment-attribution baseline, avoiding a recognition-change confound. No words/voices are inferred as reference truth from model predictions. Utterance placements cannot serve as word/speech-alignment ground truth. The small results remain poor and must not be generalized to meetings. No production model choice or personal threshold is silently changed.

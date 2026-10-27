@@ -34,6 +34,7 @@ async fn real_model_reuse_verification_and_idle_expiry() {
         model: "whisper-base.en".into(),
         start_ms: 0,
         duration_ms: Some(track.duration_ms.unwrap().min(20_000)),
+        word_timestamps: false,
     };
     let run = ProcessingRun {
         id: parakeet_application::new_id(),
@@ -62,6 +63,37 @@ async fn real_model_reuse_verification_and_idle_expiry() {
             .map(|s| (&s.text, s.start_ms, s.end_ms))
             .collect::<Vec<_>>()
     );
+    let mut word_request = request.clone();
+    word_request.word_timestamps = true;
+    let word_first = engine.process(&word_request, track, &run).await.unwrap();
+    let word_second = engine.process(&word_request, track, &run).await.unwrap();
+    assert_eq!(word_first.metrics["model_context_reused"], true);
+    assert_eq!(word_second.metrics["model_context_reused"], true);
+    let word_evidence = |output: &EngineOutput| {
+        output
+            .segments
+            .iter()
+            .map(|s| s.evidence["words"].clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(word_evidence(&word_first), word_evidence(&word_second));
+    assert!(word_first.segments.iter().any(|s| {
+        s.evidence["words"]
+            .as_array()
+            .is_some_and(|a| !a.is_empty())
+    }));
+    let segment_again = engine.process(&request, track, &run).await.unwrap();
+    assert_eq!(
+        cold.segments
+            .iter()
+            .map(|s| (&s.text, s.start_ms, s.end_ms))
+            .collect::<Vec<_>>(),
+        segment_again
+            .segments
+            .iter()
+            .map(|s| (&s.text, s.start_ms, s.end_ms))
+            .collect::<Vec<_>>()
+    );
     let embedding = EmbeddingRequest {
         track: track.clone(),
         start_ms: 0,
@@ -85,6 +117,6 @@ async fn real_model_reuse_verification_and_idle_expiry() {
     assert_eq!(eexpired.metrics["model_context_reused"], false);
     println!(
         "{}",
-        json!({"asr_cold":cold.metrics,"asr_warm":warm.metrics,"embedding_cold":ecold.metrics,"embedding_warm":ewarm.metrics,"asr_identical_text_and_times":true,"embedding_cosine_above_0_999999":true,"invalid_verification_refused_while_cached":true,"idle_expiry_tested_seconds":75,"both_models_reloaded_after_expiry":true})
+        json!({"asr_cold":cold.metrics,"asr_warm":warm.metrics,"embedding_cold":ecold.metrics,"embedding_warm":ewarm.metrics,"asr_identical_text_and_times":true,"word_timing_repeat_stable":true,"switching_back_preserves_segment_output":true,"embedding_cosine_above_0_999999":true,"invalid_verification_refused_while_cached":true,"idle_expiry_tested_seconds":75,"both_models_reloaded_after_expiry":true})
     );
 }
