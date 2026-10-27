@@ -26,18 +26,26 @@ enum Area {
     Dictation,
     Privacy,
     Capture,
+    Jobs,
 }
 enum Update {
     Library(Vec<Recording>),
     Detail(RecordingDetail),
     Profiles(Vec<SpeakerProfile>),
     Examples(String, Vec<VoiceExampleSummary>),
-    Candidates(Vec<EnrollmentCandidate>),
+    Candidates(String, Vec<EnrollmentCandidate>),
     RefreshSelected,
     Models(Vec<ModelInfo>),
     DictationStopped(String),
     Dictations(Vec<DictationReceipt>),
     Message(String),
+    Jobs(Vec<ProcessingRun>),
+    Recovered(
+        parakeet_application::jobs::ProcessingRecoveryReport,
+        Vec<ProcessingRun>,
+    ),
+    Suggestions(String, Vec<SpeakerSuggestion>),
+    SuggestionReview(SpeakerSuggestionReview),
     Settings(Vec<gestures::Shortcut>, Vec<PromptProfile>),
     Devices(serde_json::Value),
     Captured(Result<RecordingDetail, String>),
@@ -49,6 +57,13 @@ struct Workbench {
     speakers: Arc<SpeakerService>,
     models: Arc<ModelService>,
     processing: Arc<ProcessingService>,
+    recovery: Arc<parakeet_application::jobs::ProcessingRecoveryService>,
+    pending_jobs: Vec<ProcessingRun>,
+    suggestions: Vec<SpeakerSuggestion>,
+    suggestion_review: Option<SpeakerSuggestionReview>,
+    match_score: Entity<InputState>,
+    match_margin: Entity<InputState>,
+    match_examples: Entity<InputState>,
     settings: Arc<SettingsService>,
     playback: Arc<PlaybackService>,
     capture: Arc<CaptureService>,
@@ -164,7 +179,25 @@ impl Workbench {
                                     this.examples = examples;
                                 }
                             }
-                            Update::Candidates(c) => this.candidates = c,
+                            Update::Candidates(recording,c) => {if this.requested_recording.as_deref()==Some(recording.as_str()){this.candidates = c;}},
+                            Update::Jobs(jobs) => this.pending_jobs = jobs,
+                            Update::Recovered(report, jobs) => {
+                                this.pending_jobs = jobs;
+                                this.status = format!("Recovered {} interrupted jobs; {} active; {} older jobs need manual inspection",report.interrupted.len(),report.active.len(),report.unmanaged.len());
+                                cx.notify(); return;
+                            }
+                            Update::Suggestions(recording, suggestions) => {
+                                if this.requested_recording.as_deref() == Some(recording.as_str()) {this.suggestions=suggestions;}
+                            }
+                            Update::SuggestionReview(review) => {
+                                if this.requested_recording.as_deref() == Some(review.suggestion.recording_id.as_str()) {
+                                    let id=review.suggestion.recording_id.clone();
+                                    if let Some(row)=this.suggestions.iter_mut().find(|r|r.id==review.suggestion.id){*row=review.suggestion.clone();}else{this.suggestions.push(review.suggestion.clone());}
+                                    this.suggestion_review=Some(review);
+                                    let library=this.library.clone();
+                                    this.task("Reloading current transcript",async move {Ok(Update::Detail(library.show(&id).await?))},cx);
+                                }
+                            }
                             Update::RefreshSelected => {
                                 if let Some(id) = this.requested_recording.clone() {
                                     let library = this.library.clone();
@@ -297,6 +330,9 @@ impl Workbench {
     fn open(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
         self.area = Area::Library;
         self.detail = None;
+        self.suggestions.clear();
+        self.suggestion_review = None;
+        self.candidates.clear();
         self.selected_track = None;
         self.segment_page = 0;
         self.requested_recording = Some(id.clone());
@@ -431,6 +467,7 @@ impl Render for Workbench {
                     (Area::Library, "Library"),
                     (Area::Capture, "Record"),
                     (Area::Speakers, "Speakers"),
+                    (Area::Jobs, "Processing jobs"),
                     (Area::Models, "Local models"),
                     (Area::Dictation, "Dictation"),
                     (Area::Privacy, "Privacy & routes"),
@@ -441,6 +478,14 @@ impl Render for Workbench {
                     button(("nav", i), label).on_click(cx.listener(move |this, _, _, cx| {
                         this.area = area;
                         match area {
+                            Area::Jobs => {
+                                let service = this.recovery.clone();
+                                this.task(
+                                    "Inspecting pending jobs",
+                                    async move { Ok(Update::Jobs(service.pending().await?)) },
+                                    cx,
+                                );
+                            }
                             Area::Capture => {
                                 let capture = this.audio_inspection.clone();
                                 this.task(
@@ -457,7 +502,10 @@ impl Render for Workbench {
                                     this.task(
                                         "Preparing clean enrollment candidates",
                                         async move {
-                                            Ok(Update::Candidates(service.candidates(&id).await?))
+                                            Ok(Update::Candidates(
+                                                id.clone(),
+                                                service.candidates(&id).await?,
+                                            ))
                                         },
                                         cx,
                                     );
@@ -640,13 +688,44 @@ impl Render for Workbench {
                                     .replace('_', " "),
                                 d.runs.len()
                             )));
-                    for run in d.runs.iter().rev().take(3) {
-                        reader = reader.child(
-                            div()
-                                .text_sm()
-                                .child(format!("{} · {} · {}", run.kind, run.model, run.status))
-                                .when_some(run.error.clone(), |row, error| row.child(error)),
-                        );
+                    for run in d.runs.iter().rev().take(5) {
+                        let retry_id = run.id.clone();
+                        reader =
+                            reader.child(
+                                div()
+                                    .text_sm()
+                                    .child(format!("{} · {} · {}", run.kind, run.model, run.status))
+                                    .when_some(run.error.clone(), |row, error| row.child(error))
+                                    .when(
+                                        ["failed", "interrupted"].contains(&run.status.as_str())
+                                            && run.configuration["request"].is_object(),
+                                        |row| {
+                                            row.child(
+                                                button(
+                                                    format!("retry-{}", run.id),
+                                                    "Retry as new processing run",
+                                                )
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    let processing = this.processing.clone();
+                                                    let id = retry_id.clone();
+                                                    let library = this.library.clone();
+                                                    this.task(
+                                                        "Retrying retained audio",
+                                                        async move {
+                                                            let run = processing.retry(&id).await?;
+                                                            Ok(Update::Detail(
+                                                                library
+                                                                    .show(&run.recording_id)
+                                                                    .await?,
+                                                            ))
+                                                        },
+                                                        cx,
+                                                    );
+                                                })),
+                                            )
+                                        },
+                                    ),
+                            );
                     }
                     if !d.unmapped_corrected_segments.is_empty() {
                         reader=reader.child(format!("{} corrected intervals belong to earlier processing runs; preserved for review",d.unmapped_corrected_segments.len()));
@@ -1171,6 +1250,37 @@ impl Render for Workbench {
                                         })),
                                 ),
                         );
+                }
+                content = content.child(self.suggestion_panel(cx));
+            }
+            Area::Jobs => {
+                content=content.child(div().text_xl().child("Processing ownership and recovery"))
+                    .child("Inspection is read-only. Recovery interrupts abandoned jobs only when their ownership lock is free. Active and older unmanaged runs are preserved.")
+                    .child(button("refresh-jobs","Refresh pending jobs").on_click(cx.listener(|this,_,_,cx|{let service=this.recovery.clone();this.task("Reading pending jobs",async move{Ok(Update::Jobs(service.pending().await?))},cx); })))
+                    .child(button("recover-jobs","Recover abandoned processing jobs").on_click(cx.listener(|this,_,_,cx|{let service=this.recovery.clone();this.task("Recovering abandoned jobs",async move{let report=service.recover().await?;Ok(Update::Recovered(report,service.pending().await?))},cx); })))
+                    .child(format!("{} pending runs. Open a recording to retry an interrupted or failed run.",self.pending_jobs.len()));
+                for run in &self.pending_jobs {
+                    let recording = self
+                        .records
+                        .iter()
+                        .find(|r| r.id == run.recording_id)
+                        .map(|r| r.title())
+                        .unwrap_or(run.recording_id.as_str());
+                    content = content.child(div().p_3().bg(rgb(0x1c2933)).child(format!(
+                        "{} · {} · {} · started {} · {} · run {}",
+                        recording,
+                        run.kind,
+                        run.model,
+                        run.started_at,
+                        if run.configuration["ownership_protocol"]
+                            == parakeet_application::jobs::OWNERSHIP_PROTOCOL
+                        {
+                            "ownership-aware"
+                        } else {
+                            "older run: ownership unknown"
+                        },
+                        run.id
+                    )));
                 }
             }
             Area::Models => {
@@ -1993,11 +2103,23 @@ fn main() -> anyhow::Result<()> {
         engine.clone(),
         models.clone(),
     ));
+    let ownership = Arc::new(
+        parakeet_infrastructure::jobs::FileProcessingOwnership::for_database(
+            &root.join("parakeet.db"),
+        )?,
+    );
     let processing = Arc::new(ProcessingService::new(
         store.clone(),
         store.clone(),
         models.clone(),
         engine,
+        store.clone(),
+        ownership.clone(),
+    ));
+    let recovery = Arc::new(parakeet_application::jobs::ProcessingRecoveryService::new(
+        store.clone(),
+        store.clone(),
+        ownership,
     ));
     let settings = Arc::new(SettingsService::new(
         store.clone(),
@@ -2108,6 +2230,9 @@ fn main() -> anyhow::Result<()> {
                     });
                     let profile_executable = input(window, cx, "", "/absolute/path/to/cli");
                     let profile_arguments = input(window, cx, "[]", "Arguments");
+                    let match_score = input(window, cx, "", "Minimum similarity (-1 to 1)");
+                    let match_margin = input(window, cx, "", "Minimum separation");
+                    let match_examples = input(window, cx, "", "Verified reference count");
                     let focus = cx.focus_handle();
                     let view = cx.new(|_| Workbench {
                         runtime,
@@ -2116,6 +2241,13 @@ fn main() -> anyhow::Result<()> {
                         speakers,
                         models,
                         processing,
+                        recovery,
+                        pending_jobs: vec![],
+                        suggestions: vec![],
+                        suggestion_review: None,
+                        match_score,
+                        match_margin,
+                        match_examples,
                         settings,
                         playback,
                         capture,
@@ -2219,4 +2351,256 @@ fn main() -> anyhow::Result<()> {
         cx.activate(true);
     });
     Ok(())
+}
+
+impl Workbench {
+    fn compare_interval(&mut self, cx: &mut Context<Self>) {
+        let Some(recording_id) = self.detail.as_ref().map(|d| d.recording.id.clone()) else {
+            self.status = "Open a recording first".into();
+            cx.notify();
+            return;
+        };
+        let Some(track_id) = self.selected_track.clone() else {
+            self.status = "Choose a source first".into();
+            cx.notify();
+            return;
+        };
+        let (start_ms, end_ms) = match self.range(cx) {
+            Ok(r) => r,
+            Err(e) => {
+                self.status = e;
+                cx.notify();
+                return;
+            }
+        };
+        let policy = match (
+            self.match_score.read(cx).value().parse::<f64>(),
+            self.match_margin.read(cx).value().parse::<f64>(),
+            self.match_examples.read(cx).value().parse::<usize>(),
+        ) {
+            (Ok(minimum_score), Ok(minimum_margin), Ok(minimum_examples)) => {
+                parakeet_domain::recognition::MatchPolicy {
+                    minimum_score,
+                    minimum_margin,
+                    minimum_examples,
+                }
+            }
+            _ => {
+                self.status="Enter an explicit similarity, separation, and reference count; no personal threshold has been approved".into();
+                cx.notify();
+                return;
+            }
+        };
+        let service = self.speakers.clone();
+        self.task(
+            "Comparing voices locally; no enrollment",
+            async move {
+                let suggestion = service
+                    .suggest(SuggestSpeakerInput {
+                        recording_id,
+                        track_id,
+                        start_ms,
+                        end_ms,
+                        policy,
+                    })
+                    .await?;
+                Ok(Update::SuggestionReview(
+                    service.review_suggestion(&suggestion.id).await?,
+                ))
+            },
+            cx,
+        );
+    }
+    fn resolve_review(&mut self, action: &str, segment_id: Option<String>, cx: &mut Context<Self>) {
+        let Some(review) = &self.suggestion_review else {
+            return;
+        };
+        let input = ResolveSuggestionInput {
+            id: review.suggestion.id.clone(),
+            action: action.into(),
+            segment_id,
+            profile_id: self.selected_profile.clone(),
+        };
+        let service = self.speakers.clone();
+        self.task(
+            "Saving reversible identity decision; no enrollment",
+            async move {
+                service.resolve_suggestion(input.clone()).await?;
+                Ok(Update::SuggestionReview(
+                    service.review_suggestion(&input.id).await?,
+                ))
+            },
+            cx,
+        );
+    }
+    fn suggestion_panel(&self, cx: &mut Context<Self>) -> Div {
+        let mut panel=div().flex().flex_col().gap_2().mt_4()
+            .child(div().text_xl().child("Identity comparisons"))
+            .child("Comparisons are predictions. Listen before confirming a transcript identity. Confirmation never adds a voice reference.");
+        let Some(detail) = &self.detail else {
+            return panel.child("Open a recording in Library to compare or review its voices.");
+        };
+        let recording_id = detail.recording.id.clone();
+        panel=panel.child(format!("Recording: {} · prepared source: {}",detail.recording.title(),self.selected_track.as_deref().and_then(|id|detail.tracks.iter().find(|t|t.id==id)).map(|t|format!("{:?}",t.kind)).unwrap_or_else(||"none".into())))
+            .child("Track-local start/end in milliseconds")
+            .child(div().flex().flex_wrap().gap_2().child(field(&self.start)).child(field(&self.end)))
+            .child("Explicit comparison policy: similarity, separation from next person, verified reference count")
+            .child(div().flex().flex_wrap().gap_2()
+                .child(div().flex().flex_col().child("Similarity").child(field(&self.match_score)))
+                .child(div().flex().flex_col().child("Separation").child(field(&self.match_margin)))
+                .child(div().flex().flex_col().child("Reference count").child(field(&self.match_examples))))
+            .child(button("compare-voice","Compare prepared interval").on_click(cx.listener(|this,_,_,cx|this.compare_interval(cx))))
+            .child(button("load-suggestions","Load saved comparisons for this recording").on_click(cx.listener(move |this,_,_,cx|{
+                let service=this.speakers.clone();let id=recording_id.clone();
+                this.task("Reading saved comparison evidence",async move{Ok(Update::Suggestions(id.clone(),service.suggestions(Some(&id)).await?))},cx);
+            })));
+        for suggestion in self.suggestions.iter().rev().take(20) {
+            let id = suggestion.id.clone();
+            let name = suggestion
+                .decision
+                .suggested_profile
+                .as_ref()
+                .and_then(|id| self.profiles.iter().find(|p| &p.id == id))
+                .map(|p| p.name.as_str())
+                .unwrap_or("Unknown");
+            panel = panel.child(
+                button(
+                    format!("review-{}", suggestion.id),
+                    format!(
+                        "Review {name} · {:.1}–{:.1}s · {}",
+                        suggestion.start_ms as f64 / 1000.,
+                        suggestion.end_ms as f64 / 1000.,
+                        suggestion.created_at
+                    ),
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    let service = this.speakers.clone();
+                    let id = id.clone();
+                    this.task(
+                        "Reading comparison and covered speech",
+                        async move {
+                            Ok(Update::SuggestionReview(
+                                service.review_suggestion(&id).await?,
+                            ))
+                        },
+                        cx,
+                    );
+                })),
+            );
+        }
+        if self.suggestions.len() > 20 {
+            panel = panel.child("Showing the 20 latest comparisons; CLI can inspect all receipts.");
+        }
+        let Some(review) = &self.suggestion_review else {
+            return panel;
+        };
+        let suggestion = &review.suggestion;
+        let resolved = suggestion
+            .resolutions
+            .last()
+            .is_some_and(|r| r.action != "undo");
+        panel = panel
+            .child(div().text_lg().child(format!(
+                "Selected comparison · {}",
+                suggestion.decision.reason.replace('_', " ")
+            )))
+            .child(format!(
+                "Policy {:.3} similarity / {:.3} separation / {} references · {}",
+                suggestion.policy.minimum_score,
+                suggestion.policy.minimum_margin,
+                suggestion.policy.minimum_examples,
+                if resolved { "resolved" } else { "unresolved" }
+            ));
+        for candidate in &suggestion.decision.candidates {
+            let name = self
+                .profiles
+                .iter()
+                .find(|p| p.id == candidate.profile_id)
+                .map(|p| p.name.as_str())
+                .unwrap_or("Deleted profile");
+            panel=panel.child(format!("Candidate {name} · similarity {:.3} · {} compatible verified references (similarity is not a probability)",candidate.score,candidate.examples));
+        }
+        let play = PlayAudioInput {
+            recording_id: suggestion.recording_id.clone(),
+            track_id: suggestion.track_id.clone(),
+            start_ms: suggestion.start_ms,
+            duration_ms: suggestion.end_ms - suggestion.start_ms,
+        };
+        panel = panel.child(
+            button("play-comparison", "Play comparison evidence").on_click(cx.listener(
+                move |this, _, _, cx| {
+                    let service = this.playback.clone();
+                    let input = play.clone();
+                    this.task(
+                        "Playing compared source interval",
+                        async move {
+                            service.play(input).await?;
+                            Ok(Update::Message("Comparison playback complete".into()))
+                        },
+                        cx,
+                    );
+                },
+            )),
+        );
+        if resolved {
+            return panel.child(
+                button("undo-comparison", "Undo comparison decision")
+                    .on_click(cx.listener(|this, _, _, cx| this.resolve_review("undo", None, cx))),
+            );
+        }
+        panel = panel.child(
+            button("reject-comparison", "Reject this comparison")
+                .on_click(cx.listener(|this, _, _, cx| this.resolve_review("reject", None, cx))),
+        );
+        if review.eligible_segments.is_empty() {
+            panel=panel.child("No current transcript segment is fully covered by this evidence. Keep the comparison or choose another interval; individual manual corrections remain in the reader.");
+        }
+        for segment in &review.eligible_segments {
+            let accept = segment.id.clone();
+            let replace = segment.id.clone();
+            let mut row = div()
+                .p_3()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .bg(rgb(0x1c2933))
+                .child(segment.text.clone())
+                .child(if segment.evidence["uncertain_speech"] == true {
+                    "ASR flagged uncertain speech. Listen before attributing these words."
+                } else {
+                    "Model transcript; identity confirmation does not verify every word."
+                });
+            if suggestion.decision.suggested_profile.is_some() {
+                row = row.child(
+                    button(
+                        format!("accept-comparison-{}", segment.id),
+                        "I listened — confirm proposed identity for this speech",
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.resolve_review("accept", Some(accept.clone()), cx)
+                    })),
+                );
+            }
+            if self.selected_profile.is_some() {
+                row = row.child(
+                    button(
+                        format!("replace-comparison-{}", segment.id),
+                        format!(
+                            "I listened — assign {} to this speech",
+                            self.selected_profile
+                                .as_ref()
+                                .and_then(|id| self.profiles.iter().find(|p| &p.id == id))
+                                .map(|p| p.name.as_str())
+                                .unwrap_or("selected person")
+                        ),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.resolve_review("replace", Some(replace.clone()), cx)
+                    })),
+                );
+            }
+            panel = panel.child(row);
+        }
+        panel
+    }
 }

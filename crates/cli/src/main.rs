@@ -36,6 +36,10 @@ struct Cli {
 }
 #[derive(Subcommand)]
 enum Command {
+    Jobs {
+        #[command(subcommand)]
+        command: Jobs,
+    },
     Doctor,
     Db {
         #[command(subcommand)]
@@ -83,6 +87,12 @@ enum Command {
         #[command(subcommand)]
         command: Benchmark,
     },
+}
+#[derive(Subcommand)]
+enum Jobs {
+    Pending,
+    Recover,
+    Retry { id: String },
 }
 #[derive(Subcommand)]
 enum Dictation {
@@ -213,6 +223,9 @@ impl ProcessArgs {
 }
 #[derive(Subcommand)]
 enum Speakers {
+    ReviewSuggestion {
+        id: String,
+    },
     SplitCluster {
         recording: String,
         run: String,
@@ -424,7 +437,9 @@ fn writes(command: &Command) -> bool {
     }
     matches!(
         command,
-        Command::Meetings {
+        Command::Jobs {
+            command: Jobs::Recover | Jobs::Retry { .. }
+        } | Command::Meetings {
             command: Meetings::Import { dry_run: false, .. }
                 | Meetings::ImportSourceDb { dry_run: false, .. }
                 | Meetings::Rename { .. }
@@ -644,11 +659,20 @@ async fn execute(cli: Cli) -> anyhow::Result<Value> {
     let store = Arc::new(SqliteStore::new(pool.clone()));
     let library = LibraryService::new(store.clone(), store.clone(), source.clone());
     let engine = Arc::new(LocalSpeech::new(models.clone(), model_runtime_executable()));
+    let ownership =
+        Arc::new(parakeet_infrastructure::jobs::FileProcessingOwnership::for_database(&database)?);
+    let recovery = parakeet_application::jobs::ProcessingRecoveryService::new(
+        store.clone(),
+        store.clone(),
+        ownership.clone(),
+    );
     let processing = Arc::new(ProcessingService::new(
         store.clone(),
         store.clone(),
         models.clone(),
         engine.clone(),
+        store.clone(),
+        ownership.clone(),
     ));
     let speakers = SpeakerService::new(
         store.clone(),
@@ -663,6 +687,11 @@ async fn execute(cli: Cli) -> anyhow::Result<Value> {
         Arc::new(AuthorizedCli),
     ));
     let result = match cli.command {
+        Command::Jobs { command } => match command {
+            Jobs::Pending => value(recovery.pending().await?),
+            Jobs::Recover => value(recovery.recover().await?),
+            Jobs::Retry { id } => value(processing.retry(&id).await?),
+        },
         Command::Meetings { command } => match command {
             Meetings::ImportSourceDb { path, dry_run } => value(
                 LegacyImportService::new(
@@ -844,6 +873,7 @@ async fn execute(cli: Cli) -> anyhow::Result<Value> {
         ),
         Command::Transcribe(args) => value(processing.run(args.request()).await?),
         Command::Speakers { command } => match command {
+            Speakers::ReviewSuggestion { id } => value(speakers.review_suggestion(&id).await?),
             Speakers::Candidates { meeting } => value(speakers.candidates(&meeting).await?),
             Speakers::List => value(speakers.profiles().await?),
             Speakers::Create { name } => value(speakers.create(&name).await?),
@@ -972,6 +1002,7 @@ async fn execute(cli: Cli) -> anyhow::Result<Value> {
                 parakeet_application::cluster_edits::ClusterEditingService::new(
                     store.clone(),
                     store.clone(),
+                    ownership.clone(),
                 )
                 .edit(parakeet_application::cluster_edits::EditClustersInput {
                     recording_id: recording,
@@ -991,6 +1022,7 @@ async fn execute(cli: Cli) -> anyhow::Result<Value> {
                 parakeet_application::cluster_edits::ClusterEditingService::new(
                     store.clone(),
                     store.clone(),
+                    ownership.clone(),
                 )
                 .edit(parakeet_application::cluster_edits::EditClustersInput {
                     recording_id: recording,
@@ -1003,6 +1035,7 @@ async fn execute(cli: Cli) -> anyhow::Result<Value> {
                 parakeet_application::cluster_edits::ClusterEditingService::new(
                     store.clone(),
                     store.clone(),
+                    ownership.clone(),
                 )
                 .edit(parakeet_application::cluster_edits::EditClustersInput {
                     recording_id: recording,
@@ -1144,8 +1177,12 @@ fn kind(error: &anyhow::Error) -> &'static str {
             SelectEmbeddingModelError,
             SelectedModelsError,
             TranscribeRecordingError,
+            RetryProcessingError,
+            parakeet_application::jobs::ListProcessingJobsError,
+            parakeet_application::jobs::RecoverProcessingJobsError,
             ListSpeakersError,
             ListSuggestionsError,
+            ReviewSuggestionError,
             parakeet_application::cluster_edits::EditClustersError,
             ResolveSuggestionError,
             ListVoiceExamplesError,
@@ -1185,6 +1222,7 @@ fn kind(error: &anyhow::Error) -> &'static str {
             return match error {
                 ProcessingError::NotFound(_) => "not_found",
                 ProcessingError::Unavailable(_) => "source",
+                ProcessingError::Conflict(_) => "conflict",
                 ProcessingError::Invalid(_) => "invalid_input",
                 ProcessingError::Persistence(_) => "persistence",
                 ProcessingError::Engine(_) => "model",

@@ -524,9 +524,71 @@ pub struct ResolveSuggestionInput {
     pub segment_id: Option<String>,
     pub profile_id: Option<String>,
 }
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpeakerSuggestionReview {
+    pub suggestion: SpeakerSuggestion,
+    pub eligible_segments: Vec<TranscriptSegment>,
+}
+operation_error!(ReviewSuggestionError,sources{Persistence:PersistenceError=>"persistence"},values{NotFound=>"not_found"});
+fn covered_by_suggestion(
+    segment: &TranscriptSegment,
+    detail: &RecordingDetail,
+    suggestion: &SpeakerSuggestion,
+) -> bool {
+    if segment.recording_id != suggestion.recording_id
+        || segment.track_id.as_ref() != Some(&suggestion.track_id)
+    {
+        return false;
+    }
+    let offset = detail
+        .tracks
+        .iter()
+        .find(|t| t.id == suggestion.track_id)
+        .and_then(AudioTrack::meeting_offset_ms);
+    let start = segment.evidence["local_start_ms"].as_i64().or_else(|| {
+        segment
+            .start_ms
+            .zip(offset)
+            .and_then(|(t, o)| t.checked_sub(o))
+    });
+    let end = segment.evidence["local_end_ms"].as_i64().or_else(|| {
+        segment
+            .end_ms
+            .zip(offset)
+            .and_then(|(t, o)| t.checked_sub(o))
+    });
+    matches!((start,end),(Some(start),Some(end)) if start>=suggestion.start_ms && end<=suggestion.end_ms && end>start)
+}
 operation_error!(ListSuggestionsError,sources{Persistence:PersistenceError=>"persistence"},values{});
 operation_error!(ResolveSuggestionError,sources{Persistence:PersistenceError=>"persistence",Invalid:ValidationError=>"invalid_input"},values{NotFound=>"not_found",Conflict=>"conflict"});
 impl SpeakerService {
+    /// Only current transcript segments fully covered by the compared source
+    /// interval are offered. UI and resolution use the same evidence rule.
+    pub async fn review_suggestion(
+        &self,
+        id: &str,
+    ) -> Result<SpeakerSuggestionReview, ReviewSuggestionError> {
+        let suggestion = self
+            .queries
+            .suggestion(id)
+            .await?
+            .ok_or_else(|| ReviewSuggestionError::NotFound(id.into()))?;
+        let detail = self
+            .library
+            .detail(&suggestion.recording_id)
+            .await?
+            .ok_or_else(|| ReviewSuggestionError::NotFound(suggestion.recording_id.clone()))?;
+        let eligible_segments = detail
+            .segments
+            .iter()
+            .filter(|s| covered_by_suggestion(s, &detail, &suggestion))
+            .cloned()
+            .collect();
+        Ok(SpeakerSuggestionReview {
+            suggestion,
+            eligible_segments,
+        })
+    }
     pub async fn suggestions(
         &self,
         recording: Option<&str>,
@@ -604,25 +666,7 @@ impl SpeakerService {
                 .detail(&suggestion.recording_id)
                 .await?
                 .ok_or_else(|| ResolveSuggestionError::NotFound(suggestion.recording_id.clone()))?;
-            let offset = detail
-                .tracks
-                .iter()
-                .find(|t| t.id == suggestion.track_id)
-                .and_then(AudioTrack::meeting_offset_ms);
-            let local_start = segment.evidence["local_start_ms"].as_i64().or_else(|| {
-                segment
-                    .start_ms
-                    .zip(offset)
-                    .and_then(|(time, offset)| time.checked_sub(offset))
-            });
-            let local_end = segment.evidence["local_end_ms"].as_i64().or_else(|| {
-                segment
-                    .end_ms
-                    .zip(offset)
-                    .and_then(|(time, offset)| time.checked_sub(offset))
-            });
-            if !matches!((local_start,local_end),(Some(start),Some(end)) if start>=suggestion.start_ms && end<=suggestion.end_ms && end>start)
-            {
+            if !covered_by_suggestion(&segment, &detail, &suggestion) {
                 return Err(ValidationError("suggestion evidence must cover the entire selected segment; listen and use a separate manual assignment for other intervals".into()).into());
             }
             let history = self.queries.corrections(segment_id).await?;

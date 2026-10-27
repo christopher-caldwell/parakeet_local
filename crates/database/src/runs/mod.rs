@@ -1,6 +1,44 @@
 use super::*;
 use async_trait::async_trait;
+use parakeet_application::jobs::{ProcessingQueries, RecoveryWrites};
 use parakeet_application::processing::RunWrites;
+#[async_trait]
+impl ProcessingQueries for SqliteStore {
+    async fn pending_runs(&self) -> Result<Vec<ProcessingRun>, PersistenceError> {
+        sqlx::query_file!("src/runs/pending.sql")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(PersistenceError::new)?
+            .into_iter()
+            .map(|r| decode(&r.data))
+            .collect()
+    }
+    async fn run(&self, id: &str) -> Result<Option<ProcessingRun>, PersistenceError> {
+        sqlx::query_file!("src/runs/get.sql", id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(PersistenceError::new)?
+            .map(|r| decode(&r.data))
+            .transpose()
+    }
+}
+#[async_trait]
+impl RecoveryWrites for SqliteStore {
+    async fn interrupt(&self, run: &ProcessingRun) -> Result<bool, PersistenceError> {
+        if run.status != "interrupted" || run.completed_at.is_none() {
+            return Err(PersistenceError::new(std::io::Error::other(
+                "recovery requires a terminal interrupted result",
+            )));
+        }
+        let data = encode(run)?;
+        Ok(sqlx::query_file!("src/runs/interrupt.sql", run.id, data)
+            .execute(&self.pool)
+            .await
+            .map_err(PersistenceError::new)?
+            .rows_affected()
+            == 1)
+    }
+}
 #[async_trait]
 impl RunWrites for SqliteStore {
     async fn start(&self, run: &ProcessingRun) -> Result<(), PersistenceError> {

@@ -2,6 +2,8 @@
 
 Scope: initial repository implementation, reviewed against installed Rust Playbook 0.3.0 and this project's brief on October 27, 2026. This is the implementing agent's self-review, not an independent consensus audit. Evidence paths refer to the retained local run.
 
+Continuation scope: commit `8c2d42a` plus the processing-ownership/retry and desktop-comparison changes reviewed before their next commit. Playbook version was rechecked as 0.3.0. P1/P2 capability ownership, E1 use-case errors, W3 conditional-write outcomes, checked SQL and TEST2 adapter evidence were re-inspected. The real database, child-process death, live ASR death/retry and native UI probes are implementation evidence; they do not expand the microphone/physical-keyboard or personal-accuracy claims. The final source/enrollment audit is `.local/jobs-final-state.json`.
+
 | Concern | Classification | Evidence / decision |
 |---|---|---|
 | Separate Domain and Application packages, inward dependencies | COMPLIANT WITH RULE | Workspace manifests; Domain has no runtime/provider/database dependency; Application owns capability and persistence ports |
@@ -16,6 +18,6 @@ Scope: initial repository implementation, reviewed against installed Rust Playbo
 | Actual microphone, physical keyboards, M3 | NOT EXERCISED | Platform adapter and simulated logic exist; eventual physical checkpoint documented |
 | Swift/Core ML interoperability | DEFAULT DEVIATION WITH JUSTIFICATION | Small isolated native bridges and selected FluidAudio source needed for working system audio/AX/Core ML with available SDK; no SDK types leak into core |
 | Private source preservation and external AI consent | COMPLIANT WITH RULE | Source adapter read-only, 48 unchanged artifact fingerprints, unauthorized routes rejected; no remote AI invocation |
-| Model-job recovery after whole-process death | OPEN QUESTION | Audio recovery is exercised; stale inference-run ownership/retry needs an explicit design before promising resumption |
+| Model-job recovery after whole-process death | COMPLIANT WITH RULE | Application-owned ownership/recovery ports, canonical database file leases, conditional interrupted settlement and linked retry; actual process kill, live-owner protection, SQLite and native UI evidence. Legacy unmanaged jobs and chunk continuation remain unverified/unsupported |
 
 The final review fixed lease release during concurrent process startup, AI stdin timeout coverage, idempotent enrollment, overlapping-example evidence inflation, whole-segment acceptance checks, voice-vector presentation leakage and partial media-transcription success reporting. Known product limitations remain in [verification](verification.md), rather than being classified as completed by mock tests.

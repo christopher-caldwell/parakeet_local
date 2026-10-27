@@ -1,4 +1,5 @@
 use super::*;
+use crate::jobs::{OWNERSHIP_PROTOCOL, ProcessingOwnership, ProcessingQueries};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProcessingError {
@@ -6,6 +7,8 @@ pub enum ProcessingError {
     NotFound(String),
     #[error("source track unavailable or changed: {0}")]
     Unavailable(String),
+    #[error("processing conflict: {0}")]
+    Conflict(String),
     #[error(transparent)]
     Invalid(#[from] ValidationError),
     #[error(transparent)]
@@ -69,6 +72,8 @@ pub struct ProcessingService {
     writes: Arc<dyn RunWrites>,
     models: Arc<dyn LocalModels>,
     engine: Arc<dyn SpeechProcessing>,
+    runs: Arc<dyn ProcessingQueries>,
+    ownership: Arc<dyn ProcessingOwnership>,
 }
 impl ProcessingService {
     pub fn new(
@@ -76,15 +81,26 @@ impl ProcessingService {
         writes: Arc<dyn RunWrites>,
         models: Arc<dyn LocalModels>,
         engine: Arc<dyn SpeechProcessing>,
+        runs: Arc<dyn ProcessingQueries>,
+        ownership: Arc<dyn ProcessingOwnership>,
     ) -> Self {
         Self {
             queries,
             writes,
             models,
             engine,
+            runs,
+            ownership,
         }
     }
-    pub async fn run(&self, mut request: ProcessRequest) -> Result<ProcessingRun, ProcessingError> {
+    pub async fn run(&self, request: ProcessRequest) -> Result<ProcessingRun, ProcessingError> {
+        self.run_inner(request, None).await
+    }
+    async fn run_inner(
+        &self,
+        mut request: ProcessRequest,
+        retry_of: Option<&ProcessingRun>,
+    ) -> Result<ProcessingRun, ProcessingError> {
         if request.model == "selected-asr" || request.model == "selected-diarization" {
             let selected = self.models.selection().await?;
             request.model = if request.model == "selected-asr" {
@@ -124,6 +140,9 @@ impl ProcessingService {
             return Err(ProcessingError::Unavailable(track.path.clone()));
         }
         let model = self.models.readiness(&request.model).await?;
+        if retry_of.is_some_and(|old| old.model_revision != model.revision) {
+            return Err(ProcessingError::Conflict("model revision changed; start an explicit new transcription instead of retrying old settings".into()));
+        }
         if !model.verified {
             return Err(CapabilityError::message(
                 "model is not verified; explicitly install/verify it first",
@@ -144,10 +163,14 @@ impl ProcessingService {
             status: "running".into(),
             started_at: now(),
             completed_at: None,
-            configuration: json!({"request":request,"track":track,"receipt":receipt()}),
+            configuration: json!({"request":request,"track":track,"receipt":receipt(),"ownership_protocol":OWNERSHIP_PROTOCOL,"retry_of_run_id":retry_of.map(|r| &r.id)}),
             result: Value::Null,
             error: None,
         };
+        let _lease =
+            self.ownership.try_acquire(&run.id).await?.ok_or_else(|| {
+                ProcessingError::Conflict("new run ownership is already held".into())
+            })?;
         self.writes.start(&run).await?;
         let output = self
             .engine
@@ -184,6 +207,28 @@ impl ProcessingService {
                 Err(error.into())
             }
         }
+    }
+}
+operation_error!(RetryProcessingError,sources{Persistence:PersistenceError=>"persistence",Processing:ProcessingError=>"nested"},values{NotFound=>"not_found",Conflict=>"conflict",Invalid=>"invalid_input"});
+impl ProcessingService {
+    pub async fn retry(&self, run_id: &str) -> Result<ProcessingRun, RetryProcessingError> {
+        let prior = self
+            .runs
+            .run(run_id)
+            .await?
+            .ok_or_else(|| RetryProcessingError::NotFound(run_id.into()))?;
+        if !["failed", "interrupted"].contains(&prior.status.as_str()) {
+            return Err(RetryProcessingError::Conflict("only failed or interrupted runs can be retried; recover an abandoned running job first".into()));
+        }
+        let mut request: ProcessRequest = serde_json::from_value(prior.configuration["request"].clone())
+            .map_err(|_| RetryProcessingError::Invalid("this run has no reproducible speech request; cluster edits must be repeated explicitly".into()))?;
+        request.model = prior.model.clone();
+        if request.recording_id != prior.recording_id {
+            return Err(RetryProcessingError::Invalid(
+                "stored request belongs to a different recording".into(),
+            ));
+        }
+        Ok(self.run_inner(request, Some(&prior)).await?)
     }
 }
 operation_error!(TranscribeRecordingError,sources{Read:PersistenceError=>"persistence",Processing:ProcessingError=>"nested"},values{NotFound=>"not_found",Unavailable=>"source",Incomplete=>"processing"});

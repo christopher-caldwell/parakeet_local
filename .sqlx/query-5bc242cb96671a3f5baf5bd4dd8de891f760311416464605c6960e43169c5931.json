@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE runs SET status='interrupted',data=?2\nWHERE id=?1 AND status='running' AND json_extract(data,'$.configuration.ownership_protocol')='file-lock-v1'\n",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "5bc242cb96671a3f5baf5bd4dd8de891f760311416464605c6960e43169c5931"
+}

@@ -303,6 +303,13 @@ async fn invalid_model_output_settles_failed_without_publishing_segments() {
         store.clone(),
         Arc::new(FixtureModels),
         Arc::new(FixtureEngine),
+        store.clone(),
+        std::sync::Arc::new(
+            parakeet_infrastructure::jobs::FileProcessingOwnership::for_database(
+                &_tmp.path().join("test.db"),
+            )
+            .unwrap(),
+        ),
     );
     assert!(
         service
@@ -382,7 +389,41 @@ async fn suggestion_resolution_is_durable_atomic_and_never_enrolls_predictions()
         .await
         .unwrap();
     assert_eq!(s.decision.suggested_profile.as_deref(), Some("person"));
-    assert_eq!(service.suggestions(Some("r")).await.unwrap().len(), 1);
+    assert_eq!(
+        service
+            .review_suggestion(&s.id)
+            .await
+            .unwrap()
+            .eligible_segments
+            .len(),
+        1
+    );
+    let mut narrow = s.clone();
+    narrow.id = "narrow-comparison".into();
+    narrow.start_ms = 300;
+    narrow.end_ms = 3500;
+    store.save_suggestion(&narrow).await.unwrap();
+    // The segment is 200–1200 ms in track time. Partial coverage must not be offered.
+    assert!(
+        service
+            .review_suggestion(&narrow.id)
+            .await
+            .unwrap()
+            .eligible_segments
+            .is_empty()
+    );
+    assert!(
+        service
+            .resolve_suggestion(ResolveSuggestionInput {
+                id: narrow.id,
+                action: "accept".into(),
+                segment_id: Some("segment".into()),
+                profile_id: None
+            })
+            .await
+            .is_err()
+    );
+    assert_eq!(service.suggestions(Some("r")).await.unwrap().len(), 2);
     service
         .resolve_suggestion(ResolveSuggestionInput {
             id: s.id.clone(),
@@ -498,7 +539,16 @@ async fn cluster_edits_and_repeated_undo_preserve_original_runs() {
     raw.result = json!({"intervals":intervals,"raw":{"untouched":true}});
     store.finish(&raw, &[]).await.unwrap();
     let store = Arc::new(store);
-    let service = ClusterEditingService::new(store.clone(), store.clone());
+    let service = ClusterEditingService::new(
+        store.clone(),
+        store.clone(),
+        Arc::new(
+            parakeet_infrastructure::jobs::FileProcessingOwnership::for_database(
+                &_tmp.path().join("test.db"),
+            )
+            .unwrap(),
+        ),
+    );
     let split = service
         .edit(EditClustersInput {
             recording_id: "r".into(),
@@ -681,6 +731,13 @@ async fn dictate_fixture(
         store.clone(),
         Arc::new(FixtureModels),
         Arc::new(UncertainEngine),
+        store.clone(),
+        Arc::new(
+            parakeet_infrastructure::jobs::FileProcessingOwnership::for_database(
+                &tmp.path().join("test.db"),
+            )
+            .unwrap(),
+        ),
     ));
     let service = DictationService::new(capture, processing, settings, spy.clone(), store.clone());
     let control = DictationControl::default();
@@ -728,4 +785,149 @@ async fn uncertain_dictation_retains_text_without_ai_or_automatic_insertion() {
         store.dictations().await.unwrap()[0].raw,
         "Potentially fabricated speech"
     );
+}
+
+#[tokio::test]
+async fn job_recovery_preserves_active_legacy_and_prior_evidence() {
+    use parakeet_application::jobs::*;
+    use std::sync::Arc;
+    let (tmp, store) = database().await;
+    store.import(&bundle()).await.unwrap();
+    let store = Arc::new(store);
+    let ownership = Arc::new(
+        parakeet_infrastructure::jobs::FileProcessingOwnership::for_database(
+            &tmp.path().join("test.db"),
+        )
+        .unwrap(),
+    );
+    let run = ProcessingRun {
+        id: uuid::Uuid::new_v4().to_string(),
+        recording_id: "r".into(),
+        kind: "transcription".into(),
+        model: "fixture".into(),
+        model_revision: "test".into(),
+        status: "running".into(),
+        started_at: "2026-01-01".into(),
+        completed_at: None,
+        configuration: json!({"ownership_protocol":OWNERSHIP_PROTOCOL,"request":{"recording_id":"r","track_id":"track","model":"fixture","start_ms":0,"duration_ms":5000}}),
+        result: json!({"partial_evidence":"retain"}),
+        error: None,
+    };
+    let lease = ownership.try_acquire(&run.id).await.unwrap().unwrap();
+    store.start(&run).await.unwrap();
+    let mut legacy = run.clone();
+    legacy.id = uuid::Uuid::new_v4().to_string();
+    legacy.configuration = json!({});
+    store.start(&legacy).await.unwrap();
+    let service = ProcessingRecoveryService::new(store.clone(), store.clone(), ownership);
+    let report = service.recover().await.unwrap();
+    assert_eq!(report.active, vec![run.id.clone()]);
+    assert_eq!(report.unmanaged, vec![legacy.id.clone()]);
+    assert!(report.interrupted.is_empty());
+    drop(lease);
+    let report = service.recover().await.unwrap();
+    assert_eq!(report.interrupted, vec![run.id.clone()]);
+    let recovered = ProcessingQueries::run(&*store, &run.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(recovered.status, "interrupted");
+    assert_eq!(recovered.result, run.result);
+    assert_eq!(
+        recovered.configuration["request"],
+        run.configuration["request"]
+    );
+    assert_eq!(
+        store.detail("r").await.unwrap().unwrap().segments[0].text,
+        "Original evidence"
+    );
+    assert_eq!(
+        ProcessingQueries::run(&*store, &legacy.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        "running"
+    );
+    assert!(service.recover().await.unwrap().interrupted.is_empty());
+    let mut late = run.clone();
+    late.status = "completed".into();
+    assert!(store.finish(&late, &[]).await.is_err());
+}
+
+#[tokio::test]
+async fn retry_links_new_run_and_refuses_live_completed_or_changed_model() {
+    use parakeet_application::{jobs::*, processing::*};
+    use std::sync::Arc;
+    let (tmp, store) = database().await;
+    let mut b = bundle();
+    b.tracks[0].available = true;
+    store.import(&b).await.unwrap();
+    let store = Arc::new(store);
+    let ownership = Arc::new(
+        parakeet_infrastructure::jobs::FileProcessingOwnership::for_database(
+            &tmp.path().join("test.db"),
+        )
+        .unwrap(),
+    );
+    let service = ProcessingService::new(
+        store.clone(),
+        store.clone(),
+        Arc::new(FixtureModels),
+        Arc::new(UncertainEngine),
+        store.clone(),
+        ownership,
+    );
+    let mut prior = ProcessingRun {
+        id: uuid::Uuid::new_v4().to_string(),
+        recording_id: "r".into(),
+        kind: "transcription".into(),
+        model: "fixture".into(),
+        model_revision: "test".into(),
+        status: "running".into(),
+        started_at: "now".into(),
+        completed_at: None,
+        configuration: json!({"request":{"recording_id":"r","track_id":"track","model":"selected-asr","start_ms":0,"duration_ms":5000}}),
+        result: json!({}),
+        error: None,
+    };
+    store.start(&prior).await.unwrap();
+    assert!(matches!(
+        service.retry(&prior.id).await,
+        Err(RetryProcessingError::Conflict(_))
+    ));
+    prior.status = "failed".into();
+    prior.completed_at = Some("then".into());
+    prior.error = Some("fixture failure".into());
+    store.finish(&prior, &[]).await.unwrap();
+    let retried = service.retry(&prior.id).await.unwrap();
+    assert_ne!(retried.id, prior.id);
+    assert_eq!(retried.status, "completed");
+    assert_eq!(retried.configuration["retry_of_run_id"], prior.id);
+    assert_eq!(retried.model, "fixture");
+    assert_eq!(
+        ProcessingQueries::run(&*store, &prior.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .error,
+        prior.error
+    );
+    assert!(service.retry(&retried.id).await.is_err());
+    let mut changed = prior.clone();
+    changed.id = uuid::Uuid::new_v4().to_string();
+    changed.status = "running".into();
+    changed.model_revision = "old-weights".into();
+    store.start(&changed).await.unwrap();
+    changed.status = "failed".into();
+    store.finish(&changed, &[]).await.unwrap();
+    assert!(
+        service
+            .retry(&changed.id)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("model revision changed")
+    );
+    assert_eq!(store.detail("r").await.unwrap().unwrap().runs.len(), 3);
 }

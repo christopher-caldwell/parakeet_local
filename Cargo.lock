@@ -4016,6 +4016,7 @@ dependencies = [
  "async-trait",
  "parakeet-application",
  "parakeet-domain",
+ "parakeet-infrastructure",
  "serde",
  "serde_json",
  "sqlx",

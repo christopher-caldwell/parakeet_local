@@ -10,7 +10,7 @@ Only the exact confirmed intervals became verified examples. The full containing
 
 Twelve separate, nonoverlapping candidate intervals were compared locally, producing inspectable suggestion receipts. All remained Unknown under the explicit diagnostic policy (score 0.9, margin 0.05, two verified references). Each identity currently has one confirmed example. None of these predictions became enrollment data, and these unlabeled comparisons do not measure accuracy. One short sample is insufficient to certify a personal identity threshold. Future independent confirmed examples can support tuning; separate labeled material must remain held out for evaluation.
 
-The GPUI Speakers screen also supports playing candidates, choosing/creating a profile, confirming enrollment and removing an incorrect example. The CLI exposes the same services. Detailed suggestion/cluster edits currently use CLI.
+The GPUI Speakers screen also supports playing candidates, choosing/creating a profile, confirming enrollment and removing an incorrect example. The CLI exposes the same services. Comparison review, confirmation/replacement, rejection and undo are now available in GPUI. Anonymous cluster edits currently use CLI.
 
 ## Later: one controlled physical session
 

@@ -136,3 +136,19 @@ fn audio_settings_inspection_preserves_explicit_device_selection() {
     );
     assert!(cleared["data"]["microphone_uid"].is_null());
 }
+
+#[test]
+fn pending_jobs_are_read_only_and_recovery_does_not_initialize_storage() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("library");
+    assert_ne!(run(&root, &["jobs", "pending"]).0, 0);
+    assert!(!root.exists());
+    run(&root, &["db", "create"]);
+    run(&root, &["db", "migrate"]);
+    assert_eq!(run(&root, &["jobs", "pending"]).1["data"], json!([]));
+    assert!(!root.join("parakeet.db.processing-leases").exists());
+    let (code, r) = run(&root, &["jobs", "recover"]);
+    assert_eq!(code, 0);
+    assert_eq!(r["data"]["interrupted"], json!([]));
+    assert_eq!(run(&root, &["jobs", "retry", "missing"]).0, 3);
+}

@@ -1,6 +1,6 @@
 use super::*;
 use crate::processing::RunWrites;
-operation_error!(EditClustersError,sources{Persistence:PersistenceError=>"persistence",Invalid:ValidationError=>"invalid_input"},values{NotFound=>"not_found"});
+operation_error!(EditClustersError,sources{Persistence:PersistenceError=>"persistence",Ownership:CapabilityError=>"capability",Invalid:ValidationError=>"invalid_input"},values{NotFound=>"not_found",Conflict=>"conflict"});
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ClusterEdit {
     Split { speaker: String, at_ms: i64 },
@@ -16,10 +16,19 @@ pub struct EditClustersInput {
 pub struct ClusterEditingService {
     queries: Arc<dyn LibraryQueries>,
     writes: Arc<dyn RunWrites>,
+    ownership: Arc<dyn crate::jobs::ProcessingOwnership>,
 }
 impl ClusterEditingService {
-    pub fn new(queries: Arc<dyn LibraryQueries>, writes: Arc<dyn RunWrites>) -> Self {
-        Self { queries, writes }
+    pub fn new(
+        queries: Arc<dyn LibraryQueries>,
+        writes: Arc<dyn RunWrites>,
+        ownership: Arc<dyn crate::jobs::ProcessingOwnership>,
+    ) -> Self {
+        Self {
+            queries,
+            writes,
+            ownership,
+        }
     }
     pub async fn edit(&self, input: EditClustersInput) -> Result<ProcessingRun, EditClustersError> {
         let d = self
@@ -88,6 +97,10 @@ impl ClusterEditingService {
             result: serde_json::Value::Null,
             error: None,
         };
+        run.configuration["ownership_protocol"] = json!(crate::jobs::OWNERSHIP_PROTOCOL);
+        let _lease = self.ownership.try_acquire(&run.id).await?.ok_or_else(|| {
+            EditClustersError::Conflict("new run ownership is already held".into())
+        })?;
         self.writes.start(&run).await?;
         run.status = "completed".into();
         run.completed_at = Some(now());

@@ -15,6 +15,7 @@ macro_rules! operation_error {
         impl $name{pub fn kind(&self)->&'static str{match self{$(Self::$source_variant(_)=>$source_kind,)*$(Self::$value_variant(_)=>$value_kind,)*}}}
     };
 }
+pub mod jobs;
 pub mod processing;
 pub mod settings;
 pub mod speakers;
