@@ -1,11 +1,13 @@
 //! Prepared reader data. Raw evidence stays in RecordingDetail.
 use super::*;
 use parakeet_domain::corrections::{self, CorrectionState};
-use std::{ops::Deref, rc::Rc};
+use std::{collections::HashMap, ops::Deref, rc::Rc};
 
 pub(super) struct Document {
     detail: RecordingDetail,
     pub row_corrections: Vec<CorrectionState>,
+    pub row_attributions: Vec<Option<usize>>,
+    pub row_word_indices: Vec<Vec<usize>>,
     folded: Vec<String>,
 }
 impl Deref for Document {
@@ -17,6 +19,35 @@ impl Deref for Document {
 impl Document {
     /// Called in the existing background application task, never during rendering.
     pub fn new(detail: RecordingDetail) -> Self {
+        let mut attributions = HashMap::new();
+        for (i, attribution) in detail.attributions.iter().enumerate() {
+            // Match the prior reader's first-claim semantics if malformed input repeats an ID.
+            attributions
+                .entry(attribution.segment_id.as_str())
+                .or_insert(i);
+        }
+        let row_attributions = detail
+            .segments
+            .iter()
+            .map(|s| attributions.get(s.id.as_str()).copied())
+            .collect();
+        let rows: HashMap<_, _> = detail
+            .segments
+            .iter()
+            .enumerate()
+            .map(|(i, s)| (s.id.as_str(), i))
+            .collect();
+        let mut row_word_indices = vec![Vec::new(); detail.segments.len()];
+        for (i, word) in detail.word_attributions.iter().enumerate() {
+            if let Some(row) = rows.get(word.segment_id.as_str()) {
+                let indices = &mut row_word_indices[*row];
+                // The expanded reader displays at most 100 words per row, as before.
+                // Raw evidence remains complete in detail.word_attributions.
+                if indices.len() < 100 {
+                    indices.push(i);
+                }
+            }
+        }
         let corrections = detail
             .segments
             .iter()
@@ -31,6 +62,8 @@ impl Document {
         Self {
             detail,
             row_corrections: corrections,
+            row_attributions,
+            row_word_indices,
             folded,
         }
     }
@@ -128,5 +161,56 @@ mod tests {
         assert_eq!(&*refreshed.matching("original"), &[0]);
         assert!(refreshed.matching("corrected").is_empty());
         assert_eq!(&*refreshed.matching("OTHER"), &[1]);
+    }
+
+    #[::core::prelude::v1::test]
+    fn evidence_indices_keep_source_order_and_bounds_without_losing_raw_words() {
+        use parakeet_domain::{reconciliation::SegmentAttribution, word_timing::*};
+        let mut raw = detail();
+        let attribution = |id: &str| SegmentAttribution {
+            segment_id: id.into(),
+            state: "unknown".into(),
+            anonymous_speakers: vec![],
+            speech_coverage: 0.,
+            overlapping_speech: false,
+            overlapping_source_audio: false,
+            possible_cross_source_duplicate: false,
+        };
+        raw.attributions = vec![
+            attribution("second"),
+            attribution("missing"),
+            attribution("second"),
+        ];
+        let word = |id: &str, ordinal| WordAttribution {
+            segment_id: id.into(),
+            ordinal,
+            word: RecognizedWord {
+                text: format!("word {ordinal}"),
+                local_start_ms: None,
+                local_end_ms: None,
+                start_ms: None,
+                end_ms: None,
+                timing_quality: "unknown".into(),
+            },
+            attribution: attribution(id),
+        };
+        raw.word_attributions = vec![
+            word("missing", 0),
+            word("second", 5),
+            word("first", 8),
+            word("second", 1),
+        ];
+        raw.word_attributions
+            .extend((0..105).map(|n| word("first", n)));
+        let doc = Document::new(raw);
+        assert_eq!(doc.row_attributions, vec![None, Some(0)]);
+        assert_eq!(doc.row_word_indices[1], vec![1, 3]);
+        assert_eq!(doc.row_word_indices[0].len(), 100);
+        assert_eq!(doc.row_word_indices[0][0], 2);
+        assert_eq!(doc.row_word_indices[0][99], 102);
+        assert_eq!(doc.word_attributions.len(), 109);
+        assert_eq!(doc.word_attributions[2].word.timing_quality, "unknown");
+        assert_eq!(doc.word_attributions[1].ordinal, 5);
+        assert_eq!(doc.word_attributions[3].ordinal, 1);
     }
 }

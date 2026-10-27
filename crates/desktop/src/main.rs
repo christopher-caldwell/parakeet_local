@@ -1,3 +1,4 @@
+mod activity;
 mod library;
 #[cfg(feature = "performance")]
 mod performance;
@@ -108,6 +109,9 @@ struct Workbench {
     focus: FocusHandle,
     heartbeat_last: Instant,
     heartbeat_max_ms: f64,
+    heartbeat_running: bool,
+    heartbeat_ticks: u64,
+    metrics_path: Option<PathBuf>,
     area: Area,
     speaker_mode: SpeakerMode,
     library_filter: library::LibraryFilter,
@@ -229,6 +233,7 @@ impl Workbench {
     ) {
         self.status = label.into();
         self.pending += 1;
+        self.start_heartbeat(cx);
         cx.notify();
         let handle = self.runtime.spawn(future);
         let playback_generation = self.playback_generation;
@@ -1747,10 +1752,6 @@ impl Workbench {
             cx,
         );
     }
-    fn start_heartbeat(&mut self, cx: &mut Context<Self>) {
-        let metrics_path = std::env::var_os("PARAKEET_UI_METRICS").map(PathBuf::from);
-        cx.spawn(async move|this,cx|{loop{cx.background_executor().timer(std::time::Duration::from_millis(100)).await;let result=this.update(cx,|this,cx|{let elapsed=this.heartbeat_last.elapsed().as_secs_f64()*1000.;this.heartbeat_last=Instant::now();this.heartbeat_max_ms=this.heartbeat_max_ms.max(elapsed);if this.capture_stop.is_some()||this.dictation_stop.is_some()||(this.area==Area::Models && this.pending>0){cx.notify();}let metrics=serde_json::json!({"max_100ms_heartbeat_interval_ms":this.heartbeat_max_ms,"render_construction_peak_ms":this.render_peak_ms,"render_count":this.render_count,"background_jobs":this.pending});(this.runtime.clone(),metrics)});match result{Ok((runtime,metrics))=>{if let Some(path)=metrics_path.clone(){runtime.spawn(async move{let _=tokio::fs::write(path,metrics.to_string()).await;});}},Err(_)=>break,}}}).detach();
-    }
 }
 
 fn model_runtime_executable() -> PathBuf {
@@ -2023,6 +2024,10 @@ fn main() -> anyhow::Result<()> {
                             focus,
                             heartbeat_last: Instant::now(),
                             heartbeat_max_ms: 0.,
+                            heartbeat_running: false,
+                            heartbeat_ticks: 0,
+                            metrics_path: std::env::var_os("PARAKEET_UI_METRICS")
+                                .map(PathBuf::from),
                             area: Area::Library,
                             speaker_mode: SpeakerMode::Profiles,
                             library_filter: library::LibraryFilter::All,

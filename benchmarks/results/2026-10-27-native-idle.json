@@ -1,0 +1,151 @@
+{
+  "protocol": 1,
+  "date": "2026-10-27",
+  "hardware": {
+    "model": "Mac14,12",
+    "memory_gib": 16,
+    "os": "macOS 26.3.1"
+  },
+  "workload": "Ordinary release, same small public transcript selected in the same personal library, no pending jobs or input during sampling",
+  "before": {
+    "duration_s": 25.1721187080002,
+    "cpu_percent": 1.39991891063188,
+    "interrupt_wakeups_per_s": 153.62234879223698,
+    "package_idle_wakeups_per_s": 0.2383589585604918,
+    "footprint_mib": [
+      66.71964263916016,
+      66.71964263916016
+    ],
+    "binary_sha256": "837739c74b2a81b8a36e699f2116adca9463be35e3ffaa761af90c813f35faee",
+    "instrumentation": "ordinary release, performance feature disabled"
+  },
+  "after": {
+    "duration_s": 25.09909195900036,
+    "cpu_percent": 1.2716397968554707,
+    "interrupt_wakeups_per_s": 144.50721985977594,
+    "package_idle_wakeups_per_s": 5.458364797570804,
+    "footprint_mib": [
+      68.86029052734375,
+      68.46966552734375
+    ],
+    "binary_sha256": "3da722a1ada30f2bd669955ab1f42ad243bb212b99884e41df72db1dfbcf9ace",
+    "instrumentation": "ordinary release, performance feature disabled"
+  },
+  "activity_verification": {
+    "binary_sha256": "57c7f6805f314f974884fbb706304d92a10321d7425e14d6f705e23fab03ba30",
+    "normal_finish": true,
+    "dropped_ui_samples": 0,
+    "phases": [
+      {
+        "phase": "initial-idle",
+        "samples": 119,
+        "running": [
+          false,
+          true
+        ],
+        "ticks_range": [
+          0,
+          0
+        ],
+        "pending_range": [
+          0,
+          0
+        ]
+      },
+      {
+        "phase": "indexed-word-evidence-scroll",
+        "samples": 91,
+        "running": [
+          false
+        ],
+        "ticks_range": [
+          0,
+          0
+        ],
+        "pending_range": [
+          0,
+          0
+        ]
+      },
+      {
+        "phase": "local-asr-first",
+        "samples": 409,
+        "running": [
+          false,
+          true
+        ],
+        "ticks_range": [
+          0,
+          93
+        ],
+        "pending_range": [
+          0,
+          1
+        ]
+      },
+      {
+        "phase": "after-first-job",
+        "samples": 57,
+        "running": [
+          false
+        ],
+        "ticks_range": [
+          93,
+          93
+        ],
+        "pending_range": [
+          0,
+          0
+        ]
+      },
+      {
+        "phase": "local-asr-restart",
+        "samples": 256,
+        "running": [
+          false,
+          true
+        ],
+        "ticks_range": [
+          93,
+          120
+        ],
+        "pending_range": [
+          0,
+          1
+        ]
+      },
+      {
+        "phase": "after-second-job",
+        "samples": 164,
+        "running": [
+          false,
+          true
+        ],
+        "ticks_range": [
+          120,
+          120
+        ],
+        "pending_range": [
+          0,
+          0
+        ]
+      }
+    ]
+  },
+  "word_evidence_verification": {
+    "original_words": 231,
+    "original_segments": 17,
+    "segments_corrections_attributions_and_words_unchanged": true,
+    "native_scroll_frames": 24,
+    "p95_frame_work_ms": 3.626458,
+    "accuracy_claim": false
+  },
+  "limits": [
+    "Two short sequential observations on one busy host; no randomized trial or battery-energy measurement.",
+    "CPU 100 percent is one logical CPU; package-idle wakeup counts depend heavily on other host work and increased in the later observation.",
+    "Visible-window display-link callbacks remain; eliminating the app timer does not eliminate all process wakeups.",
+    "Activity trace uses opt-in instrumentation; ordinary idle measurements use a separate normal release without instrumentation.",
+    "The active flag may remain set for the last already-scheduled 100 ms timer after a short operation; settled idle does not continue ticking.",
+    "No new microphone, physical keyboard or M3 verification; full VoiceOver and selection spanning recycled rows remain open."
+  ]
+}

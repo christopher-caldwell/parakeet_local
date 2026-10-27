@@ -131,6 +131,8 @@ impl Workbench {
                         "page":this.segment_page,"render_count":this.render_count,
                         "render_construction_peak_ms":this.render_peak_ms,
                         "pending":this.pending,"query_characters":this.transcript_query.chars().count(),
+                        "activity_refresh_running":this.heartbeat_running,
+                        "activity_refresh_ticks":this.heartbeat_ticks,
                         "scroll_y":f32::from(this.reader_list.scroll_px_offset_for_scrollbar().y),
                         "max_scroll_y":f32::from(this.reader_list.max_offset_for_scrollbar().y),
                         "scroll_item":this.reader_list.logical_scroll_top().item_ix,

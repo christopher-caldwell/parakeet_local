@@ -762,10 +762,7 @@ impl Workbench {
             .text
             .clone()
             .unwrap_or_else(|| segment.text.clone());
-        let attribution = detail
-            .attributions
-            .iter()
-            .find(|a| a.segment_id == segment.id);
+        let attribution = detail.row_attributions[index].map(|i| &detail.attributions[i]);
         let (label, confirmed, color) = match &correction.speaker {
             Some(SpeakerOverride::Profile(id)) => {
                 match self.profiles.iter().find(|p| &p.id == id) {
@@ -919,11 +916,9 @@ impl Workbench {
             body = body.child(self.segment_editor(segment, correction, cx));
         }
         if self.show_word_evidence {
-            let estimated = detail
-                .word_attributions
+            let estimated = detail.row_word_indices[index]
                 .iter()
-                .filter(|w| w.segment_id == segment.id)
-                .take(100)
+                .map(|i| &detail.word_attributions[*i])
                 .map(|w| {
                     format!(
                         "{} [{} · {}]",
