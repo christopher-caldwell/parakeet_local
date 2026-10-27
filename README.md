@@ -84,3 +84,5 @@ Native screen/audio permissions, physical keyboard delivery, supported target ed
 The [speaker-word evaluation report](docs/speaker-word-evaluation.md) records cpWER, paired segment/experimental-word results and their limits. Experimental word estimates stay off by default and do not certify named identity or timestamp accuracy.
 
 The [native UI guide](docs/ui-ux.md) describes the persistent library/reader, source and processing tabs, inline corrections, native import picker, keyboard shortcuts and playback controls. `meetings export RECORDING_ID --format text` returns the same corrected chronological text used by Copy transcript.
+
+The [native performance guide](docs/ui-performance.md) follows Smaller Talk's local benchmarking approach. `scripts/build-app --release` builds an optimized ordinary bundle; add `--performance` only for explicit local observation. Repeated scrolling, input latency and resource measurements are recorded with their limits in the [numeric UI report](benchmarks/results/2026-10-27-native-ui.json).

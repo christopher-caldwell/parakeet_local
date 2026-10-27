@@ -1439,6 +1439,7 @@ impl Render for Workbench {
                 if this.show_transcript_find {
                     this.show_transcript_find = false;
                     this.transcript_query.clear();
+                    this.refresh_reader_matches();
                     this.transcript_find
                         .update(cx, |input, cx| input.set_value("", window, cx));
                 }

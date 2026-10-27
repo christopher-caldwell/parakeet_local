@@ -613,6 +613,8 @@ impl Workbench {
                     if this.show_transcript_find {
                         this.transcript_find.focus_handle(cx).focus(window, cx);
                     } else {
+                        this.transcript_query.clear();
+                        this.refresh_reader_matches();
                         this.transcript_find
                             .update(cx, |s, cx| s.set_value("", window, cx));
                     }

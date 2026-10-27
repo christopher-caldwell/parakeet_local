@@ -46,6 +46,15 @@ impl Document {
     }
 }
 impl Workbench {
+    pub(super) fn refresh_reader_matches(&mut self) {
+        self.reader_matches = self
+            .detail
+            .as_ref()
+            .map(|d| d.matching(&self.transcript_query))
+            .unwrap_or_default();
+        self.segment_page = 0;
+        self.reset_reader_rows(true);
+    }
     /// Invalidate variable-height measurements after page/data/editor changes.
     /// Preserve the logical top when only the row's content changed.
     pub(super) fn reset_reader_rows(&self, from_top: bool) {

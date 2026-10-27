@@ -444,13 +444,7 @@ impl Workbench {
         cx.subscribe(&self.transcript_find, |this, _, event, cx| {
             if matches!(event, InputEvent::Change | InputEvent::PressEnter { .. }) {
                 this.transcript_query = this.transcript_find.read(cx).value().to_string();
-                this.reader_matches = this
-                    .detail
-                    .as_ref()
-                    .map(|d| d.matching(&this.transcript_query))
-                    .unwrap_or_default();
-                this.segment_page = 0;
-                this.reset_reader_rows(true);
+                this.refresh_reader_matches();
                 cx.notify();
             }
         })

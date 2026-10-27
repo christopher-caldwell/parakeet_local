@@ -56,3 +56,7 @@ python3 benchmarks/speaker_words_pipeline.py --root .local/speaker-word-estimate
 ```
 
 The preparer refuses an existing database/audio target, makes six different public utterances into two synthetic conversations, and records source placements/hashes. `--word-timestamps` also records the same-ASR segment-attribution baseline, avoiding a recognition-change confound. No words/voices are inferred as reference truth from model predictions. Utterance placements cannot serve as word/speech-alignment ground truth. The small results remain poor and must not be generalized to meetings. No production model choice or personal threshold is silently changed.
+
+## Native UI observations
+
+The [native performance guide](../docs/ui-performance.md) describes opt-in release builds, phase markers, isolated data snapshots, native wheel interactions and macOS resource accounting. `scripts/ui-performance.py` records process/frame observations; it does not drive the UI or create a database. `scripts/prepare-ui-fixture.py` generates the deterministic long transcript. The [numeric report](results/2026-10-27-native-ui.json) contains aggregate results without private recording content. Keep raw traces and process paths under ignored local storage.
