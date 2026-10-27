@@ -21,6 +21,8 @@ class PerformanceEvidenceTests(unittest.TestCase):
     def test_histogram_reset_refuses_a_comparison(self):
         with self.assertRaises(ValueError):
             performance.input_delta([(1000000, 20)], [(1000000, 1)])
+        with self.assertRaises(ValueError):
+            performance.input_delta([(1000000, 20)], [(2000000, 1)])
 
     def test_descendants_exclude_unrelated_tool_hosts(self):
         table = {10: (1, 'app'), 11: (10, 'audio helper'), 12: (11, 'ffmpeg'), 13: (1, 'collector')}

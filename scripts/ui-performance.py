@@ -128,7 +128,7 @@ def capture(args):
             except OSError as error:
                 failures.append(dict(pid=pid, error=str(error)))
         sample = dict(at_unix_s=now, monotonic_s=started, processes=rows, failures=failures,
-                      duration_s=time.monotonic() - started)
+                      duration_s=time.monotonic() - started, host_load_1m=os.getloadavg()[0])
         append(root / 'samples.jsonl', sample)
         samples += 1
         if not any(row['pid'] == args.pid for row in rows):
@@ -155,7 +155,8 @@ def read_lines(path):
 def input_delta(before, after):
     old = dict(before)
     buckets = [(value, count - old.get(value, 0)) for value, count in after]
-    if any(count < 0 for _, count in buckets):
+    current = dict(after)
+    if any(current.get(value, 0) < count for value, count in old.items()):
         raise ValueError('input histogram reset; phase cannot be compared')
     total = sum(count for _, count in buckets)
     def at(q):
@@ -202,6 +203,7 @@ def report(root):
             cpu_percent=quantiles(sum(p['cpu_percent'] for p in sample['processes']) for sample in ready_cpu),
             sampling_gaps_s=quantiles(b['monotonic_s']-a['monotonic_s'] for a,b in zip(resource, resource[1:])),
             resource_failures=sum(len(sample['failures']) for sample in resource),
+            host_load_1m=quantiles(sample['host_load_1m'] for sample in resource),
             frames=len(drawn), late_frames=sum(frame['late'] for frame in measured), measured_frames=len(measured),
             frame_draw_ms=quantiles(frame['draw_ms'] for frame in drawn),
             frame_work_ms=quantiles(frame['work_ms'] for frame in drawn),
@@ -213,7 +215,15 @@ def report(root):
             scroll_y_range=[min((row['scroll_y'] for row in ui),default=None),max((row['scroll_y'] for row in ui),default=None)],
             pending_range=[min((row['pending'] for row in ui),default=None),max((row['pending'] for row in ui),default=None)]))
     finished = [event['data'] for event in events if event['event'] == 'finished']
+    issues = []
+    if not finished:
+        issues.append('observer did not record a normal finish; evidence may be incomplete')
+    elif finished[-1]['dropped_ui_samples']:
+        issues.append('observer dropped UI samples')
+    if capture.get('incomplete_reason') or capture.get('interrupted'):
+        issues.append('resource capture ended unexpectedly')
     summary = dict(protocol=1, capture=capture, phases=summaries,
+                   validity='invalid' if issues else 'observed', issues=issues,
                    observer_finished=bool(finished), dropped_ui_samples=finished[-1]['dropped_ui_samples'] if finished else None)
     write_json(root / 'report.json', summary)
     print(json.dumps(summary, indent=2))
