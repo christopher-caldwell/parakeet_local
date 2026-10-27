@@ -113,7 +113,7 @@ impl Workbench {
                         title,
                     })
                     .await?;
-                Ok(Update::TitleSaved(library.show(&id).await?))
+                Ok(Update::title_saved(library.show(&id).await?))
             },
             cx,
         );
@@ -564,7 +564,7 @@ impl Workbench {
                 choice(("recording-tab", i), label, self.recording_tab == tab).on_click(
                     cx.listener(move |this, _, _, cx| {
                         this.recording_tab = tab;
-                        this.reader_scroll.set_offset(point(px(0.), px(0.)));
+                        this.reset_reader_rows(true);
                         cx.notify();
                     }),
                 ),
@@ -577,21 +577,8 @@ impl Workbench {
             RecordingTab::Processing => reader.child(self.processing_view(detail, cx)),
         }
     }
-    fn transcript_view(&self, detail: &RecordingDetail, cx: &mut Context<Self>) -> Div {
-        let query = self.transcript_query.to_lowercase();
-        let segments = detail
-            .segments
-            .iter()
-            .filter(|s| {
-                query.is_empty()
-                    || corrections::resolve(&s.id, &detail.corrections)
-                        .text
-                        .as_deref()
-                        .unwrap_or(&s.text)
-                        .to_lowercase()
-                        .contains(&query)
-            })
-            .collect::<Vec<_>>();
+    fn transcript_view(&self, detail: &reader::Document, cx: &mut Context<Self>) -> Div {
+        let segments = &self.reader_matches;
         let page = self.segment_page.min(segments.len().saturating_sub(1) / 40);
         let begin = page * 40;
         let end = (begin + 40).min(segments.len());
@@ -644,6 +631,7 @@ impl Workbench {
                     )
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.show_word_evidence = !this.show_word_evidence;
+                        this.reset_reader_rows(false);
                         cx.notify();
                     })),
                 )
@@ -653,7 +641,7 @@ impl Workbench {
                     .disabled(page == 0)
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.segment_page = this.segment_page.saturating_sub(1);
-                        this.reader_scroll.set_offset(point(px(0.), px(0.)));
+                        this.reset_reader_rows(true);
                         this.editing_segment = None;
                         cx.notify();
                     })),
@@ -663,7 +651,7 @@ impl Workbench {
                     .disabled(end >= segments.len())
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.segment_page += 1;
-                        this.reader_scroll.set_offset(point(px(0.), px(0.)));
+                        this.reset_reader_rows(true);
                         this.editing_segment = None;
                         cx.notify();
                     })),
@@ -677,21 +665,47 @@ impl Workbench {
                     .child(field(&self.transcript_find).w_full()),
             );
         }
+        let indices = std::rc::Rc::clone(segments);
+        let weak = cx.entity().downgrade();
+        let recording_id = detail.recording.id.clone();
+        let content = list(self.reader_list.clone(), move |i, _, cx| {
+            weak.update(cx, |this, cx| {
+                let Some(detail) = this
+                    .detail
+                    .as_ref()
+                    .filter(|d| d.recording.id == recording_id)
+                else {
+                    return div().into_any_element();
+                };
+                let Some(index) = indices.get(begin + i) else {
+                    return div().into_any_element();
+                };
+                let Some(segment) = detail.segments.get(*index) else {
+                    return div().into_any_element();
+                };
+                div()
+                    .w_full()
+                    .px_5()
+                    .child(this.transcript_row(detail, segment, *index, cx))
+                    .into_any_element()
+            })
+            .unwrap_or_else(|_| div().into_any_element())
+        })
+        .flex_1()
+        .min_h_0()
+        .pb_5();
         let mut rows = div()
             .id("transcript-reader")
-            .track_scroll(&self.reader_scroll)
-            .overflow_y_scroll()
+            .overflow_hidden()
             .flex_1()
             .min_h_0()
-            .px_5()
-            .pb_5()
             .flex()
             .flex_col();
         if self.show_word_evidence {
-            rows=rows.child(caption("Original estimated word timing is separate from your corrections. Unknown words remain unattributed.").py_3());
+            rows = rows.child(caption("Original estimated word timing is separate from your corrections. Unknown words remain unattributed.").px_5().py_3());
         }
-        for (i, segment) in segments.iter().skip(begin).take(40).enumerate() {
-            rows = rows.child(self.transcript_row(detail, segment, begin + i, cx));
+        if !segments.is_empty() {
+            rows = rows.child(content);
         }
         if segments.is_empty() {
             rows = rows.child(
@@ -734,14 +748,14 @@ impl Workbench {
             .child(toolbar)
             .child(rows)
     }
-    fn transcript_row(
+    pub(super) fn transcript_row(
         &self,
-        detail: &RecordingDetail,
+        detail: &reader::Document,
         segment: &TranscriptSegment,
         index: usize,
         cx: &mut Context<Self>,
     ) -> Div {
-        let correction = corrections::resolve(&segment.id, &detail.corrections);
+        let correction = &detail.row_corrections[index];
         let words = correction
             .text
             .clone()
@@ -860,6 +874,7 @@ impl Workbench {
                                     });
                                     this.edit_text.focus_handle(cx).focus(window, cx);
                                 }
+                                this.reset_reader_rows(false);
                                 cx.notify();
                             },
                         )),
@@ -899,7 +914,7 @@ impl Workbench {
             body = body.child(evidence);
         }
         if editing {
-            body = body.child(self.segment_editor(segment, &correction, cx));
+            body = body.child(self.segment_editor(segment, correction, cx));
         }
         if self.show_word_evidence {
             let estimated = detail
@@ -1257,7 +1272,7 @@ impl Workbench {
                                             "Retrying retained audio",
                                             async move {
                                                 let run = service.retry(&id).await?;
-                                                Ok(Update::Detail(
+                                                Ok(Update::detail(
                                                     library.show(&run.recording_id).await?,
                                                 ))
                                             },

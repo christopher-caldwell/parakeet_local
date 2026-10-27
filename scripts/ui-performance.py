@@ -23,9 +23,26 @@ class RUsage(ctypes.Structure):
         "wired_size", "resident_size", "phys_footprint", "proc_start_abstime", "proc_exit_abstime")]
 
 
+class MachTimebase(ctypes.Structure):
+    _fields_ = [('numer', ctypes.c_uint32), ('denom', ctypes.c_uint32)]
+
+
+def ticks_to_ns(ticks, numer, denom):
+    if numer <= 0 or denom <= 0:
+        raise ValueError('invalid Mach timebase')
+    return ticks * numer // denom
+
+
 class Accounting:
     def __init__(self):
         self.lib = ctypes.CDLL('/usr/lib/libproc.dylib', use_errno=True)
+        self.timebase = MachTimebase()
+        system = ctypes.CDLL('/usr/lib/libSystem.B.dylib')
+        query_timebase = system.mach_timebase_info
+        query_timebase.argtypes = [ctypes.POINTER(MachTimebase)]
+        query_timebase.restype = ctypes.c_int
+        if query_timebase(ctypes.byref(self.timebase)) != 0 or not self.timebase.denom:
+            raise RuntimeError('cannot read Mach timebase')
         self.call = self.lib.proc_pid_rusage
         self.call.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_void_p]
         self.call.restype = ctypes.c_int
@@ -36,7 +53,9 @@ class Accounting:
             code = ctypes.get_errno()
             raise OSError(code, os.strerror(code))
         return dict(rss_bytes=value.resident_size, footprint_bytes=value.phys_footprint,
-                    cpu_ns=value.user_time + value.system_time, identity=value.proc_start_abstime)
+                    cpu_ticks=value.user_time + value.system_time,
+                    cpu_ns=ticks_to_ns(value.user_time + value.system_time, self.timebase.numer, self.timebase.denom),
+                    identity=value.proc_start_abstime)
 
 
 def write_json(path, data):
@@ -86,6 +105,7 @@ def capture(args):
                     process_identity=identity, binary_sha256=hashlib.sha256(args.binary.read_bytes()).hexdigest(),
                     executable=str(args.binary.resolve()), label=args.label,
                     interval_s=args.interval, host=platform.platform(), cpu_count=os.cpu_count(),
+                    cpu_counter_units='nanoseconds', cpu_timebase=dict(numer=accounting.timebase.numer, denom=accounting.timebase.denom),
                     load_average=os.getloadavg(), data_root=str(args.data_root.resolve()),
                     source_revision=subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
                     dirty=bool(subprocess.check_output(['git', 'status', '--porcelain'], text=True)),
@@ -171,6 +191,14 @@ def input_delta(before, after):
 
 def report(root):
     capture = json.loads((root / 'capture-finished.json').read_text())
+    correction_path = root / 'accounting-correction.json'
+    correction = json.loads(correction_path.read_text()) if correction_path.exists() else None
+    cpu_scale = 1
+    if capture.get('cpu_counter_units') != 'nanoseconds':
+        if correction is None:
+            raise ValueError('legacy CPU counters need an explicit accounting-correction receipt')
+        cpu_scale = correction['cpu_percent_scale']
+        capture['accounting_correction'] = correction
     phases = read_lines(root / 'phase-events.jsonl')
     samples = read_lines(root / 'samples.jsonl')
     events = read_lines(root / 'app-events.jsonl')
@@ -200,7 +228,7 @@ def report(root):
             validity='invalid' if issues else 'observed', issues=issues,
             footprint_mib=quantiles(sum(p['footprint_bytes'] for p in sample['processes'])/2**20 for sample in complete),
             rss_mib=quantiles(sum(p['rss_bytes'] for p in sample['processes'])/2**20 for sample in complete),
-            cpu_percent=quantiles(sum(p['cpu_percent'] for p in sample['processes']) for sample in ready_cpu),
+            cpu_percent=quantiles(sum(p['cpu_percent'] for p in sample['processes']) * cpu_scale for sample in ready_cpu),
             sampling_gaps_s=quantiles(b['monotonic_s']-a['monotonic_s'] for a,b in zip(resource, resource[1:])),
             resource_failures=sum(len(sample['failures']) for sample in resource),
             host_load_1m=quantiles(sample['host_load_1m'] for sample in resource),

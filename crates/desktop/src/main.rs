@@ -1,6 +1,7 @@
 mod library;
 #[cfg(feature = "performance")]
 mod performance;
+mod reader;
 mod shell;
 mod ui;
 use gpui::{div, prelude::*, px, rgb, size, *};
@@ -44,9 +45,9 @@ enum Update {
     Clusters(parakeet_application::cluster_edits::ClusterReview),
     CopyText(String),
     LibrarySearch(u64, Vec<Recording>),
-    TitleSaved(RecordingDetail),
+    TitleSaved(reader::Document),
     Imported(ImportReport),
-    Detail(RecordingDetail),
+    Detail(reader::Document),
     Profiles(Vec<SpeakerProfile>),
     Examples(String, Vec<VoiceExampleSummary>),
     Candidates(String, Vec<EnrollmentCandidate>),
@@ -65,7 +66,7 @@ enum Update {
     SuggestionReview(SpeakerSuggestionReview),
     Settings(Vec<gestures::Shortcut>, Vec<PromptProfile>),
     Devices(serde_json::Value),
-    Captured(Result<RecordingDetail, String>),
+    Captured(Result<reader::Document, String>),
 }
 struct Workbench {
     #[cfg(feature = "performance")]
@@ -116,7 +117,9 @@ struct Workbench {
     transcript_find: Entity<InputState>,
     transcript_query: String,
     show_transcript_find: bool,
-    reader_scroll: ScrollHandle,
+    reader_list: ListState,
+    reader_editor_focus: FocusHandle,
+    reader_matches: std::rc::Rc<Vec<usize>>,
     search_generation: u64,
     show_media_import: bool,
     show_import_path: bool,
@@ -127,7 +130,7 @@ struct Workbench {
     show_run_history: bool,
     show_word_evidence: bool,
     records: Vec<Recording>,
-    detail: Option<RecordingDetail>,
+    detail: Option<reader::Document>,
     profiles: Vec<SpeakerProfile>,
     examples: Vec<VoiceExampleSummary>,
     candidates: Vec<EnrollmentCandidate>,
@@ -172,6 +175,14 @@ fn anonymous_label(s: &str) -> String {
         .and_then(|s| s.parse::<usize>().ok())
         .map(|n| format!("Speaker {}", n + 1))
         .unwrap_or_else(|| leaf.to_owned())
+}
+impl Update {
+    fn detail(detail: RecordingDetail) -> Self {
+        Self::Detail(reader::Document::new(detail))
+    }
+    fn title_saved(detail: RecordingDetail) -> Self {
+        Self::TitleSaved(reader::Document::new(detail))
+    }
 }
 fn field(input: &Entity<InputState>) -> Div {
     div()
@@ -240,7 +251,7 @@ impl Workbench {
                             Update::Clusters(review) => {
                                 if this.requested_recording.as_deref()==Some(review.recording_id.as_str()) && this.selected_track.as_deref()==Some(review.track_id.as_str()) {
                                     let id=review.recording_id.clone();this.cluster_review=Some(review);this.selected_clusters.clear();
-                                    let library=this.library.clone();this.task("Reloading derived speaker attribution",async move{Ok(Update::Detail(library.show(&id).await?))},cx);
+                                    let library=this.library.clone();this.task("Reloading derived speaker attribution",async move{Ok(Update::detail(library.show(&id).await?))},cx);
                                 }
                             }
                             Update::Examples(profile_id, examples) => {
@@ -264,7 +275,7 @@ impl Workbench {
                                     if let Some(row)=this.suggestions.iter_mut().find(|r|r.id==review.suggestion.id){*row=review.suggestion.clone();}else{this.suggestions.push(review.suggestion.clone());}
                                     this.suggestion_review=Some(review);
                                     let library=this.library.clone();
-                                    this.task("Reloading current transcript",async move {Ok(Update::Detail(library.show(&id).await?))},cx);
+                                    this.task("Reloading current transcript",async move {Ok(Update::detail(library.show(&id).await?))},cx);
                                 }
                             }
                             Update::RefreshSelected | Update::SegmentSaved(_) => {
@@ -274,7 +285,7 @@ impl Workbench {
                                     let library = this.library.clone();
                                     this.task(
                                         "Reloading saved corrections",
-                                        async move { Ok(Update::Detail(library.show(&id).await?)) },
+                                        async move { Ok(Update::detail(library.show(&id).await?)) },
                                         cx,
                                     );
                                 }
@@ -295,7 +306,7 @@ impl Workbench {
                                         {
                                             *row = d.recording.clone();
                                         }
-                                        this.detail = Some(d);
+                                        this.receive_detail(d);
                                         this.area = Area::Library;
                                         this.reload(cx);
                                     }
@@ -385,6 +396,8 @@ impl Workbench {
     fn open(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
         self.area = Area::Library;
         self.detail = None;
+        self.reader_matches = Default::default();
+        self.reader_list.reset(0);
         self.cluster_review = None;
         self.selected_clusters.clear();
         self.suggestions.clear();
@@ -398,7 +411,7 @@ impl Workbench {
         self.transcript_query.clear();
         self.transcript_find
             .update(cx, |state, cx| state.set_value("", window, cx));
-        self.reader_scroll.set_offset(point(px(0.), px(0.)));
+        self.reset_reader_rows(true);
         self.requested_recording = Some(id.clone());
         let lib = self.library.clone();
         if let Some(r) = self.records.iter().find(|r| r.id == id) {
@@ -408,7 +421,7 @@ impl Workbench {
         }
         self.task(
             "Opening recording",
-            async move { Ok(Update::Detail(lib.show(&id).await?)) },
+            async move { Ok(Update::detail(lib.show(&id).await?)) },
             cx,
         );
     }
@@ -490,7 +503,7 @@ impl Workbench {
             "Processing locally; navigation remains available",
             async move {
                 service.run(request).await?;
-                Ok(Update::Detail(lib.show(&id).await?))
+                Ok(Update::detail(lib.show(&id).await?))
             },
             cx,
         );
@@ -1431,6 +1444,7 @@ impl Render for Workbench {
                 }
                 this.editing_title = false;
                 this.editing_segment = None;
+                this.reset_reader_rows(false);
                 this.show_media_import = false;
                 this.show_import_path = false;
                 cx.notify();
@@ -1669,7 +1683,9 @@ impl Workbench {
                     Ok::<_, anyhow::Error>(lib.show(&bundle.recording.id).await?)
                 }
                 .await;
-                Ok(Update::Captured(result.map_err(|e| e.to_string())))
+                Ok(Update::Captured(
+                    result.map(reader::Document::new).map_err(|e| e.to_string()),
+                ))
             },
             cx,
         );
@@ -1945,6 +1961,7 @@ fn main() -> anyhow::Result<()> {
                             state.set_placeholder("Correct this transcript segment", window, cx);
                             state
                         });
+                        let reader_editor_focus = edit_text.focus_handle(cx);
                         let shortcut_key = input(window, cx, "", "Home, F6, etc.");
                         let import_path =
                             input(window, cx, "", "Local audio file or meeting folder");
@@ -2014,7 +2031,10 @@ fn main() -> anyhow::Result<()> {
                             transcript_find,
                             transcript_query: String::new(),
                             show_transcript_find: false,
-                            reader_scroll: ScrollHandle::new(),
+                            reader_list: ListState::new(0, ListAlignment::Top, px(300.))
+                                .measure_all(),
+                            reader_editor_focus,
+                            reader_matches: Default::default(),
                             search_generation: 0,
                             show_media_import: false,
                             show_import_path: false,
@@ -2594,7 +2614,7 @@ impl Workbench {
             "Hashing selected source without modifying audio",
             async move {
                 let track = service.fingerprint(input).await?;
-                Ok(Update::Detail(library.show(&track.recording_id).await?))
+                Ok(Update::detail(library.show(&track.recording_id).await?))
             },
             cx,
         );
@@ -2620,7 +2640,7 @@ impl Workbench {
                         "Replacement is byte-identical. Locator was not changed.".into(),
                     ))
                 } else {
-                    Ok(Update::Detail(
+                    Ok(Update::detail(
                         library.show(&report.track.recording_id).await?,
                     ))
                 }

@@ -396,7 +396,7 @@ impl Workbench {
                     })),
             )
     }
-    pub(super) fn receive_detail(&mut self, d: RecordingDetail) {
+    pub(super) fn receive_detail(&mut self, d: reader::Document) {
         if self.requested_recording.as_deref() != Some(d.recording.id.as_str()) {
             return;
         }
@@ -413,7 +413,12 @@ impl Workbench {
         if let Some(row) = self.records.iter_mut().find(|r| r.id == d.recording.id) {
             *row = d.recording.clone();
         }
+        self.reader_matches = d.matching(&self.transcript_query);
+        self.segment_page = self
+            .segment_page
+            .min(self.reader_matches.len().saturating_sub(1) / 40);
         self.detail = Some(d);
+        self.reset_reader_rows(false);
     }
     pub(super) fn subscribe_search(&mut self, cx: &mut Context<Self>) {
         cx.subscribe(&self.search, |this, _, event, cx| match event {
@@ -439,8 +444,20 @@ impl Workbench {
         cx.subscribe(&self.transcript_find, |this, _, event, cx| {
             if matches!(event, InputEvent::Change | InputEvent::PressEnter { .. }) {
                 this.transcript_query = this.transcript_find.read(cx).value().to_string();
+                this.reader_matches = this
+                    .detail
+                    .as_ref()
+                    .map(|d| d.matching(&this.transcript_query))
+                    .unwrap_or_default();
                 this.segment_page = 0;
-                this.reader_scroll.set_offset(point(px(0.), px(0.)));
+                this.reset_reader_rows(true);
+                cx.notify();
+            }
+        })
+        .detach();
+        cx.subscribe(&self.edit_text, |this, _, event, cx| {
+            if matches!(event, InputEvent::Change) && this.editing_segment.is_some() {
+                this.reset_reader_rows(false);
                 cx.notify();
             }
         })

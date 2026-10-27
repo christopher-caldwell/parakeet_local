@@ -9,6 +9,12 @@ spec.loader.exec_module(performance)
 
 
 class PerformanceEvidenceTests(unittest.TestCase):
+    def test_apple_silicon_mach_ticks_are_scaled_before_cpu_percent(self):
+        self.assertEqual(performance.ticks_to_ns(24000000, 125, 3), 1000000000)
+        self.assertEqual(performance.ticks_to_ns(1000000000, 1, 1), 1000000000)
+        with self.assertRaises(ValueError):
+            performance.ticks_to_ns(1, 125, 0)
+
     def test_empty_metrics_are_missing_instead_of_zero(self):
         self.assertEqual(performance.quantiles([]), dict(p50=None, p95=None, max=None, samples=0))
         self.assertEqual(performance.input_delta([], [])['samples'], 0)
