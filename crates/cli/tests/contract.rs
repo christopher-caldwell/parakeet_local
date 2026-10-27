@@ -152,3 +152,13 @@ fn pending_jobs_are_read_only_and_recovery_does_not_initialize_storage() {
     assert_eq!(r["data"]["interrupted"], json!([]));
     assert_eq!(run(&root, &["jobs", "retry", "missing"]).0, 3);
 }
+
+#[test]
+fn clipboard_recovery_without_a_journal_does_not_initialize_storage() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("absent");
+    let (code, result) = run(&root, &["dictation", "recover-clipboard"]);
+    assert_eq!(code, 0);
+    assert_eq!(result["data"]["restored"], 0);
+    assert!(!root.exists());
+}

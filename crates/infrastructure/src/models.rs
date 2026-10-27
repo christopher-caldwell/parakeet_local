@@ -59,6 +59,22 @@ impl ModelFiles {
         catalog(id)?;
         Ok(self.root.join(id))
     }
+    /// Called while holding the model lease. Cached runtimes are reusable only
+    /// for the same verified revision and exact current weight fingerprints.
+    pub fn cache_identity(&self, id: &str) -> Result<String, CapabilityError> {
+        let inspected = self.inspect(id, false)?;
+        if !inspected.verified {
+            return Err(CapabilityError::message(
+                "model verification is unavailable or stale; refusing cached inference",
+            ));
+        }
+        let (_, _, _, _, files) = catalog(id)?;
+        Ok(format!(
+            "{id}:{}:{}",
+            inspected.revision,
+            file_fingerprints(&self.directory(id)?, &files)
+        ))
+    }
     pub fn acquire(&self) -> Result<ModelLease, CapabilityError> {
         std::fs::create_dir_all(&self.root).map_err(CapabilityError::new)?;
         let file = std::fs::OpenOptions::new()
@@ -528,6 +544,7 @@ mod tests {
         .unwrap();
         assert!(!models.verify("whisper-base.en").await.unwrap().verified);
         assert!(!directory.join("verified.json").exists());
+        assert!(models.cache_identity("whisper-base.en").is_err());
         assert!(!models.inspect("whisper-base.en", false).unwrap().verified);
     }
     #[test]

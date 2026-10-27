@@ -4,6 +4,7 @@ pub mod jobs;
 pub mod media;
 pub mod models;
 pub mod speech;
+mod speech_cache;
 pub mod transformation;
 
 pub mod evaluation;

@@ -28,7 +28,14 @@ enum Area {
     Capture,
     Jobs,
 }
+#[derive(Clone, Copy, PartialEq)]
+enum SpeakerMode {
+    Profiles,
+    Clusters,
+    Comparisons,
+}
 enum Update {
+    Clusters(parakeet_application::cluster_edits::ClusterReview),
     Library(Vec<Recording>),
     Detail(RecordingDetail),
     Profiles(Vec<SpeakerProfile>),
@@ -53,6 +60,12 @@ enum Update {
 struct Workbench {
     runtime: Arc<Runtime>,
     library: Arc<LibraryService>,
+    locations: Arc<parakeet_application::audio_locations::AudioLocationService>,
+    relink_path: Entity<InputState>,
+    clusters: Arc<parakeet_application::cluster_edits::ClusterEditingService>,
+    cluster_review: Option<parakeet_application::cluster_edits::ClusterReview>,
+    selected_clusters: Vec<String>,
+    split_at: Entity<InputState>,
     media: Arc<MediaTranscriptionService>,
     speakers: Arc<SpeakerService>,
     models: Arc<ModelService>,
@@ -71,6 +84,7 @@ struct Workbench {
     audio_settings: Arc<AudioSettingsService>,
     dictation_listener: Arc<DictationListener>,
     dictation_history: Arc<DictationHistoryService>,
+    insertion_recovery: Arc<InsertionRecoveryService>,
     dictations: Vec<DictationReceipt>,
     capture_stop: Option<Arc<AtomicBool>>,
     dictation_stop: Option<Arc<AtomicBool>>,
@@ -82,6 +96,9 @@ struct Workbench {
     heartbeat_last: Instant,
     heartbeat_max_ms: f64,
     area: Area,
+    speaker_mode: SpeakerMode,
+    show_location_tools: bool,
+    show_run_history: bool,
     records: Vec<Recording>,
     detail: Option<RecordingDetail>,
     profiles: Vec<SpeakerProfile>,
@@ -118,6 +135,9 @@ struct Workbench {
 }
 fn anonymous_label(s: &str) -> String {
     let leaf = s.rsplit(':').next().unwrap_or(s);
+    if s.starts_with("manual:") {
+        return format!("Edited voice {}", leaf.chars().take(8).collect::<String>());
+    }
     leaf.strip_prefix("SPEAKER_")
         .and_then(|s| s.parse::<usize>().ok())
         .map(|n| format!("Speaker {}", n + 1))
@@ -174,6 +194,12 @@ impl Workbench {
                 match result {
                     Ok(Ok(update)) => {
                         match update {
+                            Update::Clusters(review) => {
+                                if this.requested_recording.as_deref()==Some(review.recording_id.as_str()) && this.selected_track.as_deref()==Some(review.track_id.as_str()) {
+                                    let id=review.recording_id.clone();this.cluster_review=Some(review);this.selected_clusters.clear();
+                                    let library=this.library.clone();this.task("Reloading derived speaker attribution",async move{Ok(Update::Detail(library.show(&id).await?))},cx);
+                                }
+                            }
                             Update::Examples(profile_id, examples) => {
                                 if this.selected_profile.as_deref() == Some(profile_id.as_str()) {
                                     this.examples = examples;
@@ -330,6 +356,8 @@ impl Workbench {
     fn open(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
         self.area = Area::Library;
         self.detail = None;
+        self.cluster_review = None;
+        self.selected_clusters.clear();
         self.suggestions.clear();
         self.suggestion_review = None;
         self.candidates.clear();
@@ -688,13 +716,42 @@ impl Render for Workbench {
                                     .replace('_', " "),
                                 d.runs.len()
                             )));
-                    for run in d.runs.iter().rev().take(5) {
+                    reader = reader.child(
+                        button(
+                            "run-history",
+                            if self.show_run_history {
+                                "Hide recent processing history"
+                            } else {
+                                "Show recent processing history"
+                            },
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.show_run_history = !this.show_run_history;
+                            cx.notify();
+                        })),
+                    );
+                    for run in d
+                        .runs
+                        .iter()
+                        .rev()
+                        .take(if self.show_run_history { 5 } else { 0 })
+                    {
                         let retry_id = run.id.clone();
                         reader =
                             reader.child(
                                 div()
                                     .text_sm()
-                                    .child(format!("{} · {} · {}", run.kind, run.model, run.status))
+                                    .child(format!(
+                                        "{} · {} · {}{}",
+                                        run.kind,
+                                        run.model,
+                                        run.status,
+                                        if run.configuration["human_edit"].is_object() {
+                                            " · manual cluster edit"
+                                        } else {
+                                            ""
+                                        }
+                                    ))
                                     .when_some(run.error.clone(), |row, error| row.child(error))
                                     .when(
                                         ["failed", "interrupted"].contains(&run.status.as_str())
@@ -762,6 +819,48 @@ impl Render for Workbench {
                     }
                     reader = reader
                         .child(sources)
+                        .child(button("audio-locations", "Audio file locations").on_click(
+                            cx.listener(|this, _, _, cx| {
+                                this.show_location_tools = !this.show_location_tools;
+                                cx.notify();
+                            }),
+                        ))
+                        .when(self.show_location_tools, |reader| {
+                            reader
+                                .child(
+                                    button(
+                                        "fingerprint-source",
+                                        "Fingerprint selected source for safe relocation",
+                                    )
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| this.fingerprint_audio(cx)),
+                                    ),
+                                )
+                                .child(field(&self.relink_path))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_wrap()
+                                        .gap_2()
+                                        .child(
+                                            button(
+                                                "inspect-relink",
+                                                "Check replacement without saving",
+                                            )
+                                            .on_click(
+                                                cx.listener(|this, _, _, cx| {
+                                                    this.relink_audio(true, cx)
+                                                }),
+                                            ),
+                                        )
+                                        .child(
+                                            button("save-relink", "Relink byte-identical audio")
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.relink_audio(false, cx)
+                                                })),
+                                        ),
+                                )
+                        })
                         .child(
                             div()
                                 .flex()
@@ -1042,161 +1141,180 @@ impl Render for Workbench {
                 );
             }
             Area::Speakers => {
-                content=content.child(div().text_xl().child("Verified speaker examples")).child("Choose a person, return to a recording, play a clean 3–30 second track-local interval, then enroll it here.")
-     .child(div().flex().gap_2().child(field(&self.person_name)).child(button("add-person","Create person").on_click(cx.listener(|this,_,_,cx|{let name=this.person_name.read(cx).value().to_string();let service=this.speakers.clone();this.task("Creating speaker profile",async move{service.create(&name).await?;Ok(Update::Profiles(service.profiles().await?))},cx);}))));
                 content = content.child(
-                    button("refresh-people", "Refresh people and examples")
-                        .on_click(cx.listener(|this, _, _, cx| this.refresh_profiles(cx))),
-                );
-                for p in &self.profiles {
-                    let id = p.id.clone();
-                    let name = p.name.clone();
-                    content = content.child(
-                        button(
-                            p.id.clone(),
-                            format!(
-                                "{}{}",
-                                if self.selected_profile.as_ref() == Some(&p.id) {
-                                    "● "
-                                } else {
-                                    ""
-                                },
-                                p.name
-                            ),
-                        )
-                        .on_click(cx.listener(
-                            move |this, _, window, cx| {
-                                this.selected_profile = Some(id.clone());
-                                this.examples.clear();
-                                this.person_name.update(cx, |input, cx| {
-                                    input.set_value(name.clone(), window, cx)
-                                });
-                                this.load_examples(id.clone(), cx);
-                                cx.notify();
-                            },
-                        )),
-                    );
-                }
-                content = content.child(
-                    button("enroll", "I verified this voice — enroll selected interval").on_click(
-                        cx.listener(|this, _, _, cx| {
-                            let (Some(d), Some(track), Some(profile)) = (
-                                &this.detail,
-                                this.selected_track.clone(),
-                                this.selected_profile.clone(),
-                            ) else {
-                                this.status = "Select a recording, source, and person first".into();
-                                cx.notify();
-                                return;
-                            };
-                            let (a, b) = match this.range(cx) {
-                                Ok(r) => r,
-                                Err(e) => {
-                                    this.status = e;
+                    div().flex().flex_wrap().gap_2().children(
+                        [
+                            (SpeakerMode::Profiles, "People and examples"),
+                            (SpeakerMode::Clusters, "Anonymous clusters"),
+                            (SpeakerMode::Comparisons, "Identity comparisons"),
+                        ]
+                        .into_iter()
+                        .enumerate()
+                        .map(|(index, (mode, label))| {
+                            button(("speaker-mode", index), label).on_click(cx.listener(
+                                move |this, _, _, cx| {
+                                    this.speaker_mode = mode;
                                     cx.notify();
-                                    return;
-                                }
-                            };
-                            let service = this.speakers.clone();
-                            let profile_id = profile.clone();
-                            let input = Enrollment {
-                                profile_id: profile,
-                                recording_id: d.recording.id.clone(),
-                                track_id: track,
-                                start_ms: a,
-                                end_ms: b,
-                                confirmed: true,
-                            };
-                            this.task(
-                                "Extracting local verified embedding",
-                                async move {
-                                    service.enroll(input).await?;
-                                    let examples = service.examples(Some(&profile_id)).await?;
-                                    Ok(Update::Examples(profile_id, examples))
                                 },
-                                cx,
-                            );
+                            ))
                         }),
                     ),
                 );
-                content = content.child(
-                    div()
-                        .flex()
-                        .gap_2()
-                        .child(button("rename-person", "Rename selected person").on_click(
-                            cx.listener(|this, _, _, cx| {
-                                if let Some(id) = this.selected_profile.clone() {
-                                    let name = this.person_name.read(cx).value().to_string();
-                                    let service = this.speakers.clone();
-                                    this.task(
-                                        "Renaming person",
-                                        async move {
-                                            service
-                                                .rename(RenameSpeakerInput {
-                                                    id: id.clone(),
-                                                    name: name.clone(),
-                                                })
-                                                .await?;
-                                            Ok(Update::Profiles(service.profiles().await?))
-                                        },
-                                        cx,
-                                    );
-                                }
-                            }),
-                        ))
-                        .child(
-                            button("delete-person", "Delete selected person and examples")
-                                .on_click(cx.listener(|this, _, _, cx| {
+                if self.speaker_mode == SpeakerMode::Profiles {
+                    content=content.child(div().text_xl().child("Verified speaker examples")).child("Choose a person, return to a recording, play a clean 3–30 second track-local interval, then enroll it here.")
+     .child(div().flex().gap_2().child(field(&self.person_name)).child(button("add-person","Create person").on_click(cx.listener(|this,_,_,cx|{let name=this.person_name.read(cx).value().to_string();let service=this.speakers.clone();this.task("Creating speaker profile",async move{service.create(&name).await?;Ok(Update::Profiles(service.profiles().await?))},cx);}))));
+                    content = content.child(
+                        button("refresh-people", "Refresh people and examples")
+                            .on_click(cx.listener(|this, _, _, cx| this.refresh_profiles(cx))),
+                    );
+                    for p in &self.profiles {
+                        let id = p.id.clone();
+                        let name = p.name.clone();
+                        content = content.child(
+                            button(
+                                p.id.clone(),
+                                format!(
+                                    "{}{}",
+                                    if self.selected_profile.as_ref() == Some(&p.id) {
+                                        "● "
+                                    } else {
+                                        ""
+                                    },
+                                    p.name
+                                ),
+                            )
+                            .on_click(cx.listener(
+                                move |this, _, window, cx| {
+                                    this.selected_profile = Some(id.clone());
+                                    this.examples.clear();
+                                    this.person_name.update(cx, |input, cx| {
+                                        input.set_value(name.clone(), window, cx)
+                                    });
+                                    this.load_examples(id.clone(), cx);
+                                    cx.notify();
+                                },
+                            )),
+                        );
+                    }
+                    content = content.child(
+                        button("enroll", "I verified this voice — enroll selected interval")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                let (Some(d), Some(track), Some(profile)) = (
+                                    &this.detail,
+                                    this.selected_track.clone(),
+                                    this.selected_profile.clone(),
+                                ) else {
+                                    this.status =
+                                        "Select a recording, source, and person first".into();
+                                    cx.notify();
+                                    return;
+                                };
+                                let (a, b) = match this.range(cx) {
+                                    Ok(r) => r,
+                                    Err(e) => {
+                                        this.status = e;
+                                        cx.notify();
+                                        return;
+                                    }
+                                };
+                                let service = this.speakers.clone();
+                                let profile_id = profile.clone();
+                                let input = Enrollment {
+                                    profile_id: profile,
+                                    recording_id: d.recording.id.clone(),
+                                    track_id: track,
+                                    start_ms: a,
+                                    end_ms: b,
+                                    confirmed: true,
+                                };
+                                this.task(
+                                    "Extracting local verified embedding",
+                                    async move {
+                                        service.enroll(input).await?;
+                                        let examples = service.examples(Some(&profile_id)).await?;
+                                        Ok(Update::Examples(profile_id, examples))
+                                    },
+                                    cx,
+                                );
+                            })),
+                    );
+                    content = content.child(
+                        div()
+                            .flex()
+                            .gap_2()
+                            .child(button("rename-person", "Rename selected person").on_click(
+                                cx.listener(|this, _, _, cx| {
                                     if let Some(id) = this.selected_profile.clone() {
+                                        let name = this.person_name.read(cx).value().to_string();
                                         let service = this.speakers.clone();
                                         this.task(
-                                            "Deleting local voice profile",
+                                            "Renaming person",
                                             async move {
-                                                service.delete(&id).await?;
+                                                service
+                                                    .rename(RenameSpeakerInput {
+                                                        id: id.clone(),
+                                                        name: name.clone(),
+                                                    })
+                                                    .await?;
                                                 Ok(Update::Profiles(service.profiles().await?))
                                             },
                                             cx,
                                         );
                                     }
-                                })),
-                        ),
-                );
-                for (index, candidate) in self.candidates.iter().enumerate() {
-                    let c = candidate.clone();
-                    content = content.child(
-                        button(
-                            ("candidate", index),
-                            format!(
-                                "Prepare {} · {:.1}–{:.1}s",
-                                anonymous_label(&candidate.anonymous_speaker),
-                                candidate.local_start_ms as f64 / 1000.,
-                                candidate.local_end_ms as f64 / 1000.
+                                }),
+                            ))
+                            .child(
+                                button("delete-person", "Delete selected person and examples")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        if let Some(id) = this.selected_profile.clone() {
+                                            let service = this.speakers.clone();
+                                            this.task(
+                                                "Deleting local voice profile",
+                                                async move {
+                                                    service.delete(&id).await?;
+                                                    Ok(Update::Profiles(service.profiles().await?))
+                                                },
+                                                cx,
+                                            );
+                                        }
+                                    })),
                             ),
-                        )
-                        .on_click(cx.listener(
-                            move |this, _, window, cx| {
-                                this.selected_track = Some(c.track_id.clone());
-                                this.start.update(cx, |s, cx| {
-                                    s.set_value(c.local_start_ms.to_string(), window, cx)
-                                });
-                                this.end.update(cx, |s, cx| {
-                                    s.set_value(c.local_end_ms.to_string(), window, cx)
-                                });
-                                cx.notify();
-                            },
-                        )),
                     );
-                }
-                content = content.child(
-                    button("play-enrollment", "Play prepared interval")
-                        .on_click(cx.listener(|this, _, _, cx| this.play(cx))),
-                );
-                for (index, example) in self.examples.iter().enumerate() {
-                    let e = example.clone();
-                    let remove = example.id.clone();
-                    let profile = example.profile_id.clone();
-                    content =
-                        content.child(
+                    for (index, candidate) in self.candidates.iter().enumerate() {
+                        let c = candidate.clone();
+                        content = content.child(
+                            button(
+                                ("candidate", index),
+                                format!(
+                                    "Prepare {} · {:.1}–{:.1}s",
+                                    anonymous_label(&candidate.anonymous_speaker),
+                                    candidate.local_start_ms as f64 / 1000.,
+                                    candidate.local_end_ms as f64 / 1000.
+                                ),
+                            )
+                            .on_click(cx.listener(
+                                move |this, _, window, cx| {
+                                    this.selected_track = Some(c.track_id.clone());
+                                    this.start.update(cx, |s, cx| {
+                                        s.set_value(c.local_start_ms.to_string(), window, cx)
+                                    });
+                                    this.end.update(cx, |s, cx| {
+                                        s.set_value(c.local_end_ms.to_string(), window, cx)
+                                    });
+                                    cx.notify();
+                                },
+                            )),
+                        );
+                    }
+                    content = content.child(
+                        button("play-enrollment", "Play prepared interval")
+                            .on_click(cx.listener(|this, _, _, cx| this.play(cx))),
+                    );
+                    for (index, example) in self.examples.iter().enumerate() {
+                        let e = example.clone();
+                        let remove = example.id.clone();
+                        let profile = example.profile_id.clone();
+                        content = content.child(
                             div()
                                 .flex()
                                 .flex_col()
@@ -1250,8 +1368,12 @@ impl Render for Workbench {
                                         })),
                                 ),
                         );
+                    }
+                } else if self.speaker_mode == SpeakerMode::Clusters {
+                    content = content.child(self.cluster_panel(cx));
+                } else {
+                    content = content.child(self.suggestion_panel(cx));
                 }
-                content = content.child(self.suggestion_panel(cx));
             }
             Area::Jobs => {
                 content=content.child(div().text_xl().child("Processing ownership and recovery"))
@@ -1535,6 +1657,9 @@ impl Render for Workbench {
                 }
             }
             Area::Dictation => {
+                content=content.child(button("recover-clipboard","Recover interrupted clipboard paste").on_click(cx.listener(|this,_,_,cx|{
+                    let service=this.insertion_recovery.clone();this.task("Recovering only Parakeet-owned clipboard transactions",async move{let report=service.recover().await?;Ok(Update::Message(format!("Restored {} interrupted paste(s); {} older snapshots discarded after clipboard changed",report.restored,report.discarded)))},cx);
+                })));
                 let live = self
                     .dictation_state
                     .lock()
@@ -1577,6 +1702,14 @@ impl Render for Workbench {
                                 receipt.created_at, receipt.target.bundle_id, receipt.status
                             ))
                             .child(receipt.raw.clone())
+                            .when_some(receipt.insertion.clone(), |row, report| {
+                                row.child(format!(
+                                    "Insertion: {} · {} · clipboard {}",
+                                    report.method,
+                                    report.verification,
+                                    report.clipboard_status.as_deref().unwrap_or("untouched")
+                                ))
+                            })
                             .when_some(receipt.failure.clone(), |row, error| row.child(error))
                             .child(button(("copy-retained", index), "Copy raw text").on_click(
                                 cx.listener(move |_, _, _, cx| {
@@ -2096,6 +2229,13 @@ fn main() -> anyhow::Result<()> {
     let models = Arc::new(ModelFiles::new(root.join("models")));
     let engine = Arc::new(LocalSpeech::new(models.clone(), model_runtime_executable()));
     let library = Arc::new(LibraryService::new(store.clone(), store.clone(), source));
+    let locations = Arc::new(
+        parakeet_application::audio_locations::AudioLocationService::new(
+            store.clone(),
+            store.clone(),
+            Arc::new(parakeet_infrastructure::audio::LocalAudioIdentity),
+        ),
+    );
     let speakers = Arc::new(SpeakerService::new(
         store.clone(),
         store.clone(),
@@ -2116,6 +2256,13 @@ fn main() -> anyhow::Result<()> {
         store.clone(),
         ownership.clone(),
     ));
+    let clusters = Arc::new(
+        parakeet_application::cluster_edits::ClusterEditingService::new(
+            store.clone(),
+            store.clone(),
+            ownership.clone(),
+        ),
+    );
     let recovery = Arc::new(parakeet_application::jobs::ProcessingRecoveryService::new(
         store.clone(),
         store.clone(),
@@ -2151,6 +2298,15 @@ fn main() -> anyhow::Result<()> {
         bridge_executable,
         root.clone(),
     ));
+    let insertion_recovery = Arc::new(InsertionRecoveryService::new(native.clone()));
+    let startup_status = match runtime.block_on(insertion_recovery.recover()) {
+        Ok(report) if report.restored > 0 => format!(
+            "Recovered {} interrupted clipboard paste(s)",
+            report.restored
+        ),
+        Ok(_) => "Ready".into(),
+        Err(e) => format!("Clipboard recovery needs attention: {e}"),
+    };
     let audio_inspection = Arc::new(AudioInspectionService::new(native.clone()));
     let capture = Arc::new(CaptureService::new(native.clone(), store.clone()));
     let audio_settings = Arc::new(AudioSettingsService::new(store.clone(), store.clone()));
@@ -2230,6 +2386,8 @@ fn main() -> anyhow::Result<()> {
                     });
                     let profile_executable = input(window, cx, "", "/absolute/path/to/cli");
                     let profile_arguments = input(window, cx, "[]", "Arguments");
+                    let relink_path = input(window, cx, "", "Replacement audio file path");
+                    let split_at = input(window, cx, "", "Meeting-time split in ms");
                     let match_score = input(window, cx, "", "Minimum similarity (-1 to 1)");
                     let match_margin = input(window, cx, "", "Minimum separation");
                     let match_examples = input(window, cx, "", "Verified reference count");
@@ -2237,6 +2395,12 @@ fn main() -> anyhow::Result<()> {
                     let view = cx.new(|_| Workbench {
                         runtime,
                         library,
+                        locations,
+                        relink_path,
+                        clusters,
+                        cluster_review: None,
+                        selected_clusters: vec![],
+                        split_at,
                         media,
                         speakers,
                         models,
@@ -2255,6 +2419,7 @@ fn main() -> anyhow::Result<()> {
                         audio_settings,
                         dictation_listener,
                         dictation_history,
+                        insertion_recovery,
                         dictations: vec![],
                         capture_stop: None,
                         dictation_stop: None,
@@ -2266,6 +2431,9 @@ fn main() -> anyhow::Result<()> {
                         heartbeat_last: Instant::now(),
                         heartbeat_max_ms: 0.,
                         area: Area::Library,
+                        speaker_mode: SpeakerMode::Profiles,
+                        show_location_tools: false,
+                        show_run_history: false,
                         records,
                         detail: None,
                         profiles,
@@ -2293,7 +2461,7 @@ fn main() -> anyhow::Result<()> {
                         profile_arguments,
                         prompt_id: None,
                         prompt_route: "remote".into(),
-                        status: "Ready".into(),
+                        status: startup_status,
                         pending: 0,
                         render_peak_ms: 0.,
                         render_count: 0,
@@ -2437,6 +2605,27 @@ impl Workbench {
         let mut panel=div().flex().flex_col().gap_2().mt_4()
             .child(div().text_xl().child("Identity comparisons"))
             .child("Comparisons are predictions. Listen before confirming a transcript identity. Confirmation never adds a voice reference.");
+        for person in &self.profiles {
+            let id = person.id.clone();
+            panel = panel.child(
+                button(
+                    format!("comparison-person-{}", person.id),
+                    format!(
+                        "{}Replacement identity: {}",
+                        if self.selected_profile.as_ref() == Some(&person.id) {
+                            "✓ "
+                        } else {
+                            ""
+                        },
+                        person.name
+                    ),
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.selected_profile = Some(id.clone());
+                    cx.notify();
+                })),
+            );
+        }
         let Some(detail) = &self.detail else {
             return panel.child("Open a recording in Library to compare or review its voices.");
         };
@@ -2602,5 +2791,236 @@ impl Workbench {
             panel = panel.child(row);
         }
         panel
+    }
+}
+
+impl Workbench {
+    fn inspect_clusters(&mut self, cx: &mut Context<Self>) {
+        let Some(detail) = &self.detail else {
+            self.status = "Open a recording first".into();
+            cx.notify();
+            return;
+        };
+        let Some(track) = self.selected_track.clone() else {
+            return;
+        };
+        let service = self.clusters.clone();
+        let input = parakeet_application::cluster_edits::InspectClustersInput {
+            recording_id: detail.recording.id.clone(),
+            track_id: track,
+            run_id: None,
+        };
+        self.task(
+            "Inspecting source-scoped anonymous speakers",
+            async move { Ok(Update::Clusters(service.inspect(input).await?)) },
+            cx,
+        );
+    }
+    fn edit_clusters(
+        &mut self,
+        edit: parakeet_application::cluster_edits::ClusterEdit,
+        cx: &mut Context<Self>,
+    ) {
+        if self.pending > 0 {
+            self.status =
+                "Wait for the current background operation before editing clusters".into();
+            cx.notify();
+            return;
+        }
+        let Some(review) = &self.cluster_review else {
+            return;
+        };
+        if self.selected_track.as_deref() != Some(review.track_id.as_str()) {
+            self.status = "Inspect clusters for the selected source first".into();
+            cx.notify();
+            return;
+        }
+        let input = parakeet_application::cluster_edits::EditClustersInput {
+            recording_id: review.recording_id.clone(),
+            run_id: review.run_id.clone(),
+            edit,
+        };
+        let service = self.clusters.clone();
+        let track = review.track_id.clone();
+        self.task(
+            "Saving derived cluster edit; raw result preserved",
+            async move {
+                let run = service.edit(input).await?;
+                Ok(Update::Clusters(
+                    service
+                        .inspect(parakeet_application::cluster_edits::InspectClustersInput {
+                            recording_id: run.recording_id,
+                            track_id: track,
+                            run_id: Some(run.id),
+                        })
+                        .await?,
+                ))
+            },
+            cx,
+        );
+    }
+    fn cluster_panel(&self, cx: &mut Context<Self>) -> Div {
+        use parakeet_application::cluster_edits::ClusterEdit;
+        let mut panel=div().flex().flex_col().gap_2().mt_4().child(div().text_xl().child("Anonymous speaker clusters"))
+            .child("Split or merge voices within one source. This creates a derived result and does not enroll or name a person.")
+            .child(button("inspect-clusters","Inspect latest clusters for selected source").on_click(cx.listener(|this,_,_,cx|this.inspect_clusters(cx))));
+        let Some(review) = self
+            .cluster_review
+            .as_ref()
+            .filter(|r| self.selected_track.as_deref() == Some(r.track_id.as_str()))
+        else {
+            return panel;
+        };
+        if let Some(detail) = self
+            .detail
+            .as_ref()
+            .filter(|d| d.recording.id == review.recording_id)
+        {
+            let source = detail
+                .tracks
+                .iter()
+                .find(|t| t.id == review.track_id)
+                .map(|t| format!("{:?}", t.kind))
+                .unwrap_or_else(|| "unavailable".into());
+            panel = panel.child(format!(
+                "Recording: {} · source: {}",
+                detail.recording.title(),
+                source
+            ));
+        }
+        panel = panel.child(format!(
+            "Model {} · run {} · {} clusters",
+            review.model,
+            review.run_id,
+            review.clusters.len()
+        ));
+        for cluster in &review.clusters {
+            let id = cluster.id.clone();
+            let mut row = div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .p_3()
+                .bg(rgb(0x1c2933))
+                .child(
+                    button(
+                        format!("choose-cluster-{}", cluster.id),
+                        format!(
+                            "{}{} · {} intervals · {:.1}s speech · {:.1}–{:.1}s meeting time",
+                            if self.selected_clusters.contains(&cluster.id) {
+                                "✓ "
+                            } else {
+                                ""
+                            },
+                            anonymous_label(&cluster.id),
+                            cluster.interval_count,
+                            cluster.speech_ms as f64 / 1000.,
+                            cluster.start_ms as f64 / 1000.,
+                            cluster.end_ms as f64 / 1000.
+                        ),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if this.selected_clusters.contains(&id) {
+                            this.selected_clusters.retain(|v| v != &id)
+                        } else {
+                            this.selected_clusters.push(id.clone())
+                        }
+                        cx.notify();
+                    })),
+                );
+            if let Some(preview) = &cluster.preview {
+                let preview = preview.clone();
+                row = row.child(
+                    button(
+                        format!("preview-cluster-{}", cluster.id),
+                        "Play representative nonoverlapping speech",
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        let service = this.playback.clone();
+                        let input = preview.clone();
+                        this.task(
+                            "Playing anonymous cluster evidence",
+                            async move {
+                                service.play(input).await?;
+                                Ok(Update::Message("Cluster playback complete".into()))
+                            },
+                            cx,
+                        );
+                    })),
+                );
+            } else {
+                row = row.child(
+                    "No safely aligned, nonoverlapping preview; inspect the original track.",
+                );
+            }
+            panel = panel.child(row);
+        }
+        panel=panel.child("Select one cluster to split at an explicit meeting time; select two or more to merge.")
+            .child(field(&self.split_at))
+            .child(button("split-cluster","Split selected anonymous cluster").on_click(cx.listener(|this,_,_,cx|{
+                let Some(speaker)=this.selected_clusters.first().filter(|_|this.selected_clusters.len()==1).cloned() else{this.status="Select exactly one cluster".into();cx.notify();return};
+                let Ok(at_ms)=this.split_at.read(cx).value().parse::<i64>() else{this.status="Enter a meeting-time split in milliseconds".into();cx.notify();return};
+                this.edit_clusters(ClusterEdit::Split{speaker,at_ms},cx);
+            })))
+            .child(button("merge-clusters","Merge selected anonymous clusters").on_click(cx.listener(|this,_,_,cx|{this.edit_clusters(ClusterEdit::Merge{speakers:this.selected_clusters.clone()},cx)})));
+        if review.can_undo {
+            panel = panel.child(
+                button("undo-cluster-edit", "Undo latest cluster edit").on_click(
+                    cx.listener(|this, _, _, cx| this.edit_clusters(ClusterEdit::Undo, cx)),
+                ),
+            );
+        }
+        panel
+    }
+}
+
+impl Workbench {
+    fn fingerprint_audio(&mut self, cx: &mut Context<Self>) {
+        let (Some(detail), Some(track)) = (&self.detail, self.selected_track.clone()) else {
+            return;
+        };
+        let input = parakeet_application::audio_locations::FingerprintAudioInput {
+            recording_id: detail.recording.id.clone(),
+            track_id: track,
+        };
+        let service = self.locations.clone();
+        let library = self.library.clone();
+        self.task(
+            "Hashing selected source without modifying audio",
+            async move {
+                let track = service.fingerprint(input).await?;
+                Ok(Update::Detail(library.show(&track.recording_id).await?))
+            },
+            cx,
+        );
+    }
+    fn relink_audio(&mut self, dry_run: bool, cx: &mut Context<Self>) {
+        let (Some(detail), Some(track)) = (&self.detail, self.selected_track.clone()) else {
+            return;
+        };
+        let input = parakeet_application::audio_locations::RelinkAudioInput {
+            recording_id: detail.recording.id.clone(),
+            track_id: track,
+            path: PathBuf::from(self.relink_path.read(cx).value().to_string()),
+            dry_run,
+        };
+        let service = self.locations.clone();
+        let library = self.library.clone();
+        self.task(
+            "Verifying replacement audio content",
+            async move {
+                let report = service.relink(input).await?;
+                if report.dry_run {
+                    Ok(Update::Message(
+                        "Replacement is byte-identical. Locator was not changed.".into(),
+                    ))
+                } else {
+                    Ok(Update::Detail(
+                        library.show(&report.track.recording_id).await?,
+                    ))
+                }
+            },
+            cx,
+        );
     }
 }

@@ -28,10 +28,43 @@ pub struct DictationReceipt {
     pub status: String,
     pub failure: Option<String>,
     pub created_at: String,
+    #[serde(default)]
+    pub insertion: Option<InsertionReport>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InsertionReport {
+    pub method: String,
+    pub verification: String,
+    pub clipboard_status: Option<String>,
+}
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct InsertionRecoveryReport {
+    pub restored: usize,
+    pub discarded: usize,
+}
+#[async_trait]
+pub trait TextInsertionRecovery: Send + Sync {
+    async fn recover(&self) -> Result<InsertionRecoveryReport, CapabilityError>;
+}
+operation_error!(RecoverInsertionError,sources{Capability:CapabilityError=>"capability"},values{});
+pub struct InsertionRecoveryService {
+    recovery: Arc<dyn TextInsertionRecovery>,
+}
+impl InsertionRecoveryService {
+    pub fn new(recovery: Arc<dyn TextInsertionRecovery>) -> Self {
+        Self { recovery }
+    }
+    pub async fn recover(&self) -> Result<InsertionRecoveryReport, RecoverInsertionError> {
+        Ok(self.recovery.recover().await?)
+    }
 }
 #[async_trait]
 pub trait TextInsertion: Send + Sync {
-    async fn insert(&self, target: &InsertionTarget, text: &str) -> Result<(), CapabilityError>;
+    async fn insert(
+        &self,
+        target: &InsertionTarget,
+        text: &str,
+    ) -> Result<InsertionReport, CapabilityError>;
 }
 #[async_trait]
 pub trait DictationWrites: Send + Sync {
@@ -98,6 +131,7 @@ impl DictationService {
             status: "cancelled".into(),
             failure: None,
             created_at: now(),
+            insertion: None,
         };
         if !control.cancelled.load(Ordering::SeqCst) {
             let result = async {
@@ -155,7 +189,7 @@ impl DictationService {
                     return Ok(());
                 }
                 let text = receipt.enhanced.as_deref().unwrap_or(&receipt.raw);
-                self.insertion.insert(&receipt.target, text).await?;
+                receipt.insertion=Some(self.insertion.insert(&receipt.target, text).await?);
                 receipt.status = "inserted".into();
                 Ok::<_, CapabilityError>(())
             }

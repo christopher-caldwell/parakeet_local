@@ -1,3 +1,4 @@
+use crate::speech_cache::{Cached, SpeechCache};
 use crate::{
     audio,
     models::{ModelFiles, SPEAKRS_ID, SPEAKRS_REV},
@@ -11,6 +12,7 @@ use std::{sync::Arc, time::Instant};
 #[derive(Clone)]
 pub struct LocalSpeech {
     models: Arc<ModelFiles>,
+    cache: Arc<SpeechCache>,
     model_runtime: std::path::PathBuf,
 }
 impl LocalSpeech {
@@ -18,6 +20,7 @@ impl LocalSpeech {
         Self {
             models,
             model_runtime,
+            cache: Arc::new(SpeechCache::default()),
         }
     }
 }
@@ -42,6 +45,8 @@ impl SpeechProcessing for LocalSpeech {
         track: &AudioTrack,
         run: &ProcessingRun,
     ) -> Result<EngineOutput, CapabilityError> {
+        SpeechCache::start_cleanup(&self.cache);
+        let cache = self.cache.clone();
         let models = self.models.clone();
         let model_runtime = self.model_runtime.clone();
         let req = request.clone();
@@ -57,8 +62,12 @@ impl SpeechProcessing for LocalSpeech {
    if req.model.starts_with("whisper-"){
     whisper_rs::install_logging_hooks();
     let file=directory.join(if req.model=="whisper-base.en"{"ggml-base.en.bin"}else{"ggml-small.en.bin"});
-    let context=whisper_rs::WhisperContext::new_with_params(file.to_str().ok_or_else(||CapabilityError::message("invalid model path"))?,whisper_rs::WhisperContextParameters::default()).map_err(CapabilityError::new)?;
-    let load_seconds=loaded.elapsed().as_secs_f64();let mut segments=vec![];let mut raw=vec![];let mut consumed=0;let mut decode_seconds=0.;let mut audio_seconds=0.;
+    let key=models.cache_identity(&req.model)?;
+    let mut cached=cache.whisper.lock().map_err(|_|CapabilityError::message("ASR model cache lock failed"))?;
+    let reused=cached.as_ref().is_some_and(|c|c.key==key);
+    if !reused { *cached=None; let model=whisper_rs::WhisperContext::new_with_params(file.to_str().ok_or_else(||CapabilityError::message("invalid model path"))?,whisper_rs::WhisperContextParameters::default()).map_err(CapabilityError::new)?; *cached=Some(Cached{key,model,last_used:Instant::now()}); }
+    let context=&cached.as_ref().ok_or_else(||CapabilityError::message("ASR cache missing after initialization"))?.model;
+    let load_seconds=if reused{0.}else{loaded.elapsed().as_secs_f64()};let mut segments=vec![];let mut raw=vec![];let mut consumed=0;let mut decode_seconds=0.;let mut audio_seconds=0.;
     while consumed<duration{
      let length=(duration-consumed).min(60_000);let decoded=Instant::now();let samples=runtime.block_on(audio::decode(&track,req.start_ms+consumed,length))?;decode_seconds+=decoded.elapsed().as_secs_f64();let actual_ms=samples.len() as i64/16;audio_seconds+=samples.len() as f64/16000.;
      let rms=(samples.iter().map(|s|(*s as f64).powi(2)).sum::<f64>()/samples.len() as f64).sqrt();
@@ -73,8 +82,9 @@ impl SpeechProcessing for LocalSpeech {
      }
      consumed+=length;if actual_ms<length-100{break;}
     }
+    if let Some(c)=cached.as_mut(){c.last_used=Instant::now();}
     order_segments(&mut segments);let wall=started.elapsed().as_secs_f64();
-    Ok(EngineOutput{segments,intervals:vec![],raw:json!(raw),metrics:json!({"wall_seconds":wall,"model_load_seconds":load_seconds,"decode_seconds":decode_seconds,"audio_seconds":audio_seconds,"real_time_factor":wall/audio_seconds,"process_lifetime_peak_rss_bytes":peak_rss_bytes(),"chunk_ms":60_000,"chunk_overlap_ms":0,"threads":4,"timing_space":if track.meeting_offset_ms().is_some(){"meeting"}else{"untimed_with_track_local_evidence"}})})
+    Ok(EngineOutput{segments,intervals:vec![],raw:json!(raw),metrics:json!({"wall_seconds":wall,"model_load_seconds":load_seconds,"decode_seconds":decode_seconds,"audio_seconds":audio_seconds,"real_time_factor":wall/audio_seconds,"process_lifetime_peak_rss_bytes":peak_rss_bytes(),"model_context_reused":reused,"cache_idle_seconds":60,"runtime_configuration":"whisper-rs-0.16.0:context-cache-v1:no-context-60s","chunk_ms":60_000,"chunk_overlap_ms":0,"threads":4,"timing_space":if track.meeting_offset_ms().is_some(){"meeting"}else{"untimed_with_track_local_evidence"}})})
    }else if req.model==SPEAKRS_ID || req.model=="speakrs-community-1-cpu"{
     let mut pipeline=speakrs::OwnedDiarizationPipeline::from_dir(&directory,if req.model==SPEAKRS_ID{speakrs::ExecutionMode::CoreMl}else{speakrs::ExecutionMode::Cpu}).map_err(CapabilityError::new)?;let load_seconds=loaded.elapsed().as_secs_f64();let decoding=Instant::now();let samples=runtime.block_on(audio::decode(&track,req.start_ms,duration))?;let decode_seconds=decoding.elapsed().as_secs_f64();let audio_seconds=samples.len() as f64/16000.;
     let output=pipeline.run(&samples).map_err(CapabilityError::new)?;let mut intervals=vec![];
@@ -103,13 +113,18 @@ impl VoiceEmbeddings for LocalSpeech {
                 "install and verify the speakrs model before extracting embeddings",
             ));
         }
+        SpeechCache::start_cleanup(&self.cache);
+        let cache = self.cache.clone();
         let models = self.models.clone();
         let track = track.clone();
         let runtime = tokio::runtime::Handle::current();
         tokio::task::spawn_blocking(move ||{let _lease=models.acquire()?;let started=Instant::now();let samples=runtime.block_on(audio::decode(&track,start_ms,end_ms-start_ms))?;
    if samples.len()<48000{return Err(CapabilityError::message("decoded enrollment sample contains less than three seconds"));}
    let rms=(samples.iter().map(|s|(*s as f64).powi(2)).sum::<f64>()/samples.len() as f64).sqrt();if rms<0.0003{return Err(CapabilityError::message("sample has insufficient acoustic energy for enrollment"));}
-   let mut model=speakrs::inference::EmbeddingModel::with_mode(models.directory(&model_id)?.join("wespeaker-voxceleb-resnet34.onnx"),if model_id.ends_with("-cpu"){speakrs::ExecutionMode::Cpu}else{speakrs::ExecutionMode::CoreMl}).map_err(CapabilityError::new)?;
+   let key=models.cache_identity(&model_id)?;let mut cached=cache.embedding.lock().map_err(|_|CapabilityError::message("embedding cache lock failed"))?;
+   let reused=cached.as_ref().is_some_and(|c|c.key==key);
+   if !reused { *cached=None;let model=speakrs::inference::EmbeddingModel::with_mode(models.directory(&model_id)?.join("wespeaker-voxceleb-resnet34.onnx"),if model_id.ends_with("-cpu"){speakrs::ExecutionMode::Cpu}else{speakrs::ExecutionMode::CoreMl}).map_err(CapabilityError::new)?;*cached=Some(Cached{key,model,last_used:Instant::now()}); }
+   let model=&mut cached.as_mut().ok_or_else(||CapabilityError::message("embedding cache missing after initialization"))?.model;
    // The upstream single-window embed method pads to ten seconds but weights
    // the whole padded window. Mask padding explicitly; pool normalized windows
    // so a 20-second enrollment does not silently use only the first ten seconds.
@@ -123,7 +138,8 @@ impl VoiceEmbeddings for LocalSpeech {
    let mut vector=vec![0f32;256];
    for window in &vectors { for (sum,value) in vector.iter_mut().zip(window) { *sum+=value; } }
    let vector=normalize_vector(vector)?;
-   Ok(EmbeddingOutput{model:"wespeaker-voxceleb-resnet34".into(),revision:format!("{SPEAKRS_REV}:speakrs-0.7.0:masked-window-v1:{}",if model_id.ends_with("-cpu"){"cpu"}else{"coreml"}),vector,metrics:json!({"wall_seconds":started.elapsed().as_secs_f64(),"rms":rms,"requires_clean_nonoverlapping_sample":true,"embedding_windows":vectors.len(),"padding_masked":true})})
+   if let Some(c)=cached.as_mut(){c.last_used=Instant::now();}
+   Ok(EmbeddingOutput{model:"wespeaker-voxceleb-resnet34".into(),revision:format!("{SPEAKRS_REV}:speakrs-0.7.0:masked-window-v1:{}",if model_id.ends_with("-cpu"){"cpu"}else{"coreml"}),vector,metrics:json!({"wall_seconds":started.elapsed().as_secs_f64(),"rms":rms,"requires_clean_nonoverlapping_sample":true,"embedding_windows":vectors.len(),"model_context_reused":reused,"cache_idle_seconds":60,"padding_masked":true})})
   }).await.map_err(CapabilityError::new)?
     }
 }

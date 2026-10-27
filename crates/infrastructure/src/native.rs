@@ -53,16 +53,25 @@ impl NativeBridge {
         &self,
         target: &gestures::InsertionTarget,
         text: &str,
-    ) -> Result<(), CapabilityError> {
+    ) -> Result<parakeet_application::dictation::InsertionReport, CapabilityError> {
         tokio::fs::create_dir_all(&self.root)
             .await
             .map_err(CapabilityError::new)?;
         let path = self.root.join(format!("insert-{}.json", new_id()));
         let mut v = serde_json::to_value(target).map_err(CapabilityError::new)?;
         v["text"] = json!(text);
-        tokio::fs::write(&path, serde_json::to_vec(&v).map_err(CapabilityError::new)?)
+        v["clipboard_recovery_directory"] = json!(self.root.join("clipboard-recovery"));
+        let mut file = tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
             .await
             .map_err(CapabilityError::new)?;
+        file.write_all(&serde_json::to_vec(&v).map_err(CapabilityError::new)?)
+            .await
+            .map_err(CapabilityError::new)?;
+        drop(file);
         let output = tokio::time::timeout(
             Duration::from_secs(10),
             Command::new(&self.executable)
@@ -81,7 +90,41 @@ impl NativeBridge {
                 String::from_utf8_lossy(&output.stdout).to_string(),
             ));
         }
-        Ok(())
+        let result: Value = serde_json::from_slice(&output.stdout).map_err(CapabilityError::new)?;
+        if result["inserted"] != true {
+            return Err(CapabilityError::message(
+                "insertion did not report success; inspect original target before retrying",
+            ));
+        }
+        serde_json::from_value(result).map_err(CapabilityError::new)
+    }
+}
+#[async_trait]
+impl parakeet_application::dictation::TextInsertionRecovery for NativeBridge {
+    async fn recover(
+        &self,
+    ) -> Result<parakeet_application::dictation::InsertionRecoveryReport, CapabilityError> {
+        let directory = self.root.join("clipboard-recovery");
+        if !directory.exists() {
+            return Ok(Default::default());
+        }
+        let output = tokio::time::timeout(
+            Duration::from_secs(10),
+            Command::new(&self.executable)
+                .arg("clipboard-recover")
+                .arg(directory)
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await
+        .map_err(CapabilityError::new)?
+        .map_err(CapabilityError::new)?;
+        if !output.status.success() {
+            return Err(CapabilityError::message(String::from_utf8_lossy(
+                &output.stdout,
+            )));
+        }
+        serde_json::from_slice(&output.stdout).map_err(CapabilityError::new)
     }
 }
 #[async_trait]
@@ -408,7 +451,7 @@ impl parakeet_application::dictation::TextInsertion for NativeBridge {
         &self,
         target: &gestures::InsertionTarget,
         text: &str,
-    ) -> Result<(), CapabilityError> {
+    ) -> Result<parakeet_application::dictation::InsertionReport, CapabilityError> {
         NativeBridge::insert(self, target, text).await
     }
 }

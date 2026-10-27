@@ -13,6 +13,31 @@ pub struct EditClustersInput {
     pub run_id: String,
     pub edit: ClusterEdit,
 }
+#[derive(Debug, Clone)]
+pub struct InspectClustersInput {
+    pub recording_id: String,
+    pub track_id: String,
+    pub run_id: Option<String>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClusterSummary {
+    pub id: String,
+    pub interval_count: usize,
+    pub speech_ms: i64,
+    pub start_ms: i64,
+    pub end_ms: i64,
+    pub preview: Option<PlayAudioInput>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClusterReview {
+    pub recording_id: String,
+    pub track_id: String,
+    pub run_id: String,
+    pub model: String,
+    pub can_undo: bool,
+    pub clusters: Vec<ClusterSummary>,
+}
+operation_error!(InspectClustersError,sources{Persistence:PersistenceError=>"persistence",Invalid:ValidationError=>"invalid_input"},values{NotFound=>"not_found"});
 pub struct ClusterEditingService {
     queries: Arc<dyn LibraryQueries>,
     writes: Arc<dyn RunWrites>,
@@ -29,6 +54,100 @@ impl ClusterEditingService {
             writes,
             ownership,
         }
+    }
+    pub async fn inspect(
+        &self,
+        input: InspectClustersInput,
+    ) -> Result<ClusterReview, InspectClustersError> {
+        let detail = self
+            .queries
+            .detail(&input.recording_id)
+            .await?
+            .ok_or_else(|| InspectClustersError::NotFound(input.recording_id.clone()))?;
+        let track = detail
+            .tracks
+            .iter()
+            .find(|t| t.id == input.track_id)
+            .ok_or_else(|| InspectClustersError::NotFound(input.track_id.clone()))?;
+        let run = detail
+            .runs
+            .iter()
+            .rev()
+            .find(|r| {
+                r.status == "completed"
+                    && r.kind == "diarization"
+                    && r.configuration["track"]["id"] == input.track_id
+                    && input.run_id.as_ref().is_none_or(|id| *id == r.id)
+            })
+            .ok_or_else(|| {
+                InspectClustersError::NotFound(
+                    "no completed diarization for this source/run".into(),
+                )
+            })?;
+        let intervals: Vec<SpeakerInterval> =
+            serde_json::from_value(run.result["intervals"].clone())
+                .map_err(|e| ValidationError(e.to_string()))?;
+        for interval in &intervals {
+            interval.validate()?;
+            if interval.track_id.as_deref() != Some(input.track_id.as_str()) {
+                return Err(ValidationError(
+                    "diarization contains activity for a different source".into(),
+                )
+                .into());
+            }
+        }
+        let ids: std::collections::BTreeSet<_> =
+            intervals.iter().map(|i| i.speaker.clone()).collect();
+        let mut clusters = vec![];
+        for id in ids {
+            let selected: Vec<_> = intervals.iter().filter(|i| i.speaker == id).collect();
+            let preview = selected
+                .iter()
+                .filter(|i| {
+                    !intervals.iter().any(|other| {
+                        other.speaker != id
+                            && other.start_ms < i.end_ms
+                            && other.end_ms > i.start_ms
+                    })
+                })
+                .max_by_key(|i| i.end_ms - i.start_ms)
+                .and_then(|i| {
+                    let local = i.start_ms.checked_sub(track.meeting_offset_ms()?)?;
+                    (local >= 0 && track.available).then(|| PlayAudioInput {
+                        recording_id: input.recording_id.clone(),
+                        track_id: input.track_id.clone(),
+                        start_ms: local,
+                        duration_ms: (i.end_ms - i.start_ms).min(15_000),
+                    })
+                });
+            clusters.push(ClusterSummary {
+                id,
+                interval_count: selected.len(),
+                speech_ms: selected
+                    .iter()
+                    .try_fold(0i64, |total, i| total.checked_add(i.end_ms - i.start_ms))
+                    .ok_or_else(|| ValidationError("cluster duration overflows".into()))?,
+                start_ms: selected
+                    .iter()
+                    .map(|i| i.start_ms)
+                    .min()
+                    .expect("nonempty cluster"),
+                end_ms: selected
+                    .iter()
+                    .map(|i| i.end_ms)
+                    .max()
+                    .expect("nonempty cluster"),
+                preview,
+            });
+        }
+        Ok(ClusterReview {
+            recording_id: input.recording_id,
+            track_id: input.track_id,
+            run_id: run.id.clone(),
+            model: run.model.clone(),
+            can_undo: run.configuration["human_edit_parent_run"].is_string(),
+            clusters,
+        })
     }
     pub async fn edit(&self, input: EditClustersInput) -> Result<ProcessingRun, EditClustersError> {
         let d = self

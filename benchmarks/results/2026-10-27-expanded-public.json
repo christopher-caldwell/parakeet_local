@@ -1,0 +1,1001 @@
+{
+  "date": "2026-10-27",
+  "hardware": "Mac mini Mac14,12, 16GB RAM, macOS 26.3.1",
+  "limits": [
+    "Deterministic short public subsets; not whole-corpus or personal accuracy",
+    "Preset and model selections unchanged; test data was not used to tune",
+    "16 diarization entries include the earlier three held-out clips; new13 is reported separately",
+    "RSS is process-lifetime peak; helper and Rust peaks are separate and omit some device allocations"
+  ],
+  "diarization": {
+    "dataset": "VoxConverse 0.3 test, all 16 eligible 20-120s multi-speaker entries (requested count20)",
+    "protocol": {
+      "collar_ms": 0,
+      "score_overlap": true
+    },
+    "model": "nemotron3-fast128",
+    "model_revision": "1b0b133f6f8820292010afd776d8f9fbc9fca17e",
+    "all16": {
+      "clips": 16,
+      "reference_speaker_ms": 1282580.0,
+      "errors_ms": 61940.0,
+      "der": 0.04829328384974037,
+      "recording_macro_jer": 0.1169717597444304,
+      "exact_speaker_count_clips": 11
+    },
+    "new13": {
+      "clips": 13,
+      "reference_speaker_ms": 1168090.0,
+      "errors_ms": 54740.0,
+      "der": 0.04686282735063223,
+      "recording_macro_jer": 0.12091817114276167,
+      "exact_speaker_count_clips": 8
+    },
+    "clips": [
+      {
+        "id": "fuzfh",
+        "audio_sha256": "c7fa9ac2a44d78b9f1d797b63e87b83b84ca9691c9516563ae3e0e737d27dbcd",
+        "reference_sha256": "1ab1b5e9faebffd8417dd3f8ba2c433f5cb15d8bbb673f35e73bd5f14e38e8c0",
+        "scores": {
+          "reference_speaker_ms": 25490.0,
+          "missed_speaker_ms": 920.0,
+          "false_speaker_ms": 1180.0,
+          "confused_speaker_ms": 0.0,
+          "der": 0.0823852491173009,
+          "jer": 0.08317995008758879,
+          "reference_speakers": 3,
+          "predicted_speakers": 3,
+          "collar_ms": 0,
+          "score_overlap": true
+        },
+        "metrics": {
+          "wall_seconds": 1.78753575,
+          "model_load_seconds": 0.8906449079513551,
+          "decode_seconds": 0.041414083,
+          "audio_seconds": 26.048,
+          "real_time_factor": 0.06862468327702703,
+          "helper_metrics": {
+            "audio_seconds": 26.048,
+            "compute_units": "cpu_and_gpu",
+            "helper_peak_rss_bytes": 522420224,
+            "implementation": "FluidAudio subset 1b0ed50d686873128a4129b3510ce3914c849bab",
+            "wall_seconds": 1.2050559520721436,
+            "model_load_seconds": 0.8906449079513551,
+            "preset": "fast128",
+            "threshold": 0.5
+          },
+          "overlap_preserved": true,
+          "timing_space": "meeting",
+          "embedding_capability": false
+        }
+      },
+      {
+        "id": "msbyq",
+        "audio_sha256": "797019d573934a8a29c6fdb9cd707b4f10f8da781759f2e5d0542ef5729b365d",
+        "reference_sha256": "d807dd4dd2cc969bb817b462b89e6df5fed000c9a5082231758ce721ae0ea93f",
+        "scores": {
+          "reference_speaker_ms": 37450.0,
+          "missed_speaker_ms": 980.0,
+          "false_speaker_ms": 410.0,
+          "confused_speaker_ms": 10.0,
+          "der": 0.037383177570093455,
+          "jer": 0.06504023199474604,
+          "reference_speakers": 4,
+          "predicted_speakers": 4,
+          "collar_ms": 0,
+          "score_overlap": true
+        },
+        "metrics": {
+          "wall_seconds": 0.521660416,
+          "model_load_seconds": 0.1284799575805664,
+          "decode_seconds": 0.041199917,
+          "audio_seconds": 38.272,
+          "real_time_factor": 0.013630341137123747,
+          "helper_metrics": {
+            "audio_seconds": 38.272,
+            "compute_units": "cpu_and_gpu",
+            "helper_peak_rss_bytes": 428130304,
+            "implementation": "FluidAudio subset 1b0ed50d686873128a4129b3510ce3914c849bab",
+            "wall_seconds": 0.4417719841003418,
+            "model_load_seconds": 0.1284799575805664,
+            "preset": "fast128",
+            "threshold": 0.5
+          },
+          "overlap_preserved": true,
+          "timing_space": "meeting",
+          "embedding_capability": false
+        }
+      },
+      {
+        "id": "xkmqx",
+        "audio_sha256": "856953daf250f7403b049ca354c357319f3e91ce95a12aacf388fff3aa764380",
+        "reference_sha256": "c0ed6a73c82726fc6712f1ad89cc6fa05616769368f9377fa7810cd590a8f60b",
+        "scores": {
+          "reference_speaker_ms": 51550.0,
+          "missed_speaker_ms": 1770.0,
+          "false_speaker_ms": 1860.0,
+          "confused_speaker_ms": 70.0,
+          "der": 0.07177497575169738,
+          "jer": 0.15139174897264993,
+          "reference_speakers": 3,
+          "predicted_speakers": 3,
+          "collar_ms": 0,
+          "score_overlap": true
+        },
+        "metrics": {
+          "wall_seconds": 0.582702291,
+          "model_load_seconds": 0.12796294689178467,
+          "decode_seconds": 0.044939541,
+          "audio_seconds": 50.112,
+          "real_time_factor": 0.011627999102011495,
+          "helper_metrics": {
+            "audio_seconds": 50.112,
+            "compute_units": "cpu_and_gpu",
+            "helper_peak_rss_bytes": 427278336,
+            "implementation": "FluidAudio subset 1b0ed50d686873128a4129b3510ce3914c849bab",
+            "wall_seconds": 0.4951750040054322,
+            "model_load_seconds": 0.12796294689178467,
+            "preset": "fast128",
+            "threshold": 0.5
+          },
+          "overlap_preserved": true,
+          "timing_space": "meeting",
+          "embedding_capability": false
+        }
+      },
+      {
+        "id": "wdvva",
+        "audio_sha256": "67bbdb664210f71beaeb6bbe8913bfe34c653c5297985da38191abcb053bd251",
+        "reference_sha256": "df3f448d7ace858d57853ffdbff0a40b6aa180e87affbac9fde841a62ad88be4",
+        "scores": {
+          "reference_speaker_ms": 75800.0,
+          "missed_speaker_ms": 830.0,
+          "false_speaker_ms": 2660.0,
+          "confused_speaker_ms": 130.0,
+          "der": 0.047757255936675465,
+          "jer": 0.05382808990074622,
+          "reference_speakers": 2,
+          "predicted_speakers": 2,
+          "collar_ms": 0,
+          "score_overlap": true
+        },
+        "metrics": {
+          "wall_seconds": 0.7036905,
+          "model_load_seconds": 0.13109898567199707,
+          "decode_seconds": 0.049443542,
+          "audio_seconds": 65.856,
+          "real_time_factor": 0.010685290634110788,
+          "helper_metrics": {
+            "audio_seconds": 65.856,
+            "compute_units": "cpu_and_gpu",
+            "helper_peak_rss_bytes": 427327488,
+            "implementation": "FluidAudio subset 1b0ed50d686873128a4129b3510ce3914c849bab",
+            "wall_seconds": 0.6045379638671875,
+            "model_load_seconds": 0.13109898567199707,
+            "preset": "fast128",
+            "threshold": 0.5
+          },
+          "overlap_preserved": true,
+          "timing_space": "meeting",
+          "embedding_capability": false
+        }
+      },
+      {
+        "id": "gyomp",
+        "audio_sha256": "1bfe1fd637a24a53f2080d24f85adc0a7fb83983c6129bdaec456f13437a2b80",
+        "reference_sha256": "529ccb11c1f44f151e75ea22a07a46bfff5a9df81445d070fa7db1bfab5f5745",
+        "scores": {
+          "reference_speaker_ms": 56850.0,
+          "missed_speaker_ms": 360.0,
+          "false_speaker_ms": 950.0,
+          "confused_speaker_ms": 0.0,
+          "der": 0.023043095866314863,
+          "jer": 0.028731669014331107,
+          "reference_speakers": 5,
+          "predicted_speakers": 5,
+          "collar_ms": 0,
+          "score_overlap": true
+        },
+        "metrics": {
+          "wall_seconds": 0.769962083,
+          "model_load_seconds": 0.13002800941467285,
+          "decode_seconds": 0.054810541,
+          "audio_seconds": 80.0,
+          "real_time_factor": 0.009624526037500001,
+          "helper_metrics": {
+            "audio_seconds": 80,
+            "compute_units": "cpu_and_gpu",
+            "helper_peak_rss_bytes": 427999232,
+            "implementation": "FluidAudio subset 1b0ed50d686873128a4129b3510ce3914c849bab",
+            "wall_seconds": 0.6557580232620239,
+            "model_load_seconds": 0.13002800941467285,
+            "preset": "fast128",
+            "threshold": 0.5
+          },
+          "overlap_preserved": true,
+          "timing_space": "meeting",
+          "embedding_capability": false
+        }
+      },
+      {
+        "id": "lubpm",
+        "audio_sha256": "0b25260390729340788e58486a947d926ac37898314f05ae1cb1baf3ef48561a",
+        "reference_sha256": "4d1ab640fced3d6fa16a395efd942c8708ae87b0eaa4594a607ad7479eea3753",
+        "scores": {
+          "reference_speaker_ms": 54370.0,
+          "missed_speaker_ms": 1150.0,
+          "false_speaker_ms": 510.0,
+          "confused_speaker_ms": 0.0,
+          "der": 0.030531543130402794,
+          "jer": 0.03779418018773928,
+          "reference_speakers": 2,
+          "predicted_speakers": 2,
+          "collar_ms": 0,
+          "score_overlap": true
+        },
+        "metrics": {
+          "wall_seconds": 0.815975667,
+          "model_load_seconds": 0.1299079656600952,
+          "decode_seconds": 0.056310542,
+          "audio_seconds": 82.112,
+          "real_time_factor": 0.009937349802708497,
+          "helper_metrics": {
+            "audio_seconds": 82.112,
+            "compute_units": "cpu_and_gpu",
+            "helper_peak_rss_bytes": 428097536,
+            "implementation": "FluidAudio subset 1b0ed50d686873128a4129b3510ce3914c849bab",
+            "wall_seconds": 0.7015429735183716,
+            "model_load_seconds": 0.1299079656600952,
+            "preset": "fast128",
+            "threshold": 0.5
+          },
+          "overlap_preserved": true,
+          "timing_space": "meeting",
+          "embedding_capability": false
+        }
+      },
+      {
+        "id": "eucfa",
+        "audio_sha256": "16a66dc68be183f05e8afa9244977956dba6d5525752f13bf58f26e92de684e0",
+        "reference_sha256": "3df3d17631d786e34f31079243ec02c5b267e399b5c55d6951e9bdf8416649fb",
+        "scores": {
+          "reference_speaker_ms": 79020.0,
+          "missed_speaker_ms": 3340.0,
+          "false_speaker_ms": 880.0,
+          "confused_speaker_ms": 5660.0,
+          "der": 0.12503163756011137,
+          "jer": 0.39590651845682745,
+          "reference_speakers": 4,
+          "predicted_speakers": 3,
+          "collar_ms": 0,
+          "score_overlap": true
+        },
+        "metrics": {
+          "wall_seconds": 0.819642709,
+          "model_load_seconds": 0.12867498397827148,
+          "decode_seconds": 0.056293083,
+          "audio_seconds": 84.096,
+          "real_time_factor": 0.009746512426274733,
+          "helper_metrics": {
+            "audio_seconds": 84.096,
+            "compute_units": "cpu_and_gpu",
+            "helper_peak_rss_bytes": 427278336,
+            "implementation": "FluidAudio subset 1b0ed50d686873128a4129b3510ce3914c849bab",
+            "wall_seconds": 0.7041410207748413,
+            "model_load_seconds": 0.12867498397827148,
+            "preset": "fast128",
+            "threshold": 0.5
+          },
+          "overlap_preserved": true,
+          "timing_space": "meeting",
+          "embedding_capability": false
+        }
+      },
+      {
+        "id": "luobn",
+        "audio_sha256": "89f8b7c3aec34e8838645823d96872ce2f3f567eb1542c622dff0f2347411b4b",
+        "reference_sha256": "07b8bf8769987a0d153e505bc0296183b185488c2115ad2f5e5883512c403d25",
+        "scores": {
+          "reference_speaker_ms": 83480.0,
+          "missed_speaker_ms": 1810.0,
+          "false_speaker_ms": 1630.0,
+          "confused_speaker_ms": 60.0,
+          "der": 0.041926209870627694,
+          "jer": 0.038824582976577926,
+          "reference_speakers": 2,
+          "predicted_speakers": 2,
+          "collar_ms": 0,
+          "score_overlap": true
+        },
+        "metrics": {
+          "wall_seconds": 0.819546958,
+          "model_load_seconds": 0.13270998001098633,
+          "decode_seconds": 0.056314584,
+          "audio_seconds": 84.928,
+          "real_time_factor": 0.009649902953089677,
+          "helper_metrics": {
+            "audio_seconds": 84.928,
+            "compute_units": "cpu_and_gpu",
+            "helper_peak_rss_bytes": 428097536,
+            "implementation": "FluidAudio subset 1b0ed50d686873128a4129b3510ce3914c849bab",
+            "wall_seconds": 0.7050340175628662,
+            "model_load_seconds": 0.13270998001098633,
+            "preset": "fast128",
+            "threshold": 0.5
+          },
+          "overlap_preserved": true,
+          "timing_space": "meeting",
+          "embedding_capability": false
+        }
+      },
+      {
+        "id": "tnjoh",
+        "audio_sha256": "e354232d6cb8a1e39d50cd4b2c4008bcbe9a861b3f2b52418dcecfd66b270426",
+        "reference_sha256": "88942e8c087719688b35e17fc03ec4a57861ff5d2a1cf59558b3a8d778b9d012",
+        "scores": {
+          "reference_speaker_ms": 75830.0,
+          "missed_speaker_ms": 2120.0,
+          "false_speaker_ms": 730.0,
+          "confused_speaker_ms": 3120.0,
+          "der": 0.07872873532902545,
+          "jer": 0.2542403345670396,
+          "reference_speakers": 5,
+          "predicted_speakers": 6,
+          "collar_ms": 0,
+          "score_overlap": true
+        },
+        "metrics": {
+          "wall_seconds": 0.840510167,
+          "model_load_seconds": 0.13345706462860107,
+          "decode_seconds": 0.057285208,
+          "audio_seconds": 87.36,
+          "real_time_factor": 0.009621224439102564,
+          "helper_metrics": {
+            "audio_seconds": 87.36,
+            "compute_units": "cpu_and_gpu",
+            "helper_peak_rss_bytes": 428064768,
+            "implementation": "FluidAudio subset 1b0ed50d686873128a4129b3510ce3914c849bab",
+            "wall_seconds": 0.7220189571380614,
+            "model_load_seconds": 0.13345706462860107,
+            "preset": "fast128",
+            "threshold": 0.5
+          },
+          "overlap_preserved": true,
+          "timing_space": "meeting",
+          "embedding_capability": false
+        }
+      },
+      {
+        "id": "eazeq",
+        "audio_sha256": "376a3dfb2d08d613224b1966dea131fc0aa65484fc662b5f4a30c0da64d6b385",
+        "reference_sha256": "8e79da659d76a1fd275028f37acf9d7551c8be7281ee9ea37e3346e2e9e57da9",
+        "scores": {
+          "reference_speaker_ms": 100340.0,
+          "missed_speaker_ms": 820.0,
+          "false_speaker_ms": 2690.0,
+          "confused_speaker_ms": 20.0,
+          "der": 0.035180386685270085,
+          "jer": 0.03462911639171662,
+          "reference_speakers": 2,
+          "predicted_speakers": 2,
+          "collar_ms": 0,
+          "score_overlap": true
+        },
+        "metrics": {
+          "wall_seconds": 0.892891708,
+          "model_load_seconds": 0.1312730312347412,
+          "decode_seconds": 0.0601895,
+          "audio_seconds": 98.624,
+          "real_time_factor": 0.00905349314568462,
+          "helper_metrics": {
+            "audio_seconds": 98.624,
+            "compute_units": "cpu_and_gpu",
+            "helper_peak_rss_bytes": 428032000,
+            "implementation": "FluidAudio subset 1b0ed50d686873128a4129b3510ce3914c849bab",
+            "wall_seconds": 0.7659471035003662,
+            "model_load_seconds": 0.1312730312347412,
+            "preset": "fast128",
+            "threshold": 0.5
+          },
+          "overlap_preserved": true,
+          "timing_space": "meeting",
+          "embedding_capability": false
+        }
+      },
+      {
+        "id": "eguui",
+        "audio_sha256": "ed3e857f2628a96493cda53550e4fa2b67e45b11044df37822d16ce9bc500646",
+        "reference_sha256": "7b753352426e888089b7705ae9b27077f09d3de3ddb9678dd5a6bda08e890539",
+        "scores": {
+          "reference_speaker_ms": 125490.0,
+          "missed_speaker_ms": 380.0,
+          "false_speaker_ms": 5080.0,
+          "confused_speaker_ms": 0.0,
+          "der": 0.04350944298350466,
+          "jer": 0.0366957049091197,
+          "reference_speakers": 3,
+          "predicted_speakers": 4,
+          "collar_ms": 0,
+          "score_overlap": true
+        },
+        "metrics": {
+          "wall_seconds": 0.938390625,
+          "model_load_seconds": 0.12896394729614258,
+          "decode_seconds": 0.064195292,
+          "audio_seconds": 108.8,
+          "real_time_factor": 0.008624913832720588,
+          "helper_metrics": {
+            "audio_seconds": 108.8,
+            "compute_units": "cpu_and_gpu",
+            "helper_peak_rss_bytes": 427311104,
+            "implementation": "FluidAudio subset 1b0ed50d686873128a4129b3510ce3914c849bab",
+            "wall_seconds": 0.8087209463119507,
+            "model_load_seconds": 0.12896394729614258,
+            "preset": "fast128",
+            "threshold": 0.5
+          },
+          "overlap_preserved": true,
+          "timing_space": "meeting",
+          "embedding_capability": false
+        }
+      },
+      {
+        "id": "nqcpi",
+        "audio_sha256": "d75afbc803bf79f9b8e1962fe89e21260d8866cdf98dc17968e8e20e984186f8",
+        "reference_sha256": "6ef2252311d4dd2bd10da80c667bf52f6f843cc65b13c3fa39dbd5d7866ee2ab",
+        "scores": {
+          "reference_speaker_ms": 94500.0,
+          "missed_speaker_ms": 880.0,
+          "false_speaker_ms": 550.0,
+          "confused_speaker_ms": 990.0,
+          "der": 0.025608465608465608,
+          "jer": 0.11864182392008438,
+          "reference_speakers": 7,
+          "predicted_speakers": 7,
+          "collar_ms": 0,
+          "score_overlap": true
+        },
+        "metrics": {
+          "wall_seconds": 0.888080667,
+          "model_load_seconds": 0.13137197494506836,
+          "decode_seconds": 0.06272225,
+          "audio_seconds": 100.864,
+          "real_time_factor": 0.008804733770225254,
+          "helper_metrics": {
+            "audio_seconds": 100.864,
+            "compute_units": "cpu_and_gpu",
+            "helper_peak_rss_bytes": 427884544,
+            "implementation": "FluidAudio subset 1b0ed50d686873128a4129b3510ce3914c849bab",
+            "wall_seconds": 0.7602080106735228,
+            "model_load_seconds": 0.13137197494506836,
+            "preset": "fast128",
+            "threshold": 0.5
+          },
+          "overlap_preserved": true,
+          "timing_space": "meeting",
+          "embedding_capability": false
+        }
+      },
+      {
+        "id": "rmvsh",
+        "audio_sha256": "b2cd3601e59719fc9b5aef77e6d14325b3aa399cb9b22cc428ff5beaedead13e",
+        "reference_sha256": "c95b1ffe8f2f775f256daf72a873ea886a6e7041f19482c0bf9c340603a0eea4",
+        "scores": {
+          "reference_speaker_ms": 99430.0,
+          "missed_speaker_ms": 1430.0,
+          "false_speaker_ms": 410.0,
+          "confused_speaker_ms": 0.0,
+          "der": 0.018505481243085587,
+          "jer": 0.012853585748549057,
+          "reference_speakers": 2,
+          "predicted_speakers": 2,
+          "collar_ms": 0,
+          "score_overlap": true
+        },
+        "metrics": {
+          "wall_seconds": 0.937535292,
+          "model_load_seconds": 0.13274693489074707,
+          "decode_seconds": 0.062173958,
+          "audio_seconds": 103.552,
+          "real_time_factor": 0.009053763249381952,
+          "helper_metrics": {
+            "audio_seconds": 103.552,
+            "compute_units": "cpu_and_gpu",
+            "helper_peak_rss_bytes": 427393024,
+            "implementation": "FluidAudio subset 1b0ed50d686873128a4129b3510ce3914c849bab",
+            "wall_seconds": 0.8088660240173339,
+            "model_load_seconds": 0.13274693489074707,
+            "preset": "fast128",
+            "threshold": 0.5
+          },
+          "overlap_preserved": true,
+          "timing_space": "meeting",
+          "embedding_capability": false
+        }
+      },
+      {
+        "id": "gkiki",
+        "audio_sha256": "7e92f75e9cd444fbc65580518e451a413c09e4002810e19f0985034fbed49afe",
+        "reference_sha256": "6650185b2ac4e04992e127c76a1037a1b07968ab101c4188a016737d7ab04d65",
+        "scores": {
+          "reference_speaker_ms": 109180.0,
+          "missed_speaker_ms": 980.0,
+          "false_speaker_ms": 530.0,
+          "confused_speaker_ms": 10.0,
+          "der": 0.013921963729620809,
+          "jer": 0.016868298216571837,
+          "reference_speakers": 6,
+          "predicted_speakers": 6,
+          "collar_ms": 0,
+          "score_overlap": true
+        },
+        "metrics": {
+          "wall_seconds": 0.947570125,
+          "model_load_seconds": 0.12669801712036133,
+          "decode_seconds": 0.06520025,
+          "audio_seconds": 112.256,
+          "real_time_factor": 0.008441153479546751,
+          "helper_metrics": {
+            "audio_seconds": 112.256,
+            "compute_units": "cpu_and_gpu",
+            "helper_peak_rss_bytes": 427458560,
+            "implementation": "FluidAudio subset 1b0ed50d686873128a4129b3510ce3914c849bab",
+            "wall_seconds": 0.8124350309371949,
+            "model_load_seconds": 0.12669801712036133,
+            "preset": "fast128",
+            "threshold": 0.5
+          },
+          "overlap_preserved": true,
+          "timing_space": "meeting",
+          "embedding_capability": false
+        }
+      },
+      {
+        "id": "cqfmj",
+        "audio_sha256": "d0c81a22937ab33cdfc3297cfa23f34fa8faa2180f2e6762cbe557a6c8ae68cc",
+        "reference_sha256": "85407e95edf7428b98a39f803a2ce8e5b09e25c0deb2e64ad5f4e68bec3e6739",
+        "scores": {
+          "reference_speaker_ms": 108640.0,
+          "missed_speaker_ms": 7490.0,
+          "false_speaker_ms": 1520.0,
+          "confused_speaker_ms": 130.0,
+          "der": 0.08413107511045656,
+          "jer": 0.5063060858288579,
+          "reference_speakers": 4,
+          "predicted_speakers": 2,
+          "collar_ms": 0,
+          "score_overlap": true
+        },
+        "metrics": {
+          "wall_seconds": 1.013147417,
+          "model_load_seconds": 0.1327880620956421,
+          "decode_seconds": 0.069466958,
+          "audio_seconds": 114.944,
+          "real_time_factor": 0.008814269705247773,
+          "helper_metrics": {
+            "audio_seconds": 114.944,
+            "compute_units": "cpu_and_gpu",
+            "helper_peak_rss_bytes": 427409408,
+            "implementation": "FluidAudio subset 1b0ed50d686873128a4129b3510ce3914c849bab",
+            "wall_seconds": 0.8685950040817261,
+            "model_load_seconds": 0.1327880620956421,
+            "preset": "fast128",
+            "threshold": 0.5
+          },
+          "overlap_preserved": true,
+          "timing_space": "meeting",
+          "embedding_capability": false
+        }
+      },
+      {
+        "id": "bvyvm",
+        "audio_sha256": "b77a9461c5f8ee0ad2a7c162e4426e5fd47f0edf5acc5762a8c515b1c370a99e",
+        "reference_sha256": "3dd64074ac5ba12ec2ba495ce1009ba6a7f2c9325642f07d6f039cae81fc7542",
+        "scores": {
+          "reference_speaker_ms": 105160.0,
+          "missed_speaker_ms": 1500.0,
+          "false_speaker_ms": 1740.0,
+          "confused_speaker_ms": 1650.0,
+          "der": 0.04650057055914796,
+          "jer": 0.03661623473774064,
+          "reference_speakers": 3,
+          "predicted_speakers": 4,
+          "collar_ms": 0,
+          "score_overlap": true
+        },
+        "metrics": {
+          "wall_seconds": 1.001980541,
+          "model_load_seconds": 0.13297200202941897,
+          "decode_seconds": 0.067076666,
+          "audio_seconds": 117.248,
+          "real_time_factor": 0.008545822026814956,
+          "helper_metrics": {
+            "audio_seconds": 117.248,
+            "compute_units": "cpu_and_gpu",
+            "helper_peak_rss_bytes": 427360256,
+            "implementation": "FluidAudio subset 1b0ed50d686873128a4129b3510ce3914c849bab",
+            "wall_seconds": 0.8629089593887329,
+            "model_load_seconds": 0.13297200202941897,
+            "preset": "fast128",
+            "threshold": 0.5
+          },
+          "overlap_preserved": true,
+          "timing_space": "meeting",
+          "embedding_capability": false
+        }
+      }
+    ]
+  },
+  "asr": [
+    {
+      "dataset": "LibriSpeech dev-clean, OpenSLR12 CC BY4; archive MD5 42e2234ba48799c1f50f24a7926300a1; first24 eligible voices in archive order excluding the six earlier voices; first8-30sec utterance per voice",
+      "split": "new-voice-heldout-fixed-models",
+      "normalization": "english_case_punctuation",
+      "model": "whisper-base.en",
+      "model_revision": "5359861c739e955e79d9a303bcbc70fb988958b1",
+      "clips": 24,
+      "reference_words": 876,
+      "word_errors": 33,
+      "wer": 0.03767123287671233,
+      "wall_seconds": 12.174155,
+      "audio_seconds": 306.565,
+      "warm_context_runs": 23,
+      "process_lifetime_peak_rss_bytes": 421298176,
+      "entries": [
+        {
+          "id": "2277-149896-0032",
+          "audio_sha256": "56b640a079f27f9473478a20f068b8bd8af3afa7030d7a07cbbc7b3f19211689",
+          "reference_words": 36,
+          "word_errors": 0,
+          "wer": 0.0
+        },
+        {
+          "id": "2035-147960-0000",
+          "audio_sha256": "0ee6731694bcc55349cf4f70123aaff81a7779c782c4a3ec4579b243b1552748",
+          "reference_words": 33,
+          "word_errors": 0,
+          "wer": 0.0
+        },
+        {
+          "id": "2086-149214-0004",
+          "audio_sha256": "290a02e83ad972fd69406da0a5507ae842fc19ebb75d0a2b2efbdecf45abad06",
+          "reference_words": 46,
+          "word_errors": 0,
+          "wer": 0.0
+        },
+        {
+          "id": "7976-110124-0006",
+          "audio_sha256": "049125de667d6e1a7d6ede9dc9bb44ccfa6caebfa12a9eff7cd24573c94aaff7",
+          "reference_words": 31,
+          "word_errors": 0,
+          "wer": 0.0
+        },
+        {
+          "id": "1988-147956-0004",
+          "audio_sha256": "017cf047f94136dd69e4c764530bf1fa6cec306621fb70546468722db501f45d",
+          "reference_words": 22,
+          "word_errors": 0,
+          "wer": 0.0
+        },
+        {
+          "id": "1673-143396-0014",
+          "audio_sha256": "a74094488de3a7371072b07497450c750b3ce1863fad3f3bf2338b097ea13f58",
+          "reference_words": 39,
+          "word_errors": 0,
+          "wer": 0.0
+        },
+        {
+          "id": "8297-275156-0013",
+          "audio_sha256": "981ca5b4d22a1cdd79e7282e1f80a0bf6b1b08392a8134fc9f19fd26ca08fb5c",
+          "reference_words": 28,
+          "word_errors": 0,
+          "wer": 0.0
+        },
+        {
+          "id": "5536-43358-0009",
+          "audio_sha256": "b385f5267063f1b6b7bf21e24d420617fc4643ff5f103e23ad105b54153c3d08",
+          "reference_words": 28,
+          "word_errors": 0,
+          "wer": 0.0
+        },
+        {
+          "id": "6345-93302-0029",
+          "audio_sha256": "0c531d80007a3f1a672c1c71fe225f0269dcc0d9803a4883159e49ab5bf09a99",
+          "reference_words": 45,
+          "word_errors": 0,
+          "wer": 0.0
+        },
+        {
+          "id": "6295-244435-0010",
+          "audio_sha256": "d41f0ac9348b351b68ea4350e2cf7953b4bbb1870d141ac8bdb91215a4f63963",
+          "reference_words": 27,
+          "word_errors": 0,
+          "wer": 0.0
+        },
+        {
+          "id": "6313-66125-0027",
+          "audio_sha256": "2d89f2570ff6a0c6d0ad563a5985e71d0ea1043eafef72197c22eaa97a7c492a",
+          "reference_words": 47,
+          "word_errors": 6,
+          "wer": 0.1276595744680851
+        },
+        {
+          "id": "5338-284437-0032",
+          "audio_sha256": "f5d54d9e8c79c4ccd14d5735f9059e4e9c1726032c51a3343fa18fe172d519dd",
+          "reference_words": 34,
+          "word_errors": 4,
+          "wer": 0.11764705882352941
+        },
+        {
+          "id": "6319-57405-0012",
+          "audio_sha256": "1b4228ebf635afb33e2e7533442c977f3f8aa804c26af04a5319483c58028473",
+          "reference_words": 25,
+          "word_errors": 4,
+          "wer": 0.16
+        },
+        {
+          "id": "1993-147965-0005",
+          "audio_sha256": "2a90c52e43cc6d6e91a67d04fb908dbbaf3c06fab53ca4e8f54afb825bbd3693",
+          "reference_words": 23,
+          "word_errors": 3,
+          "wer": 0.13043478260869565
+        },
+        {
+          "id": "2078-142845-0010",
+          "audio_sha256": "210884e9fdabb393a4bd7d27eca6ae733db126f65914ce4bf3bd2d8c927349ca",
+          "reference_words": 31,
+          "word_errors": 1,
+          "wer": 0.03225806451612903
+        },
+        {
+          "id": "1272-128104-0009",
+          "audio_sha256": "2bfbcdfab6024ccd3bfeb4e883cc7f9cc613235e504bfc068fd34069056513b7",
+          "reference_words": 43,
+          "word_errors": 2,
+          "wer": 0.046511627906976744
+        },
+        {
+          "id": "2803-161169-0009",
+          "audio_sha256": "01112e4d9d2defb47a059c9353067ca0a1e0175d35688223f1961775fcf92ae0",
+          "reference_words": 52,
+          "word_errors": 0,
+          "wer": 0.0
+        },
+        {
+          "id": "7850-73752-0008",
+          "audio_sha256": "c5d71040900f64ee246dd308d9e516ee4ad4ad5deebd864064cfb7cc64dfe33b",
+          "reference_words": 30,
+          "word_errors": 1,
+          "wer": 0.03333333333333333
+        },
+        {
+          "id": "2902-9006-0001",
+          "audio_sha256": "092ce5b4c5af47b6acdd09ae8fea3966cbd8aafe774e3a38568c9adccd4c79b0",
+          "reference_words": 64,
+          "word_errors": 0,
+          "wer": 0.0
+        },
+        {
+          "id": "3752-4943-0004",
+          "audio_sha256": "3a4190dace91a8502affda8bc422742f4ed2d93d743ea5b0653414ca4bd1ce0f",
+          "reference_words": 39,
+          "word_errors": 2,
+          "wer": 0.05128205128205128
+        },
+        {
+          "id": "3081-166546-0088",
+          "audio_sha256": "13ec0d43730df76a615d753ad7bceb734c26af5c28aa8a4145b372155b7b7707",
+          "reference_words": 31,
+          "word_errors": 0,
+          "wer": 0.0
+        },
+        {
+          "id": "1462-170138-0021",
+          "audio_sha256": "99e6e1bbdc98ff6e153f8632cc39b2d3525844fd88124d47ba3b39e9754e5f47",
+          "reference_words": 28,
+          "word_errors": 6,
+          "wer": 0.21428571428571427
+        },
+        {
+          "id": "2428-83705-0026",
+          "audio_sha256": "02ce64332baf9121b2ff08ea649383b02bfbb050965856ce4155e73cfeb38704",
+          "reference_words": 34,
+          "word_errors": 0,
+          "wer": 0.0
+        },
+        {
+          "id": "3170-137482-0007",
+          "audio_sha256": "1b045ea53a0347f3bdf70c1f697eee292363b977ba122f161629534bfd0767f5",
+          "reference_words": 60,
+          "word_errors": 4,
+          "wer": 0.06666666666666667
+        }
+      ]
+    },
+    {
+      "dataset": "LibriSpeech dev-clean, OpenSLR12 CC BY4; archive MD5 42e2234ba48799c1f50f24a7926300a1; first24 eligible voices in archive order excluding the six earlier voices; first8-30sec utterance per voice",
+      "split": "new-voice-heldout-fixed-models",
+      "normalization": "english_case_punctuation",
+      "model": "whisper-small.en",
+      "model_revision": "5359861c739e955e79d9a303bcbc70fb988958b1",
+      "clips": 24,
+      "reference_words": 876,
+      "word_errors": 14,
+      "wer": 0.01598173515981735,
+      "wall_seconds": 26.509785249,
+      "audio_seconds": 306.565,
+      "warm_context_runs": 23,
+      "process_lifetime_peak_rss_bytes": 912228352,
+      "entries": [
+        {
+          "id": "2277-149896-0032",
+          "audio_sha256": "56b640a079f27f9473478a20f068b8bd8af3afa7030d7a07cbbc7b3f19211689",
+          "reference_words": 36,
+          "word_errors": 0,
+          "wer": 0.0
+        },
+        {
+          "id": "2035-147960-0000",
+          "audio_sha256": "0ee6731694bcc55349cf4f70123aaff81a7779c782c4a3ec4579b243b1552748",
+          "reference_words": 33,
+          "word_errors": 0,
+          "wer": 0.0
+        },
+        {
+          "id": "2086-149214-0004",
+          "audio_sha256": "290a02e83ad972fd69406da0a5507ae842fc19ebb75d0a2b2efbdecf45abad06",
+          "reference_words": 46,
+          "word_errors": 0,
+          "wer": 0.0
+        },
+        {
+          "id": "7976-110124-0006",
+          "audio_sha256": "049125de667d6e1a7d6ede9dc9bb44ccfa6caebfa12a9eff7cd24573c94aaff7",
+          "reference_words": 31,
+          "word_errors": 0,
+          "wer": 0.0
+        },
+        {
+          "id": "1988-147956-0004",
+          "audio_sha256": "017cf047f94136dd69e4c764530bf1fa6cec306621fb70546468722db501f45d",
+          "reference_words": 22,
+          "word_errors": 0,
+          "wer": 0.0
+        },
+        {
+          "id": "1673-143396-0014",
+          "audio_sha256": "a74094488de3a7371072b07497450c750b3ce1863fad3f3bf2338b097ea13f58",
+          "reference_words": 39,
+          "word_errors": 0,
+          "wer": 0.0
+        },
+        {
+          "id": "8297-275156-0013",
+          "audio_sha256": "981ca5b4d22a1cdd79e7282e1f80a0bf6b1b08392a8134fc9f19fd26ca08fb5c",
+          "reference_words": 28,
+          "word_errors": 0,
+          "wer": 0.0
+        },
+        {
+          "id": "5536-43358-0009",
+          "audio_sha256": "b385f5267063f1b6b7bf21e24d420617fc4643ff5f103e23ad105b54153c3d08",
+          "reference_words": 28,
+          "word_errors": 0,
+          "wer": 0.0
+        },
+        {
+          "id": "6345-93302-0029",
+          "audio_sha256": "0c531d80007a3f1a672c1c71fe225f0269dcc0d9803a4883159e49ab5bf09a99",
+          "reference_words": 45,
+          "word_errors": 0,
+          "wer": 0.0
+        },
+        {
+          "id": "6295-244435-0010",
+          "audio_sha256": "d41f0ac9348b351b68ea4350e2cf7953b4bbb1870d141ac8bdb91215a4f63963",
+          "reference_words": 27,
+          "word_errors": 0,
+          "wer": 0.0
+        },
+        {
+          "id": "6313-66125-0027",
+          "audio_sha256": "2d89f2570ff6a0c6d0ad563a5985e71d0ea1043eafef72197c22eaa97a7c492a",
+          "reference_words": 47,
+          "word_errors": 1,
+          "wer": 0.02127659574468085
+        },
+        {
+          "id": "5338-284437-0032",
+          "audio_sha256": "f5d54d9e8c79c4ccd14d5735f9059e4e9c1726032c51a3343fa18fe172d519dd",
+          "reference_words": 34,
+          "word_errors": 2,
+          "wer": 0.058823529411764705
+        },
+        {
+          "id": "6319-57405-0012",
+          "audio_sha256": "1b4228ebf635afb33e2e7533442c977f3f8aa804c26af04a5319483c58028473",
+          "reference_words": 25,
+          "word_errors": 0,
+          "wer": 0.0
+        },
+        {
+          "id": "1993-147965-0005",
+          "audio_sha256": "2a90c52e43cc6d6e91a67d04fb908dbbaf3c06fab53ca4e8f54afb825bbd3693",
+          "reference_words": 23,
+          "word_errors": 2,
+          "wer": 0.08695652173913043
+        },
+        {
+          "id": "2078-142845-0010",
+          "audio_sha256": "210884e9fdabb393a4bd7d27eca6ae733db126f65914ce4bf3bd2d8c927349ca",
+          "reference_words": 31,
+          "word_errors": 1,
+          "wer": 0.03225806451612903
+        },
+        {
+          "id": "1272-128104-0009",
+          "audio_sha256": "2bfbcdfab6024ccd3bfeb4e883cc7f9cc613235e504bfc068fd34069056513b7",
+          "reference_words": 43,
+          "word_errors": 3,
+          "wer": 0.06976744186046512
+        },
+        {
+          "id": "2803-161169-0009",
+          "audio_sha256": "01112e4d9d2defb47a059c9353067ca0a1e0175d35688223f1961775fcf92ae0",
+          "reference_words": 52,
+          "word_errors": 0,
+          "wer": 0.0
+        },
+        {
+          "id": "7850-73752-0008",
+          "audio_sha256": "c5d71040900f64ee246dd308d9e516ee4ad4ad5deebd864064cfb7cc64dfe33b",
+          "reference_words": 30,
+          "word_errors": 0,
+          "wer": 0.0
+        },
+        {
+          "id": "2902-9006-0001",
+          "audio_sha256": "092ce5b4c5af47b6acdd09ae8fea3966cbd8aafe774e3a38568c9adccd4c79b0",
+          "reference_words": 64,
+          "word_errors": 0,
+          "wer": 0.0
+        },
+        {
+          "id": "3752-4943-0004",
+          "audio_sha256": "3a4190dace91a8502affda8bc422742f4ed2d93d743ea5b0653414ca4bd1ce0f",
+          "reference_words": 39,
+          "word_errors": 1,
+          "wer": 0.02564102564102564
+        },
+        {
+          "id": "3081-166546-0088",
+          "audio_sha256": "13ec0d43730df76a615d753ad7bceb734c26af5c28aa8a4145b372155b7b7707",
+          "reference_words": 31,
+          "word_errors": 0,
+          "wer": 0.0
+        },
+        {
+          "id": "1462-170138-0021",
+          "audio_sha256": "99e6e1bbdc98ff6e153f8632cc39b2d3525844fd88124d47ba3b39e9754e5f47",
+          "reference_words": 28,
+          "word_errors": 2,
+          "wer": 0.07142857142857142
+        },
+        {
+          "id": "2428-83705-0026",
+          "audio_sha256": "02ce64332baf9121b2ff08ea649383b02bfbb050965856ce4155e73cfeb38704",
+          "reference_words": 34,
+          "word_errors": 0,
+          "wer": 0.0
+        },
+        {
+          "id": "3170-137482-0007",
+          "audio_sha256": "1b045ea53a0347f3bdf70c1f697eee292363b977ba122f161629534bfd0767f5",
+          "reference_words": 60,
+          "word_errors": 2,
+          "wer": 0.03333333333333333
+        }
+      ]
+    }
+  ]
+}

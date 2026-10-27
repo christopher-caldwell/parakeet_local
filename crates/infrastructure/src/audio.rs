@@ -235,3 +235,64 @@ impl parakeet_application::AudioPlayback for LocalPlayback {
         Ok(())
     }
 }
+
+#[derive(Clone, Default)]
+pub struct LocalAudioIdentity;
+#[async_trait::async_trait]
+impl parakeet_application::audio_locations::AudioFileIdentityReader for LocalAudioIdentity {
+    async fn identify(
+        &self,
+        path: &Path,
+    ) -> Result<parakeet_application::audio_locations::AudioFileIdentity, CapabilityError> {
+        let path = path.to_path_buf();
+        tokio::task::spawn_blocking(move || {
+            use sha2::{Digest, Sha256};
+            use std::io::Read;
+            let path = path.canonicalize().map_err(CapabilityError::new)?;
+            let mut file = std::fs::File::open(&path).map_err(CapabilityError::new)?;
+            let before = file.metadata().map_err(CapabilityError::new)?;
+            if !before.is_file() || before.len() == 0 {
+                return Err(CapabilityError::message(
+                    "source must be a nonempty regular file",
+                ));
+            }
+            let mut hash = Sha256::new();
+            let mut bytes = [0u8; 1024 * 64];
+            loop {
+                let n = file.read(&mut bytes).map_err(CapabilityError::new)?;
+                if n == 0 {
+                    break;
+                }
+                hash.update(&bytes[..n]);
+            }
+            let after = file.metadata().map_err(CapabilityError::new)?;
+            let current = std::fs::metadata(&path).map_err(CapabilityError::new)?;
+            use std::os::unix::fs::MetadataExt;
+            if before.len() != after.len()
+                || before.modified().ok() != after.modified().ok()
+                || before.ino() != current.ino()
+                || before.dev() != current.dev()
+                || before.len() != current.len()
+                || before.modified().ok() != current.modified().ok()
+            {
+                return Err(CapabilityError::message(
+                    "source changed while computing its identity",
+                ));
+            }
+            let modified_unix_ms = after
+                .modified()
+                .map_err(CapabilityError::new)?
+                .duration_since(UNIX_EPOCH)
+                .map_err(CapabilityError::new)?
+                .as_millis() as u64;
+            Ok(parakeet_application::audio_locations::AudioFileIdentity {
+                path: path.to_string_lossy().into(),
+                size_bytes: after.len(),
+                modified_unix_ms,
+                sha256: format!("{:x}", hash.finalize()),
+            })
+        })
+        .await
+        .map_err(CapabilityError::new)?
+    }
+}

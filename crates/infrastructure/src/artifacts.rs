@@ -295,6 +295,10 @@ impl RecordingSource for MacParakeetArtifacts {
                             .map(|s| s as u32)
                             .or(track.sample_rate);
                         track.provenance["probe"] = p;
+                        if let Err(error) = fingerprint_import(track).await {
+                            track.available = false;
+                            bundle.warnings.push(format!("{}: {error}", track.path));
+                        }
                     }
                     Err(e) => {
                         track.available = false;
@@ -319,6 +323,7 @@ impl RecordingSource for MacParakeetArtifacts {
         track.duration_ms = probe["duration_ms"].as_i64();
         track.sample_rate = probe["sample_rate"].as_u64().map(|s| s as u32);
         track.provenance["probe"] = probe.clone();
+        fingerprint_import(&mut track).await?;
         Ok(ImportBundle {
             recording: Recording {
                 id,
@@ -382,6 +387,10 @@ impl LegacyNormalization for MacParakeetArtifacts {
                         track.duration_ms = probe["duration_ms"].as_i64();
                         track.sample_rate = probe["sample_rate"].as_u64().map(|r| r as u32);
                         track.provenance["probe"] = probe;
+                        if let Err(error) = fingerprint_import(&mut track).await {
+                            track.available = false;
+                            warnings.push(error.to_string());
+                        }
                     }
                     Err(e) => {
                         track.available = false;
@@ -479,6 +488,24 @@ impl LegacyNormalization for MacParakeetArtifacts {
         })
     }
 }
+async fn fingerprint_import(track: &mut AudioTrack) -> Result<(), CapabilityError> {
+    let identity = parakeet_application::audio_locations::AudioFileIdentityReader::identify(
+        &crate::audio::LocalAudioIdentity,
+        Path::new(&track.path),
+    )
+    .await?;
+    crate::audio::validate_source(track)?;
+    if track.size_bytes != Some(identity.size_bytes)
+        || track.modified_unix_ms != Some(identity.modified_unix_ms)
+    {
+        return Err(CapabilityError::message(
+            "source changed during import fingerprinting",
+        ));
+    }
+    track.provenance["content_sha256"] = json!(identity.sha256);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

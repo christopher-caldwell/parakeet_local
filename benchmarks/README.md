@@ -33,3 +33,14 @@ The identification probe requires the corresponding speakrs model installed in `
 `recognition-public.py` is an older strict-threshold regression probe. Its recall assertion currently fails and is deliberately retained; see [verification](../docs/verification.md). A calibrated result is not evidence that the strict gate passed.
 
 ASR suites declare orthographic normalization explicitly. Non-speech suites use an empty reference and report false recognized words rather than undefined WER as zero. The checked-in [numeric summary](results/2026-10-27-public-summary.json) excludes local paths, raw speech, vectors and personal labels. Full run receipts have the precise evidence needed to inspect a result.
+
+## Expanded public evaluation and runtime reuse
+
+```sh
+python3 scripts/prepare_voxconverse.py --split test --count 20 --output .local/expanded-eval/voxconverse
+python3 benchmarks/prepare_asr_expanded.py --archive .local/public/librispeech/dev-clean.tar.gz --output .local/expanded-eval/asr
+```
+
+The VoxConverse filter yields 16 entries, including the earlier three. Set the copied diarization suite's `models` to `["nemotron3-fast128"]` to reproduce the fixed-preset run. Run each ASR model separately in a copied one-model suite to measure reuse across all 24 utterances. Use an explicitly provisioned isolated root with deliberately installed/verified model copies, then `benchmark run SUITE.json`; no benchmark implicitly installs weights. The [expanded numeric report](results/2026-10-27-expanded-public.json) includes hashes, errors, counts and resource measurements; no audio/transcript text is included.
+
+The opt-in Rust cache probe requires `PARAKEET_MODEL_PROBE_ROOT` and `PARAKEET_MODEL_PROBE_AUDIO` as **absolute paths** to disposable model copies and a public audio file. Run `scripts/cargo test -p parakeet-infrastructure --test model_cache -- --ignored --nocapture`. It temporarily removes/restores the copy's verification receipt, checks stable output and waits 75 seconds for idle eviction. Do not point it at a live personal model root. It performs no downloads. Ordinary workspace tests skip this environment-dependent probe; its separate execution is recorded in verification.

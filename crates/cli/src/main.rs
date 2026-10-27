@@ -96,6 +96,7 @@ enum Jobs {
 }
 #[derive(Subcommand)]
 enum Dictation {
+    RecoverClipboard,
     History,
     Show {
         id: String,
@@ -150,6 +151,19 @@ enum Models {
 }
 #[derive(Subcommand)]
 enum Meetings {
+    Fingerprint {
+        id: String,
+        #[arg(long)]
+        track: String,
+    },
+    Relink {
+        id: String,
+        #[arg(long)]
+        track: String,
+        path: PathBuf,
+        #[arg(long)]
+        dry_run: bool,
+    },
     PlaySegment {
         id: String,
         segment: String,
@@ -223,6 +237,13 @@ impl ProcessArgs {
 }
 #[derive(Subcommand)]
 enum Speakers {
+    Clusters {
+        recording: String,
+        #[arg(long)]
+        track: String,
+        #[arg(long)]
+        run: Option<String>,
+    },
     ReviewSuggestion {
         id: String,
     },
@@ -443,13 +464,15 @@ fn writes(command: &Command) -> bool {
             command: Meetings::Import { dry_run: false, .. }
                 | Meetings::ImportSourceDb { dry_run: false, .. }
                 | Meetings::Rename { .. }
+                | Meetings::Fingerprint { .. }
+                | Meetings::Relink { dry_run: false, .. }
         } | Command::Transcribe(_)
             | Command::TranscribeAll { .. }
             | Command::Capture {
                 command: Capture::Record { .. } | Capture::Recover { .. }
             }
             | Command::Dictation {
-                command: Dictation::Listen { .. }
+                command: Dictation::Listen { .. } | Dictation::RecoverClipboard
             }
             | Command::Speakers {
                 command: Speakers::Create { .. }
@@ -510,6 +533,15 @@ async fn execute(cli: Cli) -> anyhow::Result<Value> {
         root: root.join("media"),
     });
     match &cli.command {
+        Command::Dictation {
+            command: Dictation::RecoverClipboard,
+        } => {
+            return value(
+                parakeet_application::dictation::InsertionRecoveryService::new(native.clone())
+                    .recover()
+                    .await?,
+            );
+        }
         Command::Capture {
             command: Capture::Devices,
         } => {
@@ -686,6 +718,11 @@ async fn execute(cli: Cli) -> anyhow::Result<Value> {
         store.clone(),
         Arc::new(AuthorizedCli),
     ));
+    let locations = parakeet_application::audio_locations::AudioLocationService::new(
+        store.clone(),
+        store.clone(),
+        Arc::new(parakeet_infrastructure::audio::LocalAudioIdentity),
+    );
     let result = match cli.command {
         Command::Jobs { command } => match command {
             Jobs::Pending => value(recovery.pending().await?),
@@ -693,6 +730,31 @@ async fn execute(cli: Cli) -> anyhow::Result<Value> {
             Jobs::Retry { id } => value(processing.retry(&id).await?),
         },
         Command::Meetings { command } => match command {
+            Meetings::Fingerprint { id, track } => value(
+                locations
+                    .fingerprint(
+                        parakeet_application::audio_locations::FingerprintAudioInput {
+                            recording_id: id,
+                            track_id: track,
+                        },
+                    )
+                    .await?,
+            ),
+            Meetings::Relink {
+                id,
+                track,
+                path,
+                dry_run,
+            } => value(
+                locations
+                    .relink(parakeet_application::audio_locations::RelinkAudioInput {
+                        recording_id: id,
+                        track_id: track,
+                        path,
+                        dry_run,
+                    })
+                    .await?,
+            ),
             Meetings::ImportSourceDb { path, dry_run } => value(
                 LegacyImportService::new(
                     Arc::new(parakeet_database::MacParakeetCatalog),
@@ -873,6 +935,23 @@ async fn execute(cli: Cli) -> anyhow::Result<Value> {
         ),
         Command::Transcribe(args) => value(processing.run(args.request()).await?),
         Command::Speakers { command } => match command {
+            Speakers::Clusters {
+                recording,
+                track,
+                run,
+            } => value(
+                parakeet_application::cluster_edits::ClusterEditingService::new(
+                    store.clone(),
+                    store.clone(),
+                    ownership.clone(),
+                )
+                .inspect(parakeet_application::cluster_edits::InspectClustersInput {
+                    recording_id: recording,
+                    track_id: track,
+                    run_id: run,
+                })
+                .await?,
+            ),
             Speakers::ReviewSuggestion { id } => value(speakers.review_suggestion(&id).await?),
             Speakers::Candidates { meeting } => value(speakers.candidates(&meeting).await?),
             Speakers::List => value(speakers.profiles().await?),
@@ -1158,6 +1237,8 @@ fn kind(error: &anyhow::Error) -> &'static str {
         macro_rules! classify {($($type:ty),*)=>{$(if let Some(error)=cause.downcast_ref::<$type>(){let kind=error.kind();if kind!="nested"{return kind;}})*};}
         classify!(
             ImportRecordingsError,
+            parakeet_application::audio_locations::FingerprintAudioError,
+            parakeet_application::audio_locations::RelinkAudioError,
             ListRecordingsError,
             ShowRecordingError,
             RenameRecordingError,
@@ -1183,6 +1264,7 @@ fn kind(error: &anyhow::Error) -> &'static str {
             ListSpeakersError,
             ListSuggestionsError,
             ReviewSuggestionError,
+            parakeet_application::cluster_edits::InspectClustersError,
             parakeet_application::cluster_edits::EditClustersError,
             ResolveSuggestionError,
             ListVoiceExamplesError,
@@ -1209,6 +1291,7 @@ fn kind(error: &anyhow::Error) -> &'static str {
             InspectPermissionsError,
             ListRecoverableCapturesError,
             parakeet_application::dictation::DictateSpeechError,
+            parakeet_application::dictation::RecoverInsertionError,
             parakeet_application::dictation::ListDictationsError,
             parakeet_application::dictation::ShowDictationError,
             parakeet_application::dictation::ListenForDictationError,

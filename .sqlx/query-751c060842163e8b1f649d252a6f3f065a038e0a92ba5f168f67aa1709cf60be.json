@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE tracks SET data=?3 WHERE id=?1 AND data=?2\n",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "751c060842163e8b1f649d252a6f3f065a038e0a92ba5f168f67aa1709cf60be"
+}

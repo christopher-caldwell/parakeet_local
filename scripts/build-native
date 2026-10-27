@@ -3,6 +3,6 @@ set -eu
 mkdir -p target/native
 parakeet_output="target/native/.parakeet-bridge-build-$$"
 trap 'rm -f "$parakeet_output"' EXIT HUP INT TERM
-swiftc -parse-as-library -O native/bridge.swift -o "$parakeet_output" -framework AVFoundation -framework AudioToolbox -framework CoreAudio -framework ScreenCaptureKit -framework AppKit -framework ApplicationServices
+swiftc -parse-as-library -O native/bridge.swift native/clipboard.swift -o "$parakeet_output" -framework AVFoundation -framework AudioToolbox -framework CoreAudio -framework ScreenCaptureKit -framework AppKit -framework ApplicationServices
 
 mv -f "$parakeet_output" target/native/parakeet-bridge

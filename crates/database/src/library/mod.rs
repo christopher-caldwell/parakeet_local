@@ -1,5 +1,29 @@
 use super::*;
 use async_trait::async_trait;
+#[async_trait]
+impl parakeet_application::audio_locations::AudioLocationWrites for SqliteStore {
+    async fn replace_locator(
+        &self,
+        expected: &AudioTrack,
+        replacement: &AudioTrack,
+    ) -> Result<bool, PersistenceError> {
+        if expected.id != replacement.id || expected.recording_id != replacement.recording_id {
+            return Err(PersistenceError::new(std::io::Error::other(
+                "relink cannot change source identity",
+            )));
+        }
+        let old = encode(expected)?;
+        let next = encode(replacement)?;
+        Ok(
+            sqlx::query_file!("src/library/relink.sql", expected.id, old, next)
+                .execute(&self.pool)
+                .await
+                .map_err(PersistenceError::new)?
+                .rows_affected()
+                == 1,
+        )
+    }
+}
 struct RecordingRow {
     id: String,
     source_key: String,

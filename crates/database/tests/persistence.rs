@@ -549,6 +549,26 @@ async fn cluster_edits_and_repeated_undo_preserve_original_runs() {
             .unwrap(),
         ),
     );
+    let reviewed = service
+        .inspect(InspectClustersInput {
+            recording_id: "r".into(),
+            track_id: "track".into(),
+            run_id: Some(raw.id.clone()),
+        })
+        .await
+        .unwrap();
+    assert_eq!(reviewed.clusters.len(), 2);
+    assert!(!reviewed.can_undo);
+    assert!(
+        service
+            .inspect(InspectClustersInput {
+                recording_id: "r".into(),
+                track_id: "other".into(),
+                run_id: None
+            })
+            .await
+            .is_err()
+    );
     let split = service
         .edit(EditClustersInput {
             recording_id: "r".into(),
@@ -656,9 +676,16 @@ impl parakeet_application::dictation::TextInsertion for InsertionSpy {
         &self,
         _: &parakeet_domain::gestures::InsertionTarget,
         _: &str,
-    ) -> Result<(), parakeet_application::CapabilityError> {
+    ) -> Result<
+        parakeet_application::dictation::InsertionReport,
+        parakeet_application::CapabilityError,
+    > {
         self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        Ok(())
+        Ok(parakeet_application::dictation::InsertionReport {
+            method: "fixture".into(),
+            verification: "fixture".into(),
+            clipboard_status: None,
+        })
     }
 }
 #[async_trait::async_trait]
@@ -930,4 +957,126 @@ async fn retry_links_new_run_and_refuses_live_completed_or_changed_model() {
             .contains("model revision changed")
     );
     assert_eq!(store.detail("r").await.unwrap().unwrap().runs.len(), 3);
+}
+
+#[tokio::test]
+async fn audio_relink_verifies_content_is_dry_run_safe_and_preserves_evidence() {
+    use parakeet_application::audio_locations::*;
+    use parakeet_infrastructure::audio::LocalAudioIdentity;
+    use std::sync::Arc;
+    let (tmp, store) = database().await;
+    let original = tmp.path().join("original.wav");
+    std::fs::write(&original, b"fixture bytes retained exactly").unwrap();
+    let reader = Arc::new(LocalAudioIdentity);
+    let identity = reader.identify(&original).await.unwrap();
+    let mut b = bundle();
+    b.tracks[0].path = identity.path;
+    b.tracks[0].size_bytes = Some(identity.size_bytes);
+    b.tracks[0].modified_unix_ms = Some(identity.modified_unix_ms);
+    b.tracks[0].available = true;
+    store.import(&b).await.unwrap();
+    store.rename("r", "User title").await.unwrap();
+    let store = Arc::new(store);
+    let service = AudioLocationService::new(store.clone(), store.clone(), reader);
+    let anchored = service
+        .fingerprint(FingerprintAudioInput {
+            recording_id: "r".into(),
+            track_id: "track".into(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        anchored.provenance["content_sha256"]
+            .as_str()
+            .unwrap()
+            .len(),
+        64
+    );
+    let backup = tmp.path().join("moved.wav");
+    std::fs::rename(&original, &backup).unwrap();
+    let input = RelinkAudioInput {
+        recording_id: "r".into(),
+        track_id: "track".into(),
+        path: backup.clone(),
+        dry_run: true,
+    };
+    let preview = service.relink(input.clone()).await.unwrap();
+    assert!(preview.changed);
+    assert!(preview.dry_run);
+    assert_eq!(
+        store.detail("r").await.unwrap().unwrap().tracks[0].path,
+        anchored.path
+    );
+    let mut input = input;
+    input.dry_run = false;
+    let saved = service.relink(input.clone()).await.unwrap();
+    let detail = store.detail("r").await.unwrap().unwrap();
+    assert_eq!(detail.recording.title(), "User title");
+    assert_eq!(detail.segments[0], b.segments[0]);
+    assert_eq!(
+        detail.tracks[0].start_offset_ms,
+        b.tracks[0].start_offset_ms
+    );
+    assert_eq!(detail.tracks[0].id, "track");
+    assert_eq!(
+        saved.track.path,
+        backup.canonicalize().unwrap().to_string_lossy()
+    );
+    assert!(!service.relink(input).await.unwrap().changed);
+    assert_eq!(
+        saved.track.provenance["locator_history"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(!store.replace_locator(&anchored, &anchored).await.unwrap());
+    let wrong = tmp.path().join("wrong.wav");
+    std::fs::write(&wrong, b"different file content entirely").unwrap();
+    assert!(matches!(
+        service
+            .relink(RelinkAudioInput {
+                recording_id: "r".into(),
+                track_id: "track".into(),
+                path: wrong,
+                dry_run: false
+            })
+            .await,
+        Err(RelinkAudioError::Conflict(_))
+    ));
+    assert_eq!(
+        std::fs::read(backup).unwrap(),
+        b"fixture bytes retained exactly"
+    );
+}
+
+#[tokio::test]
+async fn missing_unfingerprinted_audio_cannot_be_replaced_by_a_guess() {
+    use parakeet_application::audio_locations::*;
+    use std::sync::Arc;
+    let (tmp, store) = database().await;
+    store.import(&bundle()).await.unwrap();
+    let store = Arc::new(store);
+    let service = AudioLocationService::new(
+        store.clone(),
+        store.clone(),
+        Arc::new(parakeet_infrastructure::audio::LocalAudioIdentity),
+    );
+    let replacement = tmp.path().join("unrelated.wav");
+    std::fs::write(&replacement, b"unrelated").unwrap();
+    assert!(matches!(
+        service
+            .relink(RelinkAudioInput {
+                recording_id: "r".into(),
+                track_id: "track".into(),
+                path: replacement,
+                dry_run: false
+            })
+            .await,
+        Err(RelinkAudioError::Unverifiable(_))
+    ));
+    assert_eq!(
+        store.detail("r").await.unwrap().unwrap().tracks[0],
+        bundle().tracks[0]
+    );
 }

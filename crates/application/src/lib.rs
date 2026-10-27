@@ -15,6 +15,7 @@ macro_rules! operation_error {
         impl $name{pub fn kind(&self)->&'static str{match self{$(Self::$source_variant(_)=>$source_kind,)*$(Self::$value_variant(_)=>$value_kind,)*}}}
     };
 }
+pub mod audio_locations;
 pub mod jobs;
 pub mod processing;
 pub mod settings;
@@ -574,7 +575,7 @@ pub trait AudioPlayback: Send + Sync {
     ) -> Result<(), CapabilityError>;
 }
 operation_error!(PlayAudioError,sources{Invalid:ValidationError=>"invalid_input",Persistence:PersistenceError=>"persistence",Source:CapabilityError=>"source"},values{NotFound=>"not_found"});
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlayAudioInput {
     pub recording_id: String,
     pub track_id: String,

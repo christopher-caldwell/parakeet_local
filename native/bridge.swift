@@ -48,12 +48,14 @@ func target(bundle requestedBundle:String? = nil) throws -> [String: Any] {
     let element = try focused(app.processIdentifier)
     return ["bundle_id": bundle, "process_id": app.processIdentifier, "element_token": String(CFHash(element))]
 }
-func insert(_ options: [String: Any]) throws {
+func insert(_ options: [String: Any]) throws -> [String:Any] {
     guard AXIsProcessTrusted(), let pid = options["process_id"] as? Int32, let bundle = options["bundle_id"] as? String, let token = options["element_token"] as? String, let text = options["text"] as? String else { throw failure("Insertion needs accessibility permission, saved target, and text") }
     guard NSRunningApplication(processIdentifier: pid)?.bundleIdentifier == bundle else { throw failure("Original target process is no longer available") }
     let element = try focused(pid)
     guard String(CFHash(element)) == token else { throw failure("Original focused element changed; recognized text was retained") }
-    guard AXUIElementSetAttributeValue(element, kAXSelectedTextAttribute as CFString, text as CFString) == .success else { throw failure("Target does not support direct text insertion; recognized text was retained. Clipboard was not modified") }
+    if AXUIElementSetAttributeValue(element, kAXSelectedTextAttribute as CFString, text as CFString) == .success { return ["inserted":true,"method":"accessibility","verification":"accessibility_acknowledged"] }
+    guard let directory=options["clipboard_recovery_directory"] as? String else {throw failure("Target does not support direct insertion; clipboard recovery is not configured. Text retained")}
+    return try clipboardInsert(element:element,pid:pid,token:token,text:text,directory:URL(fileURLWithPath:directory))
 }
 
 final class TrackWriter {
@@ -214,10 +216,13 @@ final class Hotkeys {
             let parent=getppid();if parent==1{exit(1)};let watchdog=DispatchSource.makeTimerSource(queue:DispatchQueue.global());watchdog.schedule(deadline:.now()+1,repeating:1);watchdog.setEventHandler{if getppid() != parent{exit(1)}};watchdog.resume();defer{watchdog.cancel()}
             let args=CommandLine.arguments;guard args.count>=2 else{throw failure("Expected devices, permissions, target, insert, record, or hotkeys")}
             switch args[1]{
+            case "clipboard-self-test":emit(try clipboardSelfTest())
+            case "clipboard-test-child":guard args.count==4 else{throw failure("test child requires private pasteboard and directory")};try clipboardTestChild(board:args[2],directory:args[3])
+            case "clipboard-recover":guard args.count==3 else{throw failure("clipboard recovery requires its own directory")};emit(try recoverClipboard(URL(fileURLWithPath:args[2])))
             case "devices":emit(["devices":try inputDevices()])
             case "permissions":emit(["microphone_status":AVCaptureDevice.authorizationStatus(for:.audio).rawValue,"screen_capture":CGPreflightScreenCaptureAccess(),"accessibility":AXIsProcessTrusted(),"input_monitoring":CGPreflightListenEventAccess(),"prompts_requested":false])
             case "target":emit(try target(bundle:args.count==3 ? args[2]:nil))
-            case "insert":guard args.count==3 else{throw failure("insert requires a JSON file")};let o=try JSONSerialization.jsonObject(with:Data(contentsOf:URL(fileURLWithPath:args[2]))) as! [String:Any];try insert(o);emit(["inserted":true])
+            case "insert":guard args.count==3 else{throw failure("insert requires a JSON file")};let o=try JSONSerialization.jsonObject(with:Data(contentsOf:URL(fileURLWithPath:args[2]))) as! [String:Any];emit(try insert(o))
             case "record":guard args.count==3 else{throw failure("record requires a JSON file")};let o=try JSONSerialization.jsonObject(with:Data(contentsOf:URL(fileURLWithPath:args[2]))) as! [String:Any];emit(["event":"completed","report":try await record(o)])
             case "hotkeys":guard args.count==3 else{throw failure("hotkeys requires a bindings file")};try Hotkeys().run(path:args[2])
             default:throw failure("Unknown bridge command")
