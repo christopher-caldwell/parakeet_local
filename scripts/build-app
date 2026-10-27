@@ -1,11 +1,21 @@
 #!/bin/sh
 set -eu
-scripts/cargo build -p parakeet-cli -p parakeet-desktop
+build_profile=debug
+build_release=
+build_features=
+for option in "$@"; do
+  case "$option" in
+    --release) build_profile=release; build_release=--release ;;
+    --performance) build_features=--features=parakeet-desktop/performance ;;
+    *) echo "Usage: scripts/build-app [--release] [--performance]" >&2; exit 2 ;;
+  esac
+done
+scripts/cargo build -p parakeet-cli -p parakeet-desktop $build_release $build_features
 scripts/build-native
 scripts/build-model-runtime
 bundle='target/Parakeet Local.app'
 mkdir -p "$bundle/Contents/MacOS" "$bundle/Contents/Resources"
-cp target/debug/parakeet-desktop "$bundle/Contents/MacOS/.ParakeetLocal.new"
+cp "target/$build_profile/parakeet-desktop" "$bundle/Contents/MacOS/.ParakeetLocal.new"
 mv -f "$bundle/Contents/MacOS/.ParakeetLocal.new" "$bundle/Contents/MacOS/ParakeetLocal"
 cp target/native/parakeet-bridge "$bundle/Contents/MacOS/parakeet-bridge"
 cp target/native/parakeet-model-runtime "$bundle/Contents/MacOS/parakeet-model-runtime"

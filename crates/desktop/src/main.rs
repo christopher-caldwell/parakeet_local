@@ -1,4 +1,6 @@
 mod library;
+#[cfg(feature = "performance")]
+mod performance;
 mod shell;
 mod ui;
 use gpui::{div, prelude::*, px, rgb, size, *};
@@ -66,6 +68,8 @@ enum Update {
     Captured(Result<RecordingDetail, String>),
 }
 struct Workbench {
+    #[cfg(feature = "performance")]
+    performance: Option<performance::Recorder>,
     runtime: Arc<Runtime>,
     library: Arc<LibraryService>,
     locations: Arc<parakeet_application::audio_locations::AudioLocationService>,
@@ -1750,6 +1754,12 @@ fn model_runtime_executable() -> PathBuf {
         })
 }
 fn main() -> anyhow::Result<()> {
+    #[cfg(feature = "performance")]
+    let performance = performance::Recorder::from_env()?;
+    #[cfg(not(feature = "performance"))]
+    if std::env::var_os("PARAKEET_PERFORMANCE_DIR").is_some() {
+        anyhow::bail!("Performance recording requires a build with --features performance");
+    }
     let root = std::env::var_os("PARAKEET_DATA_ROOT")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
@@ -1956,6 +1966,8 @@ fn main() -> anyhow::Result<()> {
                         let focus = cx.focus_handle();
                         window.focus(&focus, cx);
                         let view = cx.new(|_| Workbench {
+                            #[cfg(feature = "performance")]
+                            performance,
                             runtime,
                             library,
                             locations,
@@ -2051,6 +2063,8 @@ fn main() -> anyhow::Result<()> {
                         });
                         view.update(cx, |this, cx| {
                             this.start_heartbeat(cx);
+                            #[cfg(feature = "performance")]
+                            this.start_performance_observer(window, cx);
                             this.subscribe_search(cx);
                             cx.on_focus_lost(window, |this, window, cx| {
                                 this.focus.focus(window, cx)
@@ -2061,6 +2075,10 @@ fn main() -> anyhow::Result<()> {
                         cx.on_app_quit(move |cx| {
                             let state = quitting
                                 .update(cx, |this, _| {
+                                    #[cfg(feature = "performance")]
+                                    if let Some(recorder) = this.performance.take() {
+                                        recorder.finish();
+                                    }
                                     if let Some(handle) = this.playback_abort.take() {
                                         handle.abort();
                                     }

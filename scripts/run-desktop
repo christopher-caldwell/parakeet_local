@@ -10,4 +10,5 @@ if [ ! -f "$parakeet_root/parakeet.db" ]; then
   echo 'No library database. Run parakeet db create, then parakeet db migrate with this data root.' >&2
   exit 1
 fi
-PARAKEET_DATA_ROOT="$parakeet_root" exec 'target/Parakeet Local.app/Contents/MacOS/ParakeetLocal'
+parakeet_bundle=${PARAKEET_APP_BUNDLE:-target/Parakeet Local.app}
+PARAKEET_DATA_ROOT="$parakeet_root" exec "$parakeet_bundle/Contents/MacOS/ParakeetLocal"
