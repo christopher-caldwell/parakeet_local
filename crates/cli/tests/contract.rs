@@ -79,6 +79,20 @@ fn json_errors_idempotency_and_durable_title_override() {
         "My explicit title"
     );
     assert_eq!(r["data"]["segments"][0]["text"], "Earlier");
+    let segment = r["data"]["segments"][0]["id"].as_str().unwrap();
+    assert_eq!(run(&root, &["speakers", "unknown", segment]).0, 0);
+    assert_eq!(
+        run(&root, &["speakers", "text", segment, "Corrected earlier"]).0,
+        0
+    );
+    let (code, text) = run(&root, &["meetings", "export", id, "--format", "text"]);
+    assert_eq!(code, 0);
+    assert_eq!(text["data"]["text"], "Corrected earlier\n\nLater");
+    assert_eq!(run(&root, &["speakers", "undo", segment]).0, 0);
+    assert_eq!(
+        run(&root, &["meetings", "export", id, "--format", "text"]).1["data"]["text"],
+        "Earlier\n\nLater"
+    );
     let (code, error) = run(&root, &["does-not-exist"]);
     assert_eq!(code, 2);
     assert_eq!(error["error"]["kind"], "invalid_arguments");

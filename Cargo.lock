@@ -4030,6 +4030,7 @@ name = "parakeet-desktop"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "gpui-base",
  "gpui-pre",
  "gpui-pre-platform",

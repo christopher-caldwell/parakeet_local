@@ -1,5 +1,8 @@
+mod library;
+mod shell;
+mod ui;
 use gpui::{div, prelude::*, px, rgb, size, *};
-use gpui_base::input::{Input, InputState, Textarea, TextareaState};
+use gpui_base::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use parakeet_application::{capture::*, dictation::*, processing::*, settings::*, speakers::*, *};
 use parakeet_database::SqliteStore;
 use parakeet_domain::*;
@@ -17,6 +20,7 @@ use std::{
     time::Instant,
 };
 use tokio::runtime::Runtime;
+use ui::*;
 
 #[derive(Clone, Copy, PartialEq)]
 enum Area {
@@ -36,12 +40,16 @@ enum SpeakerMode {
 }
 enum Update {
     Clusters(parakeet_application::cluster_edits::ClusterReview),
-    Library(Vec<Recording>),
+    CopyText(String),
+    LibrarySearch(u64, Vec<Recording>),
+    TitleSaved(RecordingDetail),
+    Imported(ImportReport),
     Detail(RecordingDetail),
     Profiles(Vec<SpeakerProfile>),
     Examples(String, Vec<VoiceExampleSummary>),
     Candidates(String, Vec<EnrollmentCandidate>),
     RefreshSelected,
+    SegmentSaved(String),
     Models(Vec<ModelInfo>),
     DictationStopped(String),
     Dictations(Vec<DictationReceipt>),
@@ -97,6 +105,20 @@ struct Workbench {
     heartbeat_max_ms: f64,
     area: Area,
     speaker_mode: SpeakerMode,
+    library_filter: library::LibraryFilter,
+    recording_tab: library::RecordingTab,
+    editing_title: bool,
+    editing_segment: Option<String>,
+    transcript_find: Entity<InputState>,
+    transcript_query: String,
+    show_transcript_find: bool,
+    reader_scroll: ScrollHandle,
+    search_generation: u64,
+    show_media_import: bool,
+    show_import_path: bool,
+    show_status_details: bool,
+    last_error: Option<String>,
+    confirm_action: Option<shell::ConfirmAction>,
     show_location_tools: bool,
     show_run_history: bool,
     show_word_evidence: bool,
@@ -116,7 +138,7 @@ struct Workbench {
     person_name: Entity<InputState>,
     start: Entity<InputState>,
     end: Entity<InputState>,
-    edit_text: Entity<InputState>,
+    edit_text: Entity<TextareaState>,
     shortcut_key: Entity<InputState>,
     import_path: Entity<InputState>,
     media_url: Entity<InputState>,
@@ -129,6 +151,9 @@ struct Workbench {
     prompt_route: String,
     status: String,
     pending: usize,
+    playback_abort: Option<tokio::task::AbortHandle>,
+    playback_generation: u64,
+    playback_label: String,
     render_peak_ms: f64,
     render_count: u64,
     segment_page: usize,
@@ -144,28 +169,12 @@ fn anonymous_label(s: &str) -> String {
         .map(|n| format!("Speaker {}", n + 1))
         .unwrap_or_else(|| leaf.to_owned())
 }
-fn button(id: impl Into<ElementId>, label: impl Into<SharedString>) -> Stateful<Div> {
-    let label: SharedString = label.into();
-    div()
-        .id(id)
-        .role(Role::Button)
-        .aria_label(label.clone())
-        .tab_index(0)
-        .px_3()
-        .py_2()
-        .rounded_md()
-        .bg(rgb(0x273645))
-        .text_color(rgb(0xe5edf4))
-        .cursor_pointer()
-        .hover(|s| s.bg(rgb(0x375369)))
-        .child(label)
-}
 fn field(input: &Entity<InputState>) -> Div {
     div()
         .min_w(px(100.))
         .px_2()
         .py_2()
-        .bg(rgb(0x18232c))
+        .bg(rgb(SIDEBAR))
         .rounded_md()
         .child(Input::new(input))
 }
@@ -176,22 +185,51 @@ impl Workbench {
         future: impl Future<Output = anyhow::Result<Update>> + Send + 'static,
         cx: &mut Context<Self>,
     ) {
-        self.launch(label, Box::pin(future), cx);
+        self.launch(label, Box::pin(future), false, cx);
+    }
+    fn playback_task(
+        &mut self,
+        label: &str,
+        future: impl Future<Output = anyhow::Result<Update>> + Send + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        self.stop_playback(cx);
+        self.playback_label = label.to_owned();
+        self.launch(label, Box::pin(future), true, cx);
+    }
+    fn stop_playback(&mut self, cx: &mut Context<Self>) {
+        if let Some(handle) = self.playback_abort.take() {
+            handle.abort();
+            self.playback_generation += 1;
+            self.status = "Playback stopped".into();
+            cx.notify();
+        }
     }
     fn launch(
         &mut self,
         label: &str,
         future: std::pin::Pin<Box<dyn Future<Output = anyhow::Result<Update>> + Send + 'static>>,
+        playback: bool,
         cx: &mut Context<Self>,
     ) {
         self.status = label.into();
         self.pending += 1;
         cx.notify();
         let handle = self.runtime.spawn(future);
+        let playback_generation = self.playback_generation;
+        if playback {
+            self.playback_abort = Some(handle.abort_handle());
+        }
+
         cx.spawn(async move |this, cx| {
             let result = handle.await;
             let _ = this.update(cx, |this, cx| {
                 this.pending = this.pending.saturating_sub(1);
+                if playback {
+                    if playback_generation != this.playback_generation { cx.notify(); return; }
+                    this.playback_abort = None;
+                }
+
                 match result {
                     Ok(Ok(update)) => {
                         match update {
@@ -225,7 +263,9 @@ impl Workbench {
                                     this.task("Reloading current transcript",async move {Ok(Update::Detail(library.show(&id).await?))},cx);
                                 }
                             }
-                            Update::RefreshSelected => {
+                            Update::RefreshSelected | Update::SegmentSaved(_) => {
+                                if let Update::SegmentSaved(id) = update
+                                    && this.editing_segment.as_deref() == Some(id.as_str()) { this.editing_segment = None; }
                                 if let Some(id) = this.requested_recording.clone() {
                                     let library = this.library.clone();
                                     this.task(
@@ -262,31 +302,12 @@ impl Workbench {
                                     }
                                 }
                             }
-                            Update::Library(r) => this.records = r,
-                            Update::Detail(d) => {
-                                if this.requested_recording.as_deref()
-                                    == Some(d.recording.id.as_str())
-                                {
-                                    this.selected_track = this
-                                        .selected_track
-                                        .clone()
-                                        .filter(|id| d.tracks.iter().any(|t| t.id == *id))
-                                        .or_else(|| {
-                                            d.tracks
-                                                .iter()
-                                                .find(|t| {
-                                                    t.available && t.kind != TrackKind::Playback
-                                                })
-                                                .map(|t| t.id.clone())
-                                        });
-                                    if let Some(row) =
-                                        this.records.iter_mut().find(|r| r.id == d.recording.id)
-                                    {
-                                        *row = d.recording.clone();
-                                    }
-                                    this.detail = Some(d);
-                                }
-                            }
+                            Update::CopyText(text) => {cx.write_to_clipboard(ClipboardItem::new_string(text));this.status="Transcript copied".into();cx.notify();return;},
+                            Update::LibrarySearch(generation,r) => {if generation==this.search_generation {this.records=r;}},
+                            Update::TitleSaved(d) => {if let Some(row)=this.records.iter_mut().find(|r|r.id==d.recording.id){*row=d.recording.clone();}
+                                if this.requested_recording.as_deref()==Some(d.recording.id.as_str()){this.editing_title=false;this.receive_detail(d);}},
+                            Update::Imported(report) => {this.reload(cx);this.status=format!("{} imported · {} already in library{}",report.imported,report.existing,if report.warnings.is_empty(){String::new()}else{format!(" · Warnings: {}",report.warnings.join("; "))});cx.notify();return;},
+                            Update::Detail(d) => this.receive_detail(d),
                             Update::Profiles(p) => {
                                 if this
                                     .selected_profile
@@ -328,8 +349,8 @@ impl Workbench {
                         }
                         this.status = "Ready".into();
                     }
-                    Ok(Err(e)) => this.status = format!("Failed: {e:#}"),
-                    Err(e) => this.status = format!("Background task failed: {e}"),
+                    Ok(Err(e)) => {this.status=format!("Failed: {e:#}");this.last_error=Some(this.status.clone());},
+                    Err(e) => {this.status=format!("Background task failed: {e}");this.last_error=Some(this.status.clone());},
                 };
                 cx.notify();
             });
@@ -338,11 +359,14 @@ impl Workbench {
     }
     fn reload(&mut self, cx: &mut Context<Self>) {
         let lib = self.library.clone();
+        self.search_generation += 1;
+        let generation = self.search_generation;
         let search = self.search.read(cx).value().to_string();
         self.task(
             "Loading library",
             async move {
-                Ok(Update::Library(
+                Ok(Update::LibrarySearch(
+                    generation,
                     lib.list(if search.is_empty() {
                         None
                     } else {
@@ -364,6 +388,13 @@ impl Workbench {
         self.candidates.clear();
         self.selected_track = None;
         self.segment_page = 0;
+        self.editing_title = false;
+        self.editing_segment = None;
+        self.recording_tab = library::RecordingTab::Transcript;
+        self.transcript_query.clear();
+        self.transcript_find
+            .update(cx, |state, cx| state.set_value("", window, cx));
+        self.reader_scroll.set_offset(point(px(0.), px(0.)));
         self.requested_recording = Some(id.clone());
         let lib = self.library.clone();
         if let Some(r) = self.records.iter().find(|r| r.id == id) {
@@ -412,7 +443,7 @@ impl Workbench {
         };
         let id = d.recording.id.clone();
         let service = self.playback.clone();
-        self.task(
+        self.playback_task(
             "Playing source interval",
             async move {
                 service
@@ -481,118 +512,11 @@ impl Workbench {
     }
 }
 impl Render for Workbench {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let began = Instant::now();
-        let sidebar = div()
-            .w(px(200.))
-            .h_full()
-            .bg(rgb(0x17212a))
-            .p_4()
-            .flex()
-            .flex_col()
-            .gap_2()
-            .child(div().text_lg().mb_4().child("Parakeet Local"))
-            .children(
-                [
-                    (Area::Library, "Library"),
-                    (Area::Capture, "Record"),
-                    (Area::Speakers, "Speakers"),
-                    (Area::Jobs, "Processing jobs"),
-                    (Area::Models, "Local models"),
-                    (Area::Dictation, "Dictation"),
-                    (Area::Privacy, "Privacy & routes"),
-                ]
-                .into_iter()
-                .enumerate()
-                .map(|(i, (area, label))| {
-                    button(("nav", i), label).on_click(cx.listener(move |this, _, _, cx| {
-                        this.area = area;
-                        match area {
-                            Area::Jobs => {
-                                let service = this.recovery.clone();
-                                this.task(
-                                    "Inspecting pending jobs",
-                                    async move { Ok(Update::Jobs(service.pending().await?)) },
-                                    cx,
-                                );
-                            }
-                            Area::Capture => {
-                                let capture = this.audio_inspection.clone();
-                                this.task(
-                                    "Enumerating input devices",
-                                    async move { Ok(Update::Devices(capture.devices().await?)) },
-                                    cx,
-                                );
-                            }
-                            Area::Speakers => {
-                                this.refresh_profiles(cx);
-                                if let Some(d) = &this.detail {
-                                    let id = d.recording.id.clone();
-                                    let service = this.speakers.clone();
-                                    this.task(
-                                        "Preparing clean enrollment candidates",
-                                        async move {
-                                            Ok(Update::Candidates(
-                                                id.clone(),
-                                                service.candidates(&id).await?,
-                                            ))
-                                        },
-                                        cx,
-                                    );
-                                }
-                            }
-                            Area::Dictation => {
-                                let service = this.dictation_history.clone();
-                                this.task(
-                                    "Reading retained dictations",
-                                    async move { Ok(Update::Dictations(service.list().await?)) },
-                                    cx,
-                                );
-                                let settings = this.settings.clone();
-                                this.task(
-                                    "Reading shortcut configuration",
-                                    async move {
-                                        Ok(Update::Settings(
-                                            settings.shortcuts().await?,
-                                            settings.prompts().await?,
-                                        ))
-                                    },
-                                    cx,
-                                );
-                            }
-                            Area::Models => {
-                                let service = this.models.clone();
-                                this.task(
-                                    "Reading local model registry",
-                                    async move { Ok(Update::Models(service.list().await?)) },
-                                    cx,
-                                );
-                            }
-                            Area::Privacy => {
-                                let service = this.settings.clone();
-                                this.task(
-                                    "Reading settings",
-                                    async move {
-                                        Ok(Update::Settings(
-                                            service.shortcuts().await?,
-                                            service.prompts().await?,
-                                        ))
-                                    },
-                                    cx,
-                                );
-                            }
-                            _ => {}
-                        }
-                        cx.notify();
-                    }))
-                }),
-            );
+        let sidebar = self.sidebar(cx);
         let mut content = div()
             .id("area-content")
-            .overflow_y_scroll()
-            .min_h_0()
-            .flex_1()
-            .h_full()
             .min_w_0()
             .p_5()
             .flex()
@@ -600,600 +524,10 @@ impl Render for Workbench {
             .gap_3();
         match self.area {
             Area::Library => {
-                content = content
-                    .child(div().flex().gap_2().child(field(&self.import_path)).child(
-                        button("import-local", "Import local file or folder").on_click(
-                            cx.listener(|this, _, _, cx| {
-                                let path =
-                                    PathBuf::from(this.import_path.read(cx).value().to_string());
-                                let library = this.library.clone();
-                                this.task(
-                                    "Importing local audio",
-                                    async move {
-                                        library
-                                            .import_path(ImportRecordingsInput {
-                                                path,
-                                                dry_run: false,
-                                            })
-                                            .await?;
-                                        Ok(Update::Library(library.list(None).await?))
-                                    },
-                                    cx,
-                                );
-                            }),
-                        ),
-                    ))
-                    .child(div().flex().gap_2().child(field(&self.media_url)).child(
-                        button("import-youtube", "Download & transcribe YouTube").on_click(
-                            cx.listener(|this, _, _, cx| {
-                                let url = this.media_url.read(cx).value().to_string();
-                                let service = this.media.clone();
-                                let library = this.library.clone();
-                                this.task(
-                                    "Downloading and transcribing YouTube locally",
-                                    async move {
-                                        let r = service
-                                            .transcribe(TranscribeMediaInput {
-                                                url,
-                                                model: "selected-asr".into(),
-                                            })
-                                            .await?;
-                                        if let Some(e) = r.transcription_failure {
-                                            return Ok(Update::Message(format!(
-                                                "Audio saved as {}. Transcription failed: {e}",
-                                                r.recording.id
-                                            )));
-                                        }
-                                        Ok(Update::Library(library.list(None).await?))
-                                    },
-                                    cx,
-                                );
-                            }),
-                        ),
-                    ));
-                content = content.child(
-                    div()
-                        .flex()
-                        .gap_2()
-                        .child(div().flex_1().child(field(&self.search)))
-                        .child(
-                            button("search", "Search")
-                                .on_click(cx.listener(|this, _, _, cx| this.reload(cx))),
-                        )
-                        .child(
-                            button("refresh", "Refresh")
-                                .on_click(cx.listener(|this, _, _, cx| this.reload(cx))),
-                        ),
-                );
-                let mut rows = div()
-                    .w(px(280.))
-                    .h_full()
-                    .id("library-list")
-                    .overflow_y_scroll()
-                    .flex()
-                    .flex_col()
-                    .gap_2();
-                for r in &self.records {
-                    let id = r.id.clone();
-                    rows = rows.child(button(r.id.clone(), r.title().to_owned()).on_click(
-                        cx.listener(move |this, _, window, cx| this.open(id.clone(), window, cx)),
-                    ));
-                }
-                let mut reader = div()
-                    .flex_1()
-                    .min_w_0()
-                    .min_h_0()
-                    .h_full()
-                    .id("library-reader")
-                    .overflow_y_scroll()
-                    .flex()
-                    .flex_col()
-                    .gap_3();
-                if let Some(d) = &self.detail {
-                    let id = d.recording.id.clone();
-                    reader = reader
-                        .child(
-                            div()
-                                .flex()
-                                .gap_2()
-                                .child(div().flex_1().child(field(&self.title)))
-                                .child(button("rename", "Save title").on_click(cx.listener(
-                                    move |this, _, _, cx| {
-                                        let title = this.title.read(cx).value().to_string();
-                                        let id = id.clone();
-                                        let lib = this.library.clone();
-                                        this.task(
-                                            "Saving title",
-                                            async move {
-                                                lib.rename(RenameRecordingInput {
-                                                    id: id.clone(),
-                                                    title: title.clone(),
-                                                })
-                                                .await?;
-                                                Ok(Update::Detail(lib.show(&id).await?))
-                                            },
-                                            cx,
-                                        );
-                                    },
-                                ))),
-                        )
-                        .child(div().text_sm().text_color(rgb(0x99aebc)).child(format!(
-                                "{} · {} · {} · {} processing runs",
-                                d.recording.source_kind,
-                                d.recording.created_at,
-                                d.recording.metadata["state"]
-                                    .as_str()
-                                    .unwrap_or("imported evidence")
-                                    .replace('_', " "),
-                                d.runs.len()
-                            )));
-                    reader = reader.child(
-                        button(
-                            "run-history",
-                            if self.show_run_history {
-                                "Hide recent processing history"
-                            } else {
-                                "Show recent processing history"
-                            },
-                        )
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.show_run_history = !this.show_run_history;
-                            cx.notify();
-                        })),
-                    );
-                    for run in d
-                        .runs
-                        .iter()
-                        .rev()
-                        .take(if self.show_run_history { 5 } else { 0 })
-                    {
-                        let retry_id = run.id.clone();
-                        reader =
-                            reader.child(
-                                div()
-                                    .text_sm()
-                                    .child(format!(
-                                        "{} · {} · {}{}",
-                                        run.kind,
-                                        run.model,
-                                        run.status,
-                                        if run.configuration["human_edit"].is_object() {
-                                            " · manual cluster edit"
-                                        } else {
-                                            ""
-                                        }
-                                    ))
-                                    .when_some(run.error.clone(), |row, error| row.child(error))
-                                    .when(
-                                        ["failed", "interrupted"].contains(&run.status.as_str())
-                                            && run.configuration["request"].is_object(),
-                                        |row| {
-                                            row.child(
-                                                button(
-                                                    format!("retry-{}", run.id),
-                                                    "Retry as new processing run",
-                                                )
-                                                .on_click(cx.listener(move |this, _, _, cx| {
-                                                    let processing = this.processing.clone();
-                                                    let id = retry_id.clone();
-                                                    let library = this.library.clone();
-                                                    this.task(
-                                                        "Retrying retained audio",
-                                                        async move {
-                                                            let run = processing.retry(&id).await?;
-                                                            Ok(Update::Detail(
-                                                                library
-                                                                    .show(&run.recording_id)
-                                                                    .await?,
-                                                            ))
-                                                        },
-                                                        cx,
-                                                    );
-                                                })),
-                                            )
-                                        },
-                                    ),
-                            );
-                    }
-                    if !d.unmapped_corrected_segments.is_empty() {
-                        reader=reader.child(format!("{} corrected intervals belong to earlier processing runs; preserved for review",d.unmapped_corrected_segments.len()));
-                    }
-                    let mut sources = div().flex().gap_2().flex_wrap();
-                    for t in &d.tracks {
-                        let id = t.id.clone();
-                        sources = sources.child(
-                            button(
-                                t.id.clone(),
-                                format!(
-                                    "{}{:?} · {} · {}",
-                                    if self.selected_track.as_ref() == Some(&t.id) {
-                                        "● "
-                                    } else {
-                                        ""
-                                    },
-                                    t.kind,
-                                    if t.available { "available" } else { "MISSING" },
-                                    if t.meeting_offset_ms().is_some() {
-                                        "aligned"
-                                    } else {
-                                        "timing uncertain"
-                                    }
-                                ),
-                            )
-                            .on_click(cx.listener(
-                                move |this, _, _, cx| {
-                                    this.selected_track = Some(id.clone());
-                                    cx.notify();
-                                },
-                            )),
-                        );
-                    }
-                    reader = reader
-                        .child(sources)
-                        .child(button("audio-locations", "Audio file locations").on_click(
-                            cx.listener(|this, _, _, cx| {
-                                this.show_location_tools = !this.show_location_tools;
-                                cx.notify();
-                            }),
-                        ))
-                        .when(self.show_location_tools, |reader| {
-                            reader
-                                .child(
-                                    button(
-                                        "fingerprint-source",
-                                        "Fingerprint selected source for safe relocation",
-                                    )
-                                    .on_click(
-                                        cx.listener(|this, _, _, cx| this.fingerprint_audio(cx)),
-                                    ),
-                                )
-                                .child(field(&self.relink_path))
-                                .child(
-                                    div()
-                                        .flex()
-                                        .flex_wrap()
-                                        .gap_2()
-                                        .child(
-                                            button(
-                                                "inspect-relink",
-                                                "Check replacement without saving",
-                                            )
-                                            .on_click(
-                                                cx.listener(|this, _, _, cx| {
-                                                    this.relink_audio(true, cx)
-                                                }),
-                                            ),
-                                        )
-                                        .child(
-                                            button("save-relink", "Relink byte-identical audio")
-                                                .on_click(cx.listener(|this, _, _, cx| {
-                                                    this.relink_audio(false, cx)
-                                                })),
-                                        ),
-                                )
-                        })
-                        .child(
-                            div()
-                                .flex()
-                                .gap_2()
-                                .child(field(&self.start))
-                                .child(field(&self.end))
-                                .child(
-                                    button("play", "Play interval")
-                                        .on_click(cx.listener(|this, _, _, cx| this.play(cx))),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .gap_2()
-                                .child(button("transcribe", "Transcribe selected source").on_click(
-                                    cx.listener(|this, _, _, cx| this.process(false, false, cx)),
-                                ))
-                                .child(button("diarize", "Diarize selected source").on_click(
-                                    cx.listener(|this, _, _, cx| this.process(true, false, cx)),
-                                )),
-                        )
-                        .child(button("word-evidence", if self.show_word_evidence { "Hide word timing and original evidence" } else { "Show word timing and original evidence" }).on_click(cx.listener(|this,_,_,cx|{this.show_word_evidence = !this.show_word_evidence;cx.notify();})))
-                        .when(self.show_word_evidence, |reader| reader
-                            .child(button("transcribe-estimated-words", "Transcribe with experimental word timing").on_click(cx.listener(|this,_,_,cx|this.process(false,true,cx))))
-                            .child("Word times are model estimates. Ambiguous speech stays Unknown; corrections remain attached to original segments. Evidence previews show up to 100 original words per segment."));
-                    let mut transcript = div()
-                        .flex_shrink_0()
-                        .id("transcript")
-                        .flex()
-                        .flex_col()
-                        .gap_3();
-                    for s in d.segments.iter().skip(self.segment_page * 40).take(40) {
-                        let correction = d.corrections.iter().rev().find(|c| c.segment_id == s.id);
-                        let words = correction
-                            .and_then(|c| c.replacement_text.clone())
-                            .unwrap_or_else(|| s.text.clone());
-                        let label = correction
-                            .and_then(|c| c.profile_id.as_ref())
-                            .and_then(|id| self.profiles.iter().find(|p| p.id == *id))
-                            .map(|p| format!("{} (confirmed)", p.name))
-                            .unwrap_or_else(|| "Unknown".into());
-                        let attribution = d.attributions.iter().find(|a| a.segment_id == s.id);
-                        let label = if label == "Unknown" {
-                            match attribution {
-                                Some(a) if a.state == "anonymous_model_attribution" => {
-                                    format!(
-                                        "Anonymous {}",
-                                        a.anonymous_speakers
-                                            .iter()
-                                            .map(|s| anonymous_label(s))
-                                            .collect::<Vec<_>>()
-                                            .join(", ")
-                                    )
-                                }
-                                Some(a) if a.state == "ambiguous" => {
-                                    "Unknown (multiple voices / turn boundary)".into()
-                                }
-                                _ => label,
-                            }
-                        } else {
-                            label
-                        };
-                        let time = s
-                            .start_ms
-                            .map(|v| format!("{:.2}s", v as f64 / 1000.))
-                            .unwrap_or_else(|| "Untimed".into());
-                        let overlap_note = attribution
-                            .map(|a| {
-                                if a.possible_cross_source_duplicate {
-                                    " · possible cross-source duplication"
-                                } else if a.overlapping_source_audio || a.overlapping_speech {
-                                    " · overlapping audio"
-                                } else {
-                                    ""
-                                }
-                            })
-                            .unwrap_or("");
-                        let source = s
-                            .track_id
-                            .as_ref()
-                            .and_then(|id| d.tracks.iter().find(|t| t.id == *id))
-                            .map(|t| format!("{:?}", t.kind))
-                            .unwrap_or_else(|| "source unverified".into());
-                        let segment_id = s.id.clone();
-                        let play_segment = s.id.clone();
-                        let play_recording = d.recording.id.clone();
-                        let unknown_id = s.id.clone();
-                        let edit_id = s.id.clone();
-                        let undo_id = s.id.clone();
-                        transcript = transcript.child(
-                            div()
-                                .p_3()
-                                .rounded_md()
-                                .bg(rgb(0x1c2933))
-                                .flex()
-                                .flex_col()
-                                .gap_2()
-                                .child(div().text_sm().text_color(rgb(0x91b6c9)).child(format!(
-                                    "{time} · {source} · {label}{overlap_note}{}",
-                                    if s.evidence["uncertain_speech"] == true {
-                                        " · uncertain speech"
-                                    } else {
-                                        ""
-                                    }
-                                )))
-                                .child(words)
-                                .when(self.show_word_evidence, |row| {
-                                    let evidence = d
-                                        .word_attributions
-                                        .iter()
-                                        .filter(|w| w.segment_id == s.id)
-                                        .take(100)
-                                        .map(|w| {
-                                            let timing = match (w.word.start_ms, w.word.end_ms) {
-                                                (Some(a), Some(b)) => format!(
-                                                    "{:.2}–{:.2}s",
-                                                    a as f64 / 1000.,
-                                                    b as f64 / 1000.
-                                                ),
-                                                _ => "untimed".into(),
-                                            };
-                                            let voice = if w.attribution.state
-                                                == "anonymous_model_attribution"
-                                            {
-                                                w.attribution
-                                                    .anonymous_speakers
-                                                    .iter()
-                                                    .map(|id| anonymous_label(id))
-                                                    .collect::<Vec<_>>()
-                                                    .join(", ")
-                                            } else {
-                                                "Unknown".into()
-                                            };
-                                            format!("{} [{timing}; {voice}]", w.word.text)
-                                        })
-                                        .collect::<Vec<_>>()
-                                        .join(" · ");
-                                    row.child(div().text_sm().text_color(rgb(0x99aebc)).child(
-                                        if evidence.is_empty() {
-                                            "No word timing evidence for this segment".into()
-                                        } else {
-                                            format!("Original estimated words: {evidence}")
-                                        },
-                                    ))
-                                })
-                                .child(
-                                    div()
-                                        .flex()
-                                        .flex_wrap()
-                                        .gap_2()
-                                        .child(
-                                            button(
-                                                format!("play-segment-{}", s.id),
-                                                "Play speech (up to 30s)",
-                                            )
-                                            .on_click(
-                                                cx.listener(move |this, _, _, cx| {
-                                                    let service = this.playback.clone();
-                                                    let recording_id = play_recording.clone();
-                                                    let segment_id = play_segment.clone();
-                                                    this.task(
-                                                        "Playing source-linked speech",
-                                                        async move {
-                                                            let played = service
-                                                                .play_segment(PlaySegmentInput {
-                                                                    recording_id,
-                                                                    segment_id,
-                                                                })
-                                                                .await?;
-                                                            Ok(Update::Message(
-                                                            if played.truncated_to_30_seconds {
-                                                                "Played first 30 seconds of segment"
-                                                            } else {
-                                                                "Playback complete"
-                                                            }
-                                                            .into(),
-                                                        ))
-                                                        },
-                                                        cx,
-                                                    );
-                                                }),
-                                            ),
-                                        )
-                                        .child(
-                                            button(
-                                                format!("assign-{}", s.id),
-                                                "Assign selected person",
-                                            )
-                                            .on_click(
-                                                cx.listener(move |this, _, _, cx| {
-                                                    if let Some(profile) =
-                                                        this.selected_profile.clone()
-                                                    {
-                                                        let service = this.speakers.clone();
-                                                        let sid = segment_id.clone();
-                                                        this.task(
-                                                            "Saving confirmed attribution",
-                                                            async move {
-                                                                service
-                                                                    .correct(CorrectSegmentInput {
-                                                                        segment_id: sid.to_string(),
-                                                                        profile_id: Some(profile),
-                                                                        text: None,
-                                                                        action: ("assign")
-                                                                            .to_string(),
-                                                                    })
-                                                                    .await?;
-                                                                Ok(Update::RefreshSelected)
-                                                            },
-                                                            cx,
-                                                        );
-                                                    }
-                                                }),
-                                            ),
-                                        )
-                                        .child(
-                                            button(format!("unknown-{}", s.id), "Unknown")
-                                                .on_click(cx.listener(move |this, _, _, cx| {
-                                                    let service = this.speakers.clone();
-                                                    let sid = unknown_id.clone();
-                                                    this.task(
-                                                        "Clearing attribution",
-                                                        async move {
-                                                            service
-                                                                .correct(CorrectSegmentInput {
-                                                                    segment_id: sid.to_string(),
-                                                                    profile_id: None,
-                                                                    text: None,
-                                                                    action: ("unknown").to_string(),
-                                                                })
-                                                                .await?;
-                                                            Ok(Update::RefreshSelected)
-                                                        },
-                                                        cx,
-                                                    );
-                                                })),
-                                        )
-                                        .child(
-                                            button(format!("edit-{}", s.id), "Use correction text")
-                                                .on_click(cx.listener(move |this, _, _, cx| {
-                                                    let service = this.speakers.clone();
-                                                    let sid = edit_id.clone();
-                                                    let text =
-                                                        this.edit_text.read(cx).value().to_string();
-                                                    this.task(
-                                                        "Saving text correction",
-                                                        async move {
-                                                            service
-                                                                .correct(CorrectSegmentInput {
-                                                                    segment_id: sid.to_string(),
-                                                                    profile_id: None,
-                                                                    text: Some(text),
-                                                                    action: ("text").to_string(),
-                                                                })
-                                                                .await?;
-                                                            Ok(Update::RefreshSelected)
-                                                        },
-                                                        cx,
-                                                    );
-                                                })),
-                                        )
-                                        .child(button(format!("undo-{}", s.id), "Undo").on_click(
-                                            cx.listener(move |this, _, _, cx| {
-                                                let service = this.speakers.clone();
-                                                let sid = undo_id.clone();
-                                                this.task(
-                                                    "Undoing correction",
-                                                    async move {
-                                                        service.undo(&sid).await?;
-                                                        Ok(Update::RefreshSelected)
-                                                    },
-                                                    cx,
-                                                );
-                                            }),
-                                        )),
-                                ),
-                        )
-                    }
-                    reader = reader
-                        .child(
-                            div()
-                                .flex()
-                                .gap_2()
-                                .child(button("previous-segments", "Previous").on_click(
-                                    cx.listener(|this, _, _, cx| {
-                                        this.segment_page = this.segment_page.saturating_sub(1);
-                                        cx.notify();
-                                    }),
-                                ))
-                                .child(format!(
-                                    "{} segments · page {}",
-                                    d.segments.len(),
-                                    self.segment_page + 1
-                                ))
-                                .child(button("next-segments", "Next").on_click(cx.listener(
-                                    |this, _, _, cx| {
-                                        if this.detail.as_ref().is_some_and(|d| {
-                                            (this.segment_page + 1) * 40 < d.segments.len()
-                                        }) {
-                                            this.segment_page += 1;
-                                        }
-                                        cx.notify();
-                                    },
-                                ))),
-                        )
-                        .child(field(&self.edit_text))
-                        .child(transcript);
-                } else {
-                    reader=reader.child("Choose a recording. Imported labels remain unverified; source audio never implies a named person.");
-                }
-                content = content.child(
-                    div()
-                        .flex()
-                        .flex_1()
-                        .min_h_0()
-                        .gap_4()
-                        .child(rows)
-                        .child(reader),
-                );
+                content = self.library_view(window, cx).id("library-area");
             }
             Area::Speakers => {
+                content = content.child(section("Speakers", "Review anonymous voices, make corrections, and manage the examples you explicitly verified."));
                 content = content.child(
                     div().flex().flex_wrap().gap_2().children(
                         [
@@ -1204,37 +538,31 @@ impl Render for Workbench {
                         .into_iter()
                         .enumerate()
                         .map(|(index, (mode, label))| {
-                            button(("speaker-mode", index), label).on_click(cx.listener(
-                                move |this, _, _, cx| {
+                            choice(("speaker-mode", index), label, self.speaker_mode == mode)
+                                .on_click(cx.listener(move |this, _, _, cx| {
                                     this.speaker_mode = mode;
                                     cx.notify();
-                                },
-                            ))
+                                }))
                         }),
                     ),
                 );
                 if self.speaker_mode == SpeakerMode::Profiles {
-                    content=content.child(div().text_xl().child("Verified speaker examples")).child("Choose a person, return to a recording, play a clean 3–30 second track-local interval, then enroll it here.")
-     .child(div().flex().gap_2().child(field(&self.person_name)).child(button("add-person","Create person").on_click(cx.listener(|this,_,_,cx|{let name=this.person_name.read(cx).value().to_string();let service=this.speakers.clone();this.task("Creating speaker profile",async move{service.create(&name).await?;Ok(Update::Profiles(service.profiles().await?))},cx);}))));
+                    content=content.child(div().flex().flex_col().gap_2().child(caption("PEOPLE & VERIFIED EXAMPLES")).child(caption("A name is confirmed only when you identify the voice. Predictions never become training examples automatically.")))
+     .child(div().flex().gap_2().child(field(&self.person_name).w(px(260.))).child(button("add-person","Create person").on_click(cx.listener(|this,_,_,cx|{let name=this.person_name.read(cx).value().to_string();let service=this.speakers.clone();this.task("Creating speaker profile",async move{service.create(&name).await?;Ok(Update::Profiles(service.profiles().await?))},cx);}))));
                     content = content.child(
                         button("refresh-people", "Refresh people and examples")
+                            .self_start()
                             .on_click(cx.listener(|this, _, _, cx| this.refresh_profiles(cx))),
                     );
+                    let mut people = div().flex().flex_wrap().gap_2();
                     for p in &self.profiles {
                         let id = p.id.clone();
                         let name = p.name.clone();
-                        content = content.child(
-                            button(
+                        people = people.child(
+                            choice(
                                 p.id.clone(),
-                                format!(
-                                    "{}{}",
-                                    if self.selected_profile.as_ref() == Some(&p.id) {
-                                        "● "
-                                    } else {
-                                        ""
-                                    },
-                                    p.name
-                                ),
+                                p.name.clone(),
+                                self.selected_profile.as_ref() == Some(&p.id),
                             )
                             .on_click(cx.listener(
                                 move |this, _, window, cx| {
@@ -1249,8 +577,117 @@ impl Render for Workbench {
                             )),
                         );
                     }
+                    content = content.child(people);
                     content = content.child(
-                        button("enroll", "I verified this voice — enroll selected interval")
+                        div()
+                            .flex()
+                            .gap_2()
+                            .child(
+                                button("rename-person", "Rename selected person")
+                                    .disabled(self.selected_profile.is_none())
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        if let Some(id) = this.selected_profile.clone() {
+                                            let name =
+                                                this.person_name.read(cx).value().to_string();
+                                            let service = this.speakers.clone();
+                                            this.task(
+                                                "Renaming person",
+                                                async move {
+                                                    service
+                                                        .rename(RenameSpeakerInput {
+                                                            id: id.clone(),
+                                                            name: name.clone(),
+                                                        })
+                                                        .await?;
+                                                    Ok(Update::Profiles(service.profiles().await?))
+                                                },
+                                                cx,
+                                            );
+                                        }
+                                    })),
+                            )
+                            .child(
+                                danger("delete-person", "Delete person…")
+                                    .disabled(self.selected_profile.is_none())
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        if let Some(id) = this.selected_profile.clone() {
+                                            this.confirm_action =
+                                                Some(shell::ConfirmAction::DeleteProfile(id));
+                                            cx.notify();
+                                        }
+                                    })),
+                            ),
+                    );
+                    for (index, candidate) in self.candidates.iter().enumerate() {
+                        let c = candidate.clone();
+                        content = content.child(
+                            button(
+                                ("candidate", index),
+                                format!(
+                                    "Prepare {} · {:.1}–{:.1}s",
+                                    anonymous_label(&candidate.anonymous_speaker),
+                                    candidate.local_start_ms as f64 / 1000.,
+                                    candidate.local_end_ms as f64 / 1000.
+                                ),
+                            )
+                            .on_click(cx.listener(
+                                move |this, _, window, cx| {
+                                    this.selected_track = Some(c.track_id.clone());
+                                    this.start.update(cx, |s, cx| {
+                                        s.set_value(c.local_start_ms.to_string(), window, cx)
+                                    });
+                                    this.end.update(cx, |s, cx| {
+                                        s.set_value(c.local_end_ms.to_string(), window, cx)
+                                    });
+                                    cx.notify();
+                                },
+                            )),
+                        );
+                    }
+                    if let Some(detail) = &self.detail {
+                        let source = self
+                            .selected_track
+                            .as_ref()
+                            .and_then(|id| detail.tracks.iter().find(|t| &t.id == id))
+                            .map(|t| format!("{:?}", t.kind))
+                            .unwrap_or_else(|| "No source selected".into());
+                        content = content
+                            .child(caption(format!(
+                                "Prepared audio: {} · {} · track-local milliseconds",
+                                detail.recording.title(),
+                                source
+                            )))
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_wrap()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(caption("Start ms"))
+                                    .child(field(&self.start).w(px(120.)))
+                                    .child(caption("End ms"))
+                                    .child(field(&self.end).w(px(120.))),
+                            );
+                    } else {
+                        content = content.child(caption(
+                            "Open a recording in the Library to prepare voice examples.",
+                        ));
+                    }
+                    content = content.child(
+                        button("play-enrollment", "Play prepared interval")
+                            .self_start()
+                            .disabled(self.detail.is_none() || self.selected_track.is_none())
+                            .on_click(cx.listener(|this, _, _, cx| this.play(cx))),
+                    );
+                    content = content.child(
+                        primary("enroll", "I verified this voice — enroll selected interval")
+                            .self_start()
+                            .disabled(
+                                self.detail.is_none()
+                                    || self.selected_track.is_none()
+                                    || self.selected_profile.is_none()
+                                    || self.pending > 0,
+                            )
                             .on_click(cx.listener(|this, _, _, cx| {
                                 let (Some(d), Some(track), Some(profile)) = (
                                     &this.detail,
@@ -1291,78 +728,17 @@ impl Render for Workbench {
                                 );
                             })),
                     );
-                    content = content.child(
-                        div()
-                            .flex()
-                            .gap_2()
-                            .child(button("rename-person", "Rename selected person").on_click(
-                                cx.listener(|this, _, _, cx| {
-                                    if let Some(id) = this.selected_profile.clone() {
-                                        let name = this.person_name.read(cx).value().to_string();
-                                        let service = this.speakers.clone();
-                                        this.task(
-                                            "Renaming person",
-                                            async move {
-                                                service
-                                                    .rename(RenameSpeakerInput {
-                                                        id: id.clone(),
-                                                        name: name.clone(),
-                                                    })
-                                                    .await?;
-                                                Ok(Update::Profiles(service.profiles().await?))
-                                            },
-                                            cx,
-                                        );
-                                    }
-                                }),
-                            ))
-                            .child(
-                                button("delete-person", "Delete selected person and examples")
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        if let Some(id) = this.selected_profile.clone() {
-                                            let service = this.speakers.clone();
-                                            this.task(
-                                                "Deleting local voice profile",
-                                                async move {
-                                                    service.delete(&id).await?;
-                                                    Ok(Update::Profiles(service.profiles().await?))
-                                                },
-                                                cx,
-                                            );
-                                        }
-                                    })),
-                            ),
-                    );
-                    for (index, candidate) in self.candidates.iter().enumerate() {
-                        let c = candidate.clone();
-                        content = content.child(
-                            button(
-                                ("candidate", index),
-                                format!(
-                                    "Prepare {} · {:.1}–{:.1}s",
-                                    anonymous_label(&candidate.anonymous_speaker),
-                                    candidate.local_start_ms as f64 / 1000.,
-                                    candidate.local_end_ms as f64 / 1000.
-                                ),
-                            )
-                            .on_click(cx.listener(
-                                move |this, _, window, cx| {
-                                    this.selected_track = Some(c.track_id.clone());
-                                    this.start.update(cx, |s, cx| {
-                                        s.set_value(c.local_start_ms.to_string(), window, cx)
-                                    });
-                                    this.end.update(cx, |s, cx| {
-                                        s.set_value(c.local_end_ms.to_string(), window, cx)
-                                    });
-                                    cx.notify();
-                                },
-                            )),
-                        );
+                    if self.selected_profile.is_some() {
+                        content = content.child(caption(format!(
+                            "{} verified voice {}",
+                            self.examples.len(),
+                            if self.examples.len() == 1 {
+                                "example"
+                            } else {
+                                "examples"
+                            }
+                        )));
                     }
-                    content = content.child(
-                        button("play-enrollment", "Play prepared interval")
-                            .on_click(cx.listener(|this, _, _, cx| this.play(cx))),
-                    );
                     for (index, example) in self.examples.iter().enumerate() {
                         let e = example.clone();
                         let remove = example.id.clone();
@@ -1383,7 +759,7 @@ impl Render for Workbench {
                                     cx.listener(move |this, _, _, cx| {
                                         let player = this.playback.clone();
                                         let e = e.clone();
-                                        this.task(
+                                        this.playback_task(
                                             "Playing verified reference",
                                             async move {
                                                 player
@@ -1405,19 +781,12 @@ impl Render for Workbench {
                                 .child(
                                     button(("example-remove", index), "Remove incorrect example")
                                         .on_click(cx.listener(move |this, _, _, cx| {
-                                            let service = this.speakers.clone();
-                                            let id = remove.clone();
-                                            let profile = profile.clone();
-                                            this.task(
-                                                "Removing voice example",
-                                                async move {
-                                                    service.remove_example(&id).await?;
-                                                    let examples =
-                                                        service.examples(Some(&profile)).await?;
-                                                    Ok(Update::Examples(profile, examples))
-                                                },
-                                                cx,
-                                            );
+                                            this.confirm_action =
+                                                Some(shell::ConfirmAction::RemoveExample {
+                                                    id: remove.clone(),
+                                                    profile: profile.clone(),
+                                                });
+                                            cx.notify();
                                         })),
                                 ),
                         );
@@ -1429,11 +798,10 @@ impl Render for Workbench {
                 }
             }
             Area::Jobs => {
-                content=content.child(div().text_xl().child("Processing ownership and recovery"))
-                    .child("Inspection is read-only. Recovery interrupts abandoned jobs only when their ownership lock is free. Active and older unmanaged runs are preserved.")
-                    .child(button("refresh-jobs","Refresh pending jobs").on_click(cx.listener(|this,_,_,cx|{let service=this.recovery.clone();this.task("Reading pending jobs",async move{Ok(Update::Jobs(service.pending().await?))},cx); })))
-                    .child(button("recover-jobs","Recover abandoned processing jobs").on_click(cx.listener(|this,_,_,cx|{let service=this.recovery.clone();this.task("Recovering abandoned jobs",async move{let report=service.recover().await?;Ok(Update::Recovered(report,service.pending().await?))},cx); })))
-                    .child(format!("{} pending runs. Open a recording to retry an interrupted or failed run.",self.pending_jobs.len()));
+                content=content.child(section("Background jobs","Review unfinished processing. Recovery preserves active work and original audio."))
+                    .child(button("refresh-jobs","Refresh pending jobs").self_start().on_click(cx.listener(|this,_,_,cx|{let service=this.recovery.clone();this.task("Reading pending jobs",async move{Ok(Update::Jobs(service.pending().await?))},cx); })))
+                    .child(button("recover-jobs","Recover abandoned processing jobs").self_start().on_click(cx.listener(|this,_,_,cx|{let service=this.recovery.clone();this.task("Recovering abandoned jobs",async move{let report=service.recover().await?;Ok(Update::Recovered(report,service.pending().await?))},cx); })))
+                    .child(caption(if self.pending_jobs.is_empty(){"No unfinished processing jobs. Failed or interrupted runs can be retried from their recording’s Processing tab.".into()}else{format!("{} unfinished jobs. Open a recording’s Processing tab to retry a settled failure.",self.pending_jobs.len())}));
                 for run in &self.pending_jobs {
                     let recording = self
                         .records
@@ -1441,7 +809,7 @@ impl Render for Workbench {
                         .find(|r| r.id == run.recording_id)
                         .map(|r| r.title())
                         .unwrap_or(run.recording_id.as_str());
-                    content = content.child(div().p_3().bg(rgb(0x1c2933)).child(format!(
+                    content = content.child(div().p_3().bg(rgb(PANEL)).child(format!(
                         "{} · {} · {} · started {} · {} · run {}",
                         recording,
                         run.kind,
@@ -1459,9 +827,7 @@ impl Render for Workbench {
                 }
             }
             Area::Models => {
-                content = content
-                    .child(div().text_xl().child("Local model registry"))
-                    .child("Install deliberately. Processing never downloads weights.");
+                content = content.child(section("Local models","Choose separate models for transcription, speaker detection, and verified voice examples. Downloads are always explicit."));
                 if let Some(progress) = self.models.download_progress() {
                     content = content.child(format!(
                         "Downloading {} · file {}/{} · {:.1} / {} MB",
@@ -1484,32 +850,75 @@ impl Render for Workbench {
                     content = content.child(
                         div()
                             .p_3()
-                            .bg(rgb(0x1c2933))
+                            .bg(rgb(PANEL))
                             .flex()
                             .flex_col()
                             .gap_2()
-                            .child(format!(
-                                "{} · {} · {}",
-                                m.id,
-                                m.category,
-                                if m.verified {
-                                    "verified files"
-                                } else {
-                                    "not installed/verified"
-                                }
-                            ))
-                            .child(format!("Revision {} · {}", m.revision, m.license))
-                            .child(format!(
-                                "Selected for processing: {} · Voice embeddings: {}",
-                                m.detail["selected"] == true,
-                                m.detail["selected_for_embeddings"] == true
-                            ))
+                            .rounded_lg()
+                            .border_1()
+                            .border_color(rgb(BORDER))
                             .child(
                                 div()
                                     .flex()
+                                    .flex_wrap()
+                                    .items_center()
                                     .gap_2()
                                     .child(
-                                        button(format!("select-{}", m.id), "Use for processing")
+                                        div()
+                                            .flex_1()
+                                            .text_size(px(15.))
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .child(ui::model_name(&m.id).to_owned()),
+                                    )
+                                    .child(pill(
+                                        if m.verified {
+                                            "Ready offline"
+                                        } else if m.installed {
+                                            "Needs verification"
+                                        } else {
+                                            "Not downloaded"
+                                        },
+                                        if m.verified { SUCCESS } else { MUTED },
+                                    )),
+                            )
+                            .child(caption(format!(
+                                "{} · {} · {}",
+                                m.id,
+                                m.category,
+                                m.bytes
+                                    .map(|b| format!("{:.0} MB", b as f64 / 1_000_000.))
+                                    .unwrap_or("Size not specified".into())
+                            )))
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_wrap()
+                                    .gap_2()
+                                    .when(m.detail["selected"] == true, |row| {
+                                        row.child(pill("Selected for processing", ACCENT))
+                                    })
+                                    .when(m.detail["selected_for_embeddings"] == true, |row| {
+                                        row.child(pill("Selected for voice examples", SUCCESS))
+                                    }),
+                            )
+                            .when(self.show_status_details, |row| {
+                                row.child(caption(format!(
+                                    "Revision {} · {}",
+                                    m.revision, m.license
+                                )))
+                            })
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_wrap()
+                                    .gap_2()
+                                    .child(
+                                        primary(format!("select-{}", m.id), "Use model")
+                                            .disabled(
+                                                !m.verified
+                                                    || m.detail["selected"] == true
+                                                    || self.pending > 0,
+                                            )
                                             .on_click(cx.listener(move |this, _, _, cx| {
                                                 let service = this.models.clone();
                                                 let id = select_id.clone();
@@ -1528,6 +937,11 @@ impl Render for Workbench {
                                             button(
                                                 format!("embedding-{}", m.id),
                                                 "Use for voice examples",
+                                            )
+                                            .disabled(
+                                                !m.verified
+                                                    || m.detail["selected_for_embeddings"] == true
+                                                    || self.pending > 0,
                                             )
                                             .on_click(
                                                 cx.listener(move |this, _, _, cx| {
@@ -1548,36 +962,35 @@ impl Render for Workbench {
                                         )
                                     })
                                     .child(
-                                        button(format!("remove-model-{}", m.id), "Remove weights")
+                                        danger(format!("remove-model-{}", m.id), "Remove…")
+                                            .disabled(!m.installed || self.pending > 0)
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.confirm_action =
+                                                    Some(shell::ConfirmAction::RemoveModel(
+                                                        remove_id.clone(),
+                                                    ));
+                                                cx.notify();
+                                            })),
+                                    )
+                                    .child(
+                                        button(format!("install-{}", m.id), "Download")
+                                            .disabled(m.installed || self.pending > 0)
                                             .on_click(cx.listener(move |this, _, _, cx| {
                                                 let service = this.models.clone();
-                                                let id = remove_id.clone();
+                                                let id = id.clone();
                                                 this.task(
-                                                    "Removing downloaded model weights",
+                                                    "Downloading local model",
                                                     async move {
-                                                        service.remove(&id).await?;
+                                                        service.install(&id).await?;
                                                         Ok(Update::Models(service.list().await?))
                                                     },
                                                     cx,
                                                 );
                                             })),
                                     )
-                                    .child(button(format!("install-{}", m.id), "Install").on_click(
-                                        cx.listener(move |this, _, _, cx| {
-                                            let service = this.models.clone();
-                                            let id = id.clone();
-                                            this.task(
-                                                "Downloading local model",
-                                                async move {
-                                                    service.install(&id).await?;
-                                                    Ok(Update::Models(service.list().await?))
-                                                },
-                                                cx,
-                                            );
-                                        }),
-                                    ))
                                     .child(
-                                        button(format!("verify-{}", m.id), "Verify checksums")
+                                        button(format!("verify-{}", m.id), "Verify files")
+                                            .disabled(!m.installed || self.pending > 0)
                                             .on_click(cx.listener(move |this, _, _, cx| {
                                                 let service = this.models.clone();
                                                 let id = verify_id.clone();
@@ -1596,7 +1009,18 @@ impl Render for Workbench {
                 }
             }
             Area::Capture => {
-                content=content.child(div().text_xl().child("Meeting capture")).child("Select a physical input explicitly. System audio is captured independently. Stop preserves separate source recordings.");
+                content=content.child(section("Record a meeting","Choose your microphone and audio sources. Separate source recordings are saved for accurate review."));
+                content = content.child(
+                    button("refresh-audio-devices", "Refresh inputs")
+                        .self_start()
+                        .on_click(cx.listener(|this, _, _, cx| this.navigate(Area::Capture, cx))),
+                );
+                if self.devices["devices"]
+                    .as_array()
+                    .is_none_or(|devices| devices.is_empty())
+                {
+                    content = content.child(caption(if self.pending > 0 { "Checking available audio inputs…" } else { "No microphone inputs are available. Connect an input and refresh. System audio can be recorded separately." }));
+                }
                 if let Some(devices) = self.devices["devices"].as_array() {
                     for (index, device) in devices.iter().enumerate() {
                         let uid = device["uid"].as_str().unwrap_or_default().to_owned();
@@ -1632,28 +1056,24 @@ impl Render for Workbench {
                     }
                 }
                 content = content
-                    .child(format!(
-                        "Selected input UID: {}",
-                        self.audio_preferences
-                            .microphone_uid
-                            .as_deref()
-                            .unwrap_or("None — choose a microphone")
-                    ))
+                    .child(caption(format!("Selected microphone: {}",self.audio_preferences.microphone_uid.as_ref().and_then(|uid|self.devices["devices"].as_array().and_then(|devices|devices.iter().find(|d|d["uid"].as_str()==Some(uid.as_str())))).and_then(|d|d["name"].as_str()).unwrap_or("Choose an input above; a saved unavailable device will not be substituted silently"))))
+                    .when(self.show_status_details,|view|view.child(caption(format!("Selected input UID: {}",self.audio_preferences.microphone_uid.as_deref().unwrap_or("None")))))
                     .child(
                         div()
                             .flex()
                             .gap_2()
-                            .child(button("record-both", "Record mic + system").on_click(
+                            .flex_wrap()
+                            .child(primary("record-both", "Microphone + system").disabled(self.capture_stop.is_some() || self.audio_preferences.microphone_uid.is_none()).on_click(
                                 cx.listener(|this, _, _, cx| this.start_capture(true, true, cx)),
                             ))
-                            .child(button("record-system", "Record system only").on_click(
+                            .child(button("record-system", "System audio only").disabled(self.capture_stop.is_some()).on_click(
                                 cx.listener(|this, _, _, cx| this.start_capture(false, true, cx)),
                             ))
-                            .child(button("record-mic", "Record mic only").on_click(
+                            .child(button("record-mic", "Microphone only").disabled(self.capture_stop.is_some() || self.audio_preferences.microphone_uid.is_none()).on_click(
                                 cx.listener(|this, _, _, cx| this.start_capture(true, false, cx)),
                             ))
                             .child(
-                                button("stop-recording", "Stop & save").on_click(cx.listener(
+                                danger("stop-recording", "Stop & save").disabled(self.capture_stop.is_none()).on_click(cx.listener(
                                     |this, _, _, cx| {
                                         if let Some(stop) = &this.capture_stop {
                                             stop.store(true, Ordering::SeqCst);
@@ -1710,7 +1130,8 @@ impl Render for Workbench {
                 }
             }
             Area::Dictation => {
-                content=content.child(button("recover-clipboard","Recover interrupted clipboard paste").on_click(cx.listener(|this,_,_,cx|{
+                content=content.child(section("Dictation","Hold any active shortcut to speak. Releasing it transcribes locally for the application where you started."))
+                    .child(quiet("recover-clipboard","Recover interrupted clipboard paste").self_start().on_click(cx.listener(|this,_,_,cx|{
                     let service=this.insertion_recovery.clone();this.task("Recovering only Parakeet-owned clipboard transactions",async move{let report=service.recover().await?;Ok(Update::Message(format!("Restored {} interrupted paste(s); {} older snapshots discarded after clipboard changed",report.restored,report.discarded)))},cx);
                 })));
                 let live = self
@@ -1733,23 +1154,23 @@ impl Render for Workbench {
                     );
                 }
                 content = content.child(
-                    button("refresh-dictations", "Refresh retained dictations").on_click(
-                        cx.listener(|this, _, _, cx| {
+                    button("refresh-dictations", "Refresh retained dictations")
+                        .self_start()
+                        .on_click(cx.listener(|this, _, _, cx| {
                             let service = this.dictation_history.clone();
                             this.task(
                                 "Reading retained dictations",
                                 async move { Ok(Update::Dictations(service.list().await?)) },
                                 cx,
                             );
-                        }),
-                    ),
+                        })),
                 );
                 for (index, receipt) in self.dictations.iter().take(10).enumerate() {
                     let raw = receipt.raw.clone();
                     content = content.child(
                         div()
                             .p_2()
-                            .bg(rgb(0x18232c))
+                            .bg(rgb(SIDEBAR))
                             .child(format!(
                                 "{} · {} · {}",
                                 receipt.created_at, receipt.target.bundle_id, receipt.status
@@ -1786,18 +1207,22 @@ impl Render for Workbench {
                             .flex()
                             .gap_2()
                             .child(
-                                button("start-listening", "Enable hold dictation").on_click(
-                                    cx.listener(|this, _, _, cx| this.start_dictation(cx)),
-                                ),
+                                primary("start-listening", "Enable dictation")
+                                    .disabled(self.dictation_stop.is_some())
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| this.start_dictation(cx)),
+                                    ),
                             )
-                            .child(button("stop-listening", "Disable hold dictation").on_click(
-                                cx.listener(|this, _, _, cx| {
-                                    if let Some(stop) = this.dictation_stop.take() {
-                                        stop.store(true, Ordering::SeqCst);
-                                    }
-                                    cx.notify();
-                                }),
-                            )),
+                            .child(
+                                button("stop-listening", "Disable dictation")
+                                    .disabled(self.dictation_stop.is_none())
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        if let Some(stop) = this.dictation_stop.take() {
+                                            stop.store(true, Ordering::SeqCst);
+                                        }
+                                        cx.notify();
+                                    })),
+                            ),
                     );
                 content = content.child(button("record-shortcut", "Record a shortcut").on_click(
                     cx.listener(|this, _, _, cx| {
@@ -1867,8 +1292,8 @@ impl Render for Workbench {
                     ));
             }
             Area::Privacy => {
-                content=content.child(div().text_xl().child("Application prompts"))
-                    .child("Raw transcription is always retained. Saving a draft disables its route. Only an explicit authorization enables execution for that exact application.");
+                content=content.child(section("Privacy & application prompts","Transcription and speaker processing run locally. AI enhancement stays disabled until you authorize an exact route."))
+                    .child(div().p_4().rounded_lg().border_1().border_color(rgb(BORDER)).bg(rgb(PANEL)).child("Raw speech is always retained. A CLI may use a remote provider: authorize it only after reviewing the route and prompt."));
                 for (index, p) in self.prompts.iter().enumerate() {
                     let profile = p.clone();
                     let revoke = p.clone();
@@ -1937,7 +1362,7 @@ impl Render for Workbench {
                 })))
                 .child("Application bundle identifier").child(field(&self.profile_bundle))
                 .child("Application name").child(field(&self.profile_name))
-                .child("Your transformation prompt").child(div().p_2().bg(rgb(0x18232c)).child(Textarea::new(&self.profile_prompt)))
+                .child("Your transformation prompt").child(div().p_2().bg(rgb(SIDEBAR)).child(Textarea::new(&self.profile_prompt)))
                 .child("AI CLI executable (absolute path)").child(field(&self.profile_executable))
                 .child("CLI arguments (JSON array, no shell expansion)").child(field(&self.profile_arguments))
                 .child(button("prompt-route",format!("Route: {} · click to change",self.prompt_route)).on_click(cx.listener(|this,_,_,cx|{this.prompt_route=if this.prompt_route=="remote"{"local"}else{"remote"}.into();cx.notify();})))
@@ -1946,6 +1371,15 @@ impl Render for Workbench {
                     .child(button("save-prompt-draft","Save disabled draft").on_click(cx.listener(|this,_,_,cx|this.save_prompt(false,cx))))
                     .child(button("authorize-prompt","Authorize this route & save").on_click(cx.listener(|this,_,_,cx|this.save_prompt(true,cx)))));
             }
+        }
+        if self.area != Area::Library {
+            content = div()
+                .id("area-scroll")
+                .flex_1()
+                .min_h_0()
+                .min_w_0()
+                .overflow_y_scroll()
+                .child(content);
         }
         self.render_count += 1;
         self.render_peak_ms = self
@@ -1961,6 +1395,40 @@ impl Render for Workbench {
             .on_action(cx.listener(|this, _: &SearchLibrary, window, cx| {
                 this.area = Area::Library;
                 this.search.focus_handle(cx).focus(window, cx);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &SaveSegmentText, _, cx| this.save_segment_text(cx)))
+            .on_action(cx.listener(|this, _: &FindText, window, cx| {
+                if this.area == Area::Library && this.detail.is_some() {
+                    this.show_transcript_find = true;
+                    this.transcript_find.focus_handle(cx).focus(window, cx);
+                } else {
+                    this.area = Area::Library;
+                    this.search.focus_handle(cx).focus(window, cx);
+                }
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &OpenAudio, _, cx| this.choose_audio(cx)))
+            .on_action(cx.listener(|this, _: &ShowLibrary, _, cx| this.navigate(Area::Library, cx)))
+            .on_action(cx.listener(|this, _: &ShowCapture, _, cx| this.navigate(Area::Capture, cx)))
+            .on_action(
+                cx.listener(|this, _: &ShowDictation, _, cx| this.navigate(Area::Dictation, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &ShowSpeakers, _, cx| this.navigate(Area::Speakers, cx)),
+            )
+            .on_action(cx.listener(|this, _: &DismissPanels, window, cx| {
+                this.confirm_action = None;
+                if this.show_transcript_find {
+                    this.show_transcript_find = false;
+                    this.transcript_query.clear();
+                    this.transcript_find
+                        .update(cx, |input, cx| input.set_value("", window, cx));
+                }
+                this.editing_title = false;
+                this.editing_segment = None;
+                this.show_media_import = false;
+                this.show_import_path = false;
                 cx.notify();
             }))
             .on_action(cx.listener(|_, _: &Quit, _, cx| cx.quit()))
@@ -1997,10 +1465,12 @@ impl Render for Workbench {
             }))
             .size_full()
             .tab_group()
-            .bg(rgb(0x101920))
-            .text_color(rgb(0xe5edf4))
-            .text_base()
+            .bg(rgb(BACKGROUND))
+            .text_color(rgb(TEXT))
+            .font_family(".AppleSystemUIFont")
+            .text_size(px(13.))
             .flex()
+            .child(gpui_base::TextSelectionLayer)
             .child(sidebar)
             .child(
                 div()
@@ -2008,11 +1478,14 @@ impl Render for Workbench {
                     .min_w_0()
                     .flex()
                     .flex_col()
+                    .when(self.confirm_action.is_some(), |view| {
+                        view.child(self.confirmation(cx))
+                    })
+                    .when(self.last_error.is_some(), |view| {
+                        view.child(self.error_banner(cx))
+                    })
                     .child(content)
-                    .child(div().p_3().text_sm().bg(rgb(0x192832)).child(format!(
-                        "{} · {} background tasks · render construction peak {:.2} ms",
-                        self.status, self.pending, self.render_peak_ms
-                    ))),
+                    .child(self.status_bar(cx)),
             )
     }
 }
@@ -2027,7 +1500,20 @@ fn input(window: &mut Window, cx: &mut App, value: &str, placeholder: &str) -> E
 
 actions!(
     parakeet_local,
-    [NextFocus, PreviousFocus, SearchLibrary, Quit]
+    [
+        NextFocus,
+        PreviousFocus,
+        SearchLibrary,
+        FindText,
+        OpenAudio,
+        ShowLibrary,
+        ShowCapture,
+        ShowDictation,
+        ShowSpeakers,
+        DismissPanels,
+        SaveSegmentText,
+        Quit
+    ]
 );
 struct DictationOverlay {
     state: Arc<Mutex<serde_json::Value>>,
@@ -2071,7 +1557,7 @@ impl Render for DictationOverlay {
             .role(Role::Status)
             .aria_label(label)
             .size_full()
-            .bg(rgb(0x18232c))
+            .bg(rgb(SIDEBAR))
             .text_color(rgb(color))
             .flex()
             .items_center()
@@ -2403,175 +1889,228 @@ fn main() -> anyhow::Result<()> {
     let models = Arc::new(ModelService::new(models));
     let records = runtime.block_on(library.list(None))?;
     let profiles = runtime.block_on(speakers.profiles())?;
-    gpui_platform::application().run(move |cx: &mut App| {
-        gpui_base::init(cx);
-        cx.bind_keys([
-            KeyBinding::new("tab", NextFocus, None),
-            KeyBinding::new("shift-tab", PreviousFocus, None),
-            KeyBinding::new("cmd-f", SearchLibrary, None),
-            KeyBinding::new("cmd-q", Quit, None),
-        ]);
-        let bounds = Bounds::centered(None, size(px(1240.), px(850.)), cx);
-        let main_window = cx
-            .open_window(
-                WindowOptions {
-                    window_bounds: Some(WindowBounds::Windowed(bounds)),
-                    window_min_size: Some(size(px(920.), px(640.))),
-                    ..Default::default()
-                },
-                move |window, cx| {
-                    window.set_window_title("Parakeet Local");
-                    let search = input(window, cx, "", "Search titles and transcript");
-                    let title = input(window, cx, "", "Recording title");
-                    let person_name = input(window, cx, "", "Person's name");
-                    let start = input(window, cx, "0", "Start ms");
-                    let end = input(window, cx, "10000", "End ms");
-                    let edit_text = input(window, cx, "", "Correction text for chosen segment");
-                    let shortcut_key = input(window, cx, "", "Home, F6, etc.");
-                    let import_path = input(window, cx, "", "Local audio file or meeting folder");
-                    let media_url = input(window, cx, "", "YouTube video URL");
-                    let profile_bundle = input(window, cx, "", "com.example.application");
-                    let profile_name = input(window, cx, "", "Application name");
-                    let profile_prompt = cx.new(|cx| {
-                        let mut state = TextareaState::new(window, cx).auto_grow(3, 8);
-                        state.set_placeholder("Transformation prompt", window, cx);
-                        state
-                    });
-                    let profile_executable = input(window, cx, "", "/absolute/path/to/cli");
-                    let profile_arguments = input(window, cx, "[]", "Arguments");
-                    let relink_path = input(window, cx, "", "Replacement audio file path");
-                    let split_at = input(window, cx, "", "Meeting-time split in ms");
-                    let match_score = input(window, cx, "", "Minimum similarity (-1 to 1)");
-                    let match_margin = input(window, cx, "", "Minimum separation");
-                    let match_examples = input(window, cx, "", "Verified reference count");
-                    let focus = cx.focus_handle();
-                    let view = cx.new(|_| Workbench {
-                        runtime,
-                        library,
-                        locations,
-                        relink_path,
-                        clusters,
-                        cluster_review: None,
-                        selected_clusters: vec![],
-                        split_at,
-                        media,
-                        speakers,
-                        models,
-                        processing,
-                        recovery,
-                        pending_jobs: vec![],
-                        suggestions: vec![],
-                        suggestion_review: None,
-                        match_score,
-                        match_margin,
-                        match_examples,
-                        settings,
-                        playback,
-                        capture,
-                        audio_inspection,
-                        audio_settings,
-                        dictation_listener,
-                        dictation_history,
-                        insertion_recovery,
-                        dictations: vec![],
-                        capture_stop: None,
-                        dictation_stop: None,
-                        dictation_overlay: None,
-                        dictation_state,
-                        devices: serde_json::Value::Null,
-                        audio_preferences,
-                        focus,
-                        heartbeat_last: Instant::now(),
-                        heartbeat_max_ms: 0.,
-                        area: Area::Library,
-                        speaker_mode: SpeakerMode::Profiles,
-                        show_location_tools: false,
-                        show_run_history: false,
-                        show_word_evidence: false,
-                        records,
-                        detail: None,
-                        profiles,
-                        examples: vec![],
-                        candidates: vec![],
-                        recording_shortcut: false,
-                        model_list: vec![],
-                        shortcuts: vec![],
-                        prompts: vec![],
-                        selected_track: None,
-                        selected_profile: None,
-                        search,
-                        title,
-                        person_name,
-                        start,
-                        end,
-                        edit_text,
-                        shortcut_key,
-                        import_path,
-                        media_url,
-                        profile_bundle,
-                        profile_name,
-                        profile_prompt,
-                        profile_executable,
-                        profile_arguments,
-                        prompt_id: None,
-                        prompt_route: "remote".into(),
-                        status: startup_status,
-                        pending: 0,
-                        render_peak_ms: 0.,
-                        render_count: 0,
-                        segment_page: 0,
-                        requested_recording: None,
-                    });
-                    view.update(cx, |this, cx| this.start_heartbeat(cx));
-                    let quitting = view.downgrade();
-                    cx.on_app_quit(move |cx| {
-                        let state = quitting
-                            .update(cx, |this, _| {
-                                let active = this.capture_stop.is_some();
-                                if let Some(stop) = &this.capture_stop {
-                                    stop.store(true, Ordering::SeqCst);
-                                }
-                                if let Some(stop) = &this.dictation_stop {
-                                    stop.store(true, Ordering::SeqCst);
-                                }
-                                (active, this.runtime.clone(), this.capture.clone())
+    gpui_platform::application()
+        .with_assets(ui::Icons)
+        .run(move |cx: &mut App| {
+            gpui_base::init(cx);
+            gpui_base::Theme::global_mut(cx).appearance = gpui_base::ThemeAppearance::Dark;
+            gpui_base::Theme::global_mut(cx).tokens.colors = gpui_base::ColorTokens::dark();
+            cx.bind_keys([
+                KeyBinding::new("tab", NextFocus, None),
+                KeyBinding::new("shift-tab", PreviousFocus, None),
+                KeyBinding::new(
+                    "cmd-enter",
+                    SaveSegmentText,
+                    Some("TranscriptEditor > Input"),
+                ),
+                KeyBinding::new("cmd-f", FindText, None),
+                KeyBinding::new("cmd-shift-f", SearchLibrary, None),
+                KeyBinding::new("cmd-o", OpenAudio, None),
+                KeyBinding::new("cmd-1", ShowLibrary, None),
+                KeyBinding::new("cmd-2", ShowCapture, None),
+                KeyBinding::new("cmd-3", ShowDictation, None),
+                KeyBinding::new("cmd-4", ShowSpeakers, None),
+                KeyBinding::new("escape", DismissPanels, None),
+                KeyBinding::new("escape", DismissPanels, Some("Input")),
+                KeyBinding::new("cmd-q", Quit, None),
+            ]);
+            let bounds = Bounds::centered(None, size(px(1240.), px(850.)), cx);
+            let main_window = cx
+                .open_window(
+                    WindowOptions {
+                        window_bounds: Some(WindowBounds::Windowed(bounds)),
+                        window_min_size: Some(size(px(920.), px(640.))),
+                        ..Default::default()
+                    },
+                    move |window, cx| {
+                        window.set_window_title("Parakeet Local");
+                        let search = input(window, cx, "", "Search library");
+                        let transcript_find = input(window, cx, "", "Find in this transcript");
+                        let title = input(window, cx, "", "Recording title");
+                        let person_name = input(window, cx, "", "Person's name");
+                        let start = input(window, cx, "0", "Start ms");
+                        let end = input(window, cx, "10000", "End ms");
+                        let edit_text = cx.new(|cx| {
+                            let mut state = TextareaState::new(window, cx).auto_grow(2, 6);
+                            state.set_placeholder("Correct this transcript segment", window, cx);
+                            state
+                        });
+                        let shortcut_key = input(window, cx, "", "Home, F6, etc.");
+                        let import_path =
+                            input(window, cx, "", "Local audio file or meeting folder");
+                        let media_url = input(window, cx, "", "YouTube video URL");
+                        let profile_bundle = input(window, cx, "", "com.example.application");
+                        let profile_name = input(window, cx, "", "Application name");
+                        let profile_prompt = cx.new(|cx| {
+                            let mut state = TextareaState::new(window, cx).auto_grow(3, 8);
+                            state.set_placeholder("Transformation prompt", window, cx);
+                            state
+                        });
+                        let profile_executable = input(window, cx, "", "/absolute/path/to/cli");
+                        let profile_arguments = input(window, cx, "[]", "Arguments");
+                        let relink_path = input(window, cx, "", "Replacement audio file path");
+                        let split_at = input(window, cx, "", "Meeting-time split in ms");
+                        let match_score = input(window, cx, "", "Minimum similarity (-1 to 1)");
+                        let match_margin = input(window, cx, "", "Minimum separation");
+                        let match_examples = input(window, cx, "", "Verified reference count");
+                        let focus = cx.focus_handle();
+                        window.focus(&focus, cx);
+                        let view = cx.new(|_| Workbench {
+                            runtime,
+                            library,
+                            locations,
+                            relink_path,
+                            clusters,
+                            cluster_review: None,
+                            selected_clusters: vec![],
+                            split_at,
+                            media,
+                            speakers,
+                            models,
+                            processing,
+                            recovery,
+                            pending_jobs: vec![],
+                            suggestions: vec![],
+                            suggestion_review: None,
+                            match_score,
+                            match_margin,
+                            match_examples,
+                            settings,
+                            playback,
+                            capture,
+                            audio_inspection,
+                            audio_settings,
+                            dictation_listener,
+                            dictation_history,
+                            insertion_recovery,
+                            dictations: vec![],
+                            capture_stop: None,
+                            dictation_stop: None,
+                            dictation_overlay: None,
+                            dictation_state,
+                            devices: serde_json::Value::Null,
+                            audio_preferences,
+                            focus,
+                            heartbeat_last: Instant::now(),
+                            heartbeat_max_ms: 0.,
+                            area: Area::Library,
+                            speaker_mode: SpeakerMode::Profiles,
+                            library_filter: library::LibraryFilter::All,
+                            recording_tab: library::RecordingTab::Transcript,
+                            editing_title: false,
+                            editing_segment: None,
+                            transcript_find,
+                            transcript_query: String::new(),
+                            show_transcript_find: false,
+                            reader_scroll: ScrollHandle::new(),
+                            search_generation: 0,
+                            show_media_import: false,
+                            show_import_path: false,
+                            show_status_details: false,
+                            last_error: None,
+                            confirm_action: None,
+                            show_location_tools: false,
+                            show_run_history: false,
+                            show_word_evidence: false,
+                            records,
+                            detail: None,
+                            profiles,
+                            examples: vec![],
+                            candidates: vec![],
+                            recording_shortcut: false,
+                            model_list: vec![],
+                            shortcuts: vec![],
+                            prompts: vec![],
+                            selected_track: None,
+                            selected_profile: None,
+                            search,
+                            title,
+                            person_name,
+                            start,
+                            end,
+                            edit_text,
+                            shortcut_key,
+                            import_path,
+                            media_url,
+                            profile_bundle,
+                            profile_name,
+                            profile_prompt,
+                            profile_executable,
+                            profile_arguments,
+                            prompt_id: None,
+                            prompt_route: "remote".into(),
+                            status: startup_status,
+                            pending: 0,
+                            playback_abort: None,
+                            playback_generation: 0,
+                            playback_label: String::new(),
+                            render_peak_ms: 0.,
+                            render_count: 0,
+                            segment_page: 0,
+                            requested_recording: None,
+                        });
+                        view.update(cx, |this, cx| {
+                            this.start_heartbeat(cx);
+                            this.subscribe_search(cx);
+                            cx.on_focus_lost(window, |this, window, cx| {
+                                this.focus.focus(window, cx)
                             })
-                            .ok();
-                        async move {
-                            if let Some((true, runtime, capture)) = state {
-                                let _ = runtime
-                                    .spawn(async move {
-                                        let began = Instant::now();
-                                        while began.elapsed() < std::time::Duration::from_secs(12) {
-                                            if capture.status()["event"] == "completed"
-                                                || capture.status()["event"] == "failed"
+                            .detach();
+                        });
+                        let quitting = view.downgrade();
+                        cx.on_app_quit(move |cx| {
+                            let state = quitting
+                                .update(cx, |this, _| {
+                                    if let Some(handle) = this.playback_abort.take() {
+                                        handle.abort();
+                                    }
+                                    let active = this.capture_stop.is_some();
+                                    if let Some(stop) = &this.capture_stop {
+                                        stop.store(true, Ordering::SeqCst);
+                                    }
+                                    if let Some(stop) = &this.dictation_stop {
+                                        stop.store(true, Ordering::SeqCst);
+                                    }
+                                    (active, this.runtime.clone(), this.capture.clone())
+                                })
+                                .ok();
+                            async move {
+                                if let Some((true, runtime, capture)) = state {
+                                    let _ = runtime
+                                        .spawn(async move {
+                                            let began = Instant::now();
+                                            while began.elapsed()
+                                                < std::time::Duration::from_secs(12)
                                             {
-                                                break;
+                                                if capture.status()["event"] == "completed"
+                                                    || capture.status()["event"] == "failed"
+                                                {
+                                                    break;
+                                                }
+                                                tokio::time::sleep(
+                                                    std::time::Duration::from_millis(100),
+                                                )
+                                                .await;
                                             }
-                                            tokio::time::sleep(std::time::Duration::from_millis(
-                                                100,
-                                            ))
-                                            .await;
-                                        }
-                                    })
-                                    .await;
+                                        })
+                                        .await;
+                                }
                             }
-                        }
-                    })
-                    .detach();
-                    cx.new(|cx| gpui_base::Root::new(view, window, cx))
-                },
-            )
-            .expect("open Parakeet Local window");
-        let main_id = AnyWindowHandle::from(main_window).window_id();
-        cx.on_window_closed(move |cx, id| {
-            if id == main_id {
-                cx.quit();
-            }
-        })
-        .detach();
-        cx.activate(true);
-    });
+                        })
+                        .detach();
+                        cx.new(|cx| gpui_base::Root::new(view, window, cx))
+                    },
+                )
+                .expect("open Parakeet Local window");
+            let main_id = AnyWindowHandle::from(main_window).window_id();
+            cx.on_window_closed(move |cx, id| {
+                if id == main_id {
+                    cx.quit();
+                }
+            })
+            .detach();
+            cx.activate(true);
+        });
     Ok(())
 }
 
@@ -2774,7 +2313,7 @@ impl Workbench {
                 move |this, _, _, cx| {
                     let service = this.playback.clone();
                     let input = play.clone();
-                    this.task(
+                    this.playback_task(
                         "Playing compared source interval",
                         async move {
                             service.play(input).await?;
@@ -2806,7 +2345,7 @@ impl Workbench {
                 .flex()
                 .flex_col()
                 .gap_2()
-                .bg(rgb(0x1c2933))
+                .bg(rgb(PANEL))
                 .child(segment.text.clone())
                 .child(if segment.evidence["uncertain_speech"] == true {
                     "ASR flagged uncertain speech. Listen before attributing these words."
@@ -2950,38 +2489,32 @@ impl Workbench {
         ));
         for cluster in &review.clusters {
             let id = cluster.id.clone();
-            let mut row = div()
-                .flex()
-                .flex_col()
-                .gap_2()
-                .p_3()
-                .bg(rgb(0x1c2933))
-                .child(
-                    button(
-                        format!("choose-cluster-{}", cluster.id),
-                        format!(
-                            "{}{} · {} intervals · {:.1}s speech · {:.1}–{:.1}s meeting time",
-                            if self.selected_clusters.contains(&cluster.id) {
-                                "✓ "
-                            } else {
-                                ""
-                            },
-                            anonymous_label(&cluster.id),
-                            cluster.interval_count,
-                            cluster.speech_ms as f64 / 1000.,
-                            cluster.start_ms as f64 / 1000.,
-                            cluster.end_ms as f64 / 1000.
-                        ),
-                    )
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        if this.selected_clusters.contains(&id) {
-                            this.selected_clusters.retain(|v| v != &id)
+            let mut row = div().flex().flex_col().gap_2().p_3().bg(rgb(PANEL)).child(
+                button(
+                    format!("choose-cluster-{}", cluster.id),
+                    format!(
+                        "{}{} · {} intervals · {:.1}s speech · {:.1}–{:.1}s meeting time",
+                        if self.selected_clusters.contains(&cluster.id) {
+                            "✓ "
                         } else {
-                            this.selected_clusters.push(id.clone())
-                        }
-                        cx.notify();
-                    })),
-                );
+                            ""
+                        },
+                        anonymous_label(&cluster.id),
+                        cluster.interval_count,
+                        cluster.speech_ms as f64 / 1000.,
+                        cluster.start_ms as f64 / 1000.,
+                        cluster.end_ms as f64 / 1000.
+                    ),
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if this.selected_clusters.contains(&id) {
+                        this.selected_clusters.retain(|v| v != &id)
+                    } else {
+                        this.selected_clusters.push(id.clone())
+                    }
+                    cx.notify();
+                })),
+            );
             if let Some(preview) = &cluster.preview {
                 let preview = preview.clone();
                 row = row.child(
@@ -2992,7 +2525,7 @@ impl Workbench {
                     .on_click(cx.listener(move |this, _, _, cx| {
                         let service = this.playback.clone();
                         let input = preview.clone();
-                        this.task(
+                        this.playback_task(
                             "Playing anonymous cluster evidence",
                             async move {
                                 service.play(input).await?;

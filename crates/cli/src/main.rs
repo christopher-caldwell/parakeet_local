@@ -856,7 +856,8 @@ async fn execute(cli: Cli) -> anyhow::Result<Value> {
             Meetings::Export { id, format } => match format.as_str() {
                 "json" => value(library.show(&id).await?),
                 "markdown" => Ok(json!({"markdown":library.export_markdown(&id).await?})),
-                _ => anyhow::bail!("format must be json or markdown"),
+                "text" => Ok(json!({"text":library.export_text(&id).await?})),
+                _ => anyhow::bail!("format must be json, markdown or text"),
             },
             Meetings::Discover { .. } => unreachable!(),
         },

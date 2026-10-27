@@ -179,6 +179,14 @@ pub async fn decode(
     Ok(samples)
 }
 
+/// Owns only a newly generated playback WAV. Cancellation must not leave decoded
+/// private audio behind. The blocking writer returns ownership to the async task.
+struct PlaybackScratch(std::path::PathBuf);
+impl Drop for PlaybackScratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
 #[derive(Clone)]
 pub struct LocalPlayback {
     pub root: std::path::PathBuf,
@@ -198,10 +206,10 @@ impl parakeet_application::AudioPlayback for LocalPlayback {
         let path = self
             .root
             .join(format!("{}.wav", parakeet_application::new_id()));
-        let p = path.clone();
-        tokio::task::spawn_blocking(move || {
+        let scratch = tokio::task::spawn_blocking(move || {
+            let scratch = PlaybackScratch(path);
             let mut w = hound::WavWriter::create(
-                p,
+                &scratch.0,
                 hound::WavSpec {
                     channels: 1,
                     sample_rate: 16000,
@@ -213,19 +221,20 @@ impl parakeet_application::AudioPlayback for LocalPlayback {
             for s in samples {
                 w.write_sample(s).map_err(CapabilityError::new)?;
             }
-            w.finalize().map_err(CapabilityError::new)
+            w.finalize().map_err(CapabilityError::new)?;
+            Ok::<_, CapabilityError>(scratch)
         })
         .await
         .map_err(CapabilityError::new)??;
         let result = tokio::time::timeout(
             Duration::from_secs(35),
             Command::new("/usr/bin/afplay")
-                .arg(&path)
+                .arg(&scratch.0)
                 .kill_on_drop(true)
                 .status(),
         )
         .await;
-        let _ = tokio::fs::remove_file(&path).await;
+        drop(scratch);
         let status = result
             .map_err(CapabilityError::new)?
             .map_err(CapabilityError::new)?;

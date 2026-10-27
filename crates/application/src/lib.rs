@@ -339,15 +339,12 @@ impl LibraryService {
             d.recording.id
         );
         for segment in d.segments {
-            let c = d
-                .corrections
-                .iter()
-                .rev()
-                .find(|c| c.segment_id == segment.id);
-            let words = c
-                .and_then(|c| c.replacement_text.as_deref())
-                .unwrap_or(&segment.text);
-            let speaker = c.and_then(|c| c.profile_id.as_deref()).unwrap_or("Unknown");
+            let correction = parakeet_domain::corrections::resolve(&segment.id, &d.corrections);
+            let words = correction.text.as_deref().unwrap_or(&segment.text);
+            let speaker = match correction.speaker.as_ref() {
+                Some(parakeet_domain::corrections::SpeakerOverride::Profile(id)) => id.as_str(),
+                _ => "Unknown",
+            };
             let time = segment
                 .start_ms
                 .map(|x| format!("{:.3}s", x as f64 / 1000.))
@@ -355,6 +352,19 @@ impl LibraryService {
             text.push_str(&format!("- [{time}] {speaker}: {words}\n"));
         }
         Ok(text)
+    }
+    pub async fn export_text(&self, id: &str) -> Result<String, ExportRecordingError> {
+        let detail = self.show(id).await?;
+        Ok(detail
+            .segments
+            .iter()
+            .map(|segment| {
+                parakeet_domain::corrections::resolve(&segment.id, &detail.corrections)
+                    .text
+                    .unwrap_or_else(|| segment.text.clone())
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n"))
     }
 }
 

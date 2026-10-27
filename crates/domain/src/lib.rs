@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
+pub mod corrections;
 pub mod evaluation;
 pub mod gestures;
 pub mod recognition;
