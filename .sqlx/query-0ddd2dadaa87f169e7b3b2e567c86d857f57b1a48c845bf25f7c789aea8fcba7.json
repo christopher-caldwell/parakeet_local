@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE recordings\nSET metadata = json_set(metadata, '$.meeting_finalization', json(?3))\nWHERE id = ?1 AND json_type(metadata) = 'object'\nAND json_extract(metadata, '$.meeting_finalization') IS json(?2)\n",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "0ddd2dadaa87f169e7b3b2e567c86d857f57b1a48c845bf25f7c789aea8fcba7"
+}

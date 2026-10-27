@@ -1051,6 +1051,12 @@ impl Workbench {
             "Audio sources",
             "Sources preserve their own timing. A microphone track is not a verified identity.",
         ));
+        let id = detail.recording.id.clone();
+        view = view.child(
+            primary("finalize-meeting", "Finish transcription of all sources")
+                .disabled(self.pending > 0)
+                .on_click(cx.listener(move |this, _, _, cx| this.finalize_meeting(id.clone(), cx))),
+        );
         for track in &detail.tracks {
             let id = track.id.clone();
             let selected = self.selected_track.as_deref() == Some(id.as_str());
@@ -1194,6 +1200,35 @@ impl Workbench {
             "Processing history",
             "Original results and errors remain available after reprocessing.",
         ));
+        if let Some(plan) = detail.recording.metadata.get("meeting_finalization") {
+            view = view.child(caption(format!(
+                "Final transcription: {} · {} · {}/{} sources complete",
+                plan["status"].as_str().unwrap_or("invalid plan"),
+                plan["model"].as_str().unwrap_or("unknown"),
+                plan["completed"].as_array().map_or(0, Vec::len),
+                plan["track_ids"].as_array().map_or(0, Vec::len)
+            )));
+            if let Some(failures) = plan["failures"].as_array() {
+                for failure in failures {
+                    view = view.child(
+                        caption(
+                            failure["message"]
+                                .as_str()
+                                .unwrap_or("Unknown finalization error"),
+                        )
+                        .text_color(rgb(WARNING)),
+                    );
+                }
+            }
+            let id = detail.recording.id.clone();
+            view = view.child(
+                button("resume-finalization", "Resume final transcription")
+                    .disabled(self.pending > 0 || plan["status"] == "completed")
+                    .on_click(
+                        cx.listener(move |this, _, _, cx| this.finalize_meeting(id.clone(), cx)),
+                    ),
+            );
+        }
         if !detail.unmapped_corrected_segments.is_empty() {
             view = view.child(pill(
                 format!(

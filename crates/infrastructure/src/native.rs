@@ -273,6 +273,8 @@ impl AudioCapture for NativeBridge {
             .warnings
             .push("Recovered partial capture; timeline gaps may be unknown".into());
         bundle.recording.metadata["state"] = json!("recovered_partial");
+        bundle.recording.metadata["requested_final_transcription"] =
+            options["final_transcription"].clone();
         Ok(bundle)
     }
     async fn record(
@@ -302,7 +304,7 @@ impl AudioCapture for NativeBridge {
             .map_err(CapabilityError::new)?;
         let options = directory.join("session.json");
         let created_at = now();
-        let value = json!({"id":id,"created_at":created_at,"directory":directory,"title":request.title,"microphone_uid":request.microphone_uid,"system_audio":request.system_audio,"maximum_seconds":request.maximum_seconds,"state":"starting"});
+        let value = json!({"id":id,"created_at":created_at,"directory":directory,"title":request.title,"microphone_uid":request.microphone_uid,"system_audio":request.system_audio,"maximum_seconds":request.maximum_seconds,"final_transcription":request.final_transcription,"state":"starting"});
         tokio::fs::write(
             &options,
             serde_json::to_vec_pretty(&value).map_err(CapabilityError::new)?,

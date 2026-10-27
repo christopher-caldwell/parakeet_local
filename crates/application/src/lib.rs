@@ -17,6 +17,7 @@ macro_rules! operation_error {
 }
 pub mod audio_locations;
 pub mod jobs;
+pub mod meeting;
 pub mod processing;
 pub mod settings;
 pub mod speakers;

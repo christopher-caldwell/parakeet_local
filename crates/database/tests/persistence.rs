@@ -1095,3 +1095,350 @@ async fn missing_unfingerprinted_audio_cannot_be_replaced_by_a_guess() {
         bundle().tracks[0]
     );
 }
+
+#[derive(Default)]
+struct MeetingEngine {
+    calls: std::sync::Mutex<Vec<String>>,
+    fail_once: std::sync::Mutex<Option<String>>,
+}
+#[async_trait::async_trait]
+impl parakeet_application::processing::SpeechProcessing for MeetingEngine {
+    async fn process(
+        &self,
+        _: &parakeet_application::processing::ProcessRequest,
+        track: &AudioTrack,
+        _: &ProcessingRun,
+    ) -> Result<parakeet_application::processing::EngineOutput, parakeet_application::CapabilityError>
+    {
+        self.calls.lock().unwrap().push(track.id.clone());
+        let mut failure = self.fail_once.lock().unwrap();
+        if failure.as_deref() == Some(track.id.as_str()) {
+            *failure = None;
+            return Err(parakeet_application::CapabilityError::message(
+                "injected source failure",
+            ));
+        }
+        Ok(parakeet_application::processing::EngineOutput {
+            segments: vec![],
+            intervals: vec![],
+            raw: json!({"simulated":true}),
+            metrics: json!({}),
+        })
+    }
+}
+fn meeting_service(
+    tmp: &tempfile::TempDir,
+    store: std::sync::Arc<SqliteStore>,
+    engine: std::sync::Arc<MeetingEngine>,
+    writes: std::sync::Arc<dyn parakeet_application::meeting::MeetingFinalizationWrites>,
+) -> parakeet_application::meeting::MeetingService {
+    use std::sync::Arc;
+    let ownership = Arc::new(
+        parakeet_infrastructure::jobs::FileProcessingOwnership::for_database(
+            &tmp.path().join("test.db"),
+        )
+        .unwrap(),
+    );
+    let models = Arc::new(FixtureModels);
+    let processing = Arc::new(parakeet_application::processing::ProcessingService::new(
+        store.clone(),
+        store.clone(),
+        models.clone(),
+        engine,
+        store.clone(),
+        ownership.clone(),
+    ));
+    parakeet_application::meeting::MeetingService::new(
+        Arc::new(parakeet_application::capture::CaptureService::new(
+            Arc::new(FixtureCapture),
+            store.clone(),
+        )),
+        store,
+        writes,
+        models,
+        processing,
+        ownership,
+    )
+}
+#[tokio::test]
+async fn meeting_capture_saves_a_durable_plan_and_finalization_is_idempotent() {
+    use std::sync::{Arc, atomic::AtomicBool};
+    let (tmp, store) = database().await;
+    let store = Arc::new(store);
+    let engine = Arc::new(MeetingEngine::default());
+    let service = meeting_service(&tmp, store.clone(), engine.clone(), store.clone());
+    let report = service
+        .record(
+            parakeet_application::capture::CaptureRequest {
+                microphone_uid: None,
+                system_audio: true,
+                title: "Fixture capture".into(),
+                maximum_seconds: 1,
+                final_transcription: None,
+            },
+            true,
+            Arc::new(AtomicBool::new(false)),
+        )
+        .await
+        .unwrap();
+    let first = report.finalization.unwrap();
+    assert_eq!(first.status, "completed");
+    assert_eq!(first.track_ids, vec!["track"]);
+    assert!(service.pending().await.unwrap().is_empty());
+    assert_eq!(service.finalize("r", None).await.unwrap(), first);
+    assert_eq!(engine.calls.lock().unwrap().len(), 1);
+    let d = store.detail("r").await.unwrap().unwrap();
+    assert_eq!(d.recording.metadata["read_only"], true);
+    assert_eq!(d.tracks[0].start_offset_ms, Some(2800));
+    assert_eq!(d.runs.len(), 1);
+    assert_eq!(d.runs[0].configuration["meeting_finalization_id"], first.id);
+    assert!(
+        service
+            .finalize("r", Some("different-model"))
+            .await
+            .is_err()
+    );
+    // Existing settings JSON decodes safely; explicit UI preference persists separately.
+    use parakeet_application::settings::{AudioPreferencesQueries, AudioPreferencesWrites};
+    assert!(
+        !store
+            .audio_preferences()
+            .await
+            .unwrap()
+            .transcribe_meetings_after_stop
+    );
+    let p = AudioPreferences {
+        transcribe_meetings_after_stop: true,
+        ..Default::default()
+    };
+    store.save_audio_preferences(&p).await.unwrap();
+    assert!(
+        store
+            .audio_preferences()
+            .await
+            .unwrap()
+            .transcribe_meetings_after_stop
+    );
+}
+#[tokio::test]
+async fn meeting_partial_failure_resumes_only_failed_sources_and_keeps_title() {
+    use std::sync::Arc;
+    let (tmp, store) = database().await;
+    let mut b = bundle();
+    b.tracks[0].available = true;
+    let mut second = b.tracks[0].clone();
+    second.id = "second".into();
+    second.kind = TrackKind::Microphone;
+    b.tracks.push(second);
+    let mut playback = b.tracks[0].clone();
+    playback.id = "playback".into();
+    playback.kind = TrackKind::Playback;
+    b.tracks.push(playback);
+    store.import(&b).await.unwrap();
+    let store = Arc::new(store);
+    let engine = Arc::new(MeetingEngine::default());
+    *engine.fail_once.lock().unwrap() = Some("second".into());
+    let service = meeting_service(&tmp, store.clone(), engine.clone(), store.clone());
+    let error = service.finalize("r", None).await.unwrap_err();
+    let retained = error.retained().unwrap();
+    assert_eq!(retained["recording_id"], "r");
+    let pending = service.pending().await.unwrap().remove(0);
+    assert_eq!(pending.status, "failed");
+    assert_eq!(pending.completed.len(), 1);
+    assert_eq!(pending.failures.len(), 1);
+    assert_eq!(pending.track_ids.len(), 2);
+    store.rename("r", "User title survives").await.unwrap();
+    let done = service.finalize("r", None).await.unwrap();
+    assert_eq!(done.status, "completed");
+    assert_eq!(done.attempts, 2);
+    let calls = engine.calls.lock().unwrap().clone();
+    assert_eq!(calls.iter().filter(|id| id.as_str() == "track").count(), 1);
+    assert_eq!(calls.iter().filter(|id| id.as_str() == "second").count(), 2);
+    assert!(!calls.contains(&"playback".into()));
+    let d = store.detail("r").await.unwrap().unwrap();
+    assert_eq!(d.recording.title(), "User title survives");
+    assert_eq!(d.runs.len(), 3);
+    assert_eq!(d.runs.iter().filter(|r| r.status == "failed").count(), 1);
+    assert_eq!(d.recording.metadata["read_only"], true);
+}
+struct LostMeetingCheckpoint {
+    store: std::sync::Arc<SqliteStore>,
+    writes: std::sync::atomic::AtomicUsize,
+}
+#[async_trait::async_trait]
+impl parakeet_application::meeting::MeetingFinalizationWrites for LostMeetingCheckpoint {
+    async fn replace_finalization(
+        &self,
+        id: &str,
+        expected: Option<&parakeet_application::meeting::MeetingFinalization>,
+        next: &parakeet_application::meeting::MeetingFinalization,
+    ) -> Result<bool, parakeet_application::PersistenceError> {
+        if self
+            .writes
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            == 2
+        {
+            return Err(parakeet_application::PersistenceError::new(
+                std::io::Error::other("injected checkpoint interruption"),
+            ));
+        }
+        self.store.replace_finalization(id, expected, next).await
+    }
+}
+#[tokio::test]
+async fn meeting_checkpoint_loss_reuses_durable_run_and_refuses_an_active_owner() {
+    use parakeet_application::{jobs::ProcessingOwnership, meeting::MeetingFinalizationWrites};
+    use std::sync::Arc;
+    let (tmp, store) = database().await;
+    let mut b = bundle();
+    b.tracks[0].available = true;
+    store.import(&b).await.unwrap();
+    let store = Arc::new(store);
+    let engine = Arc::new(MeetingEngine::default());
+    let writes = Arc::new(LostMeetingCheckpoint {
+        store: store.clone(),
+        writes: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let service = meeting_service(&tmp, store.clone(), engine.clone(), writes);
+    assert!(service.finalize("r", None).await.is_err());
+    let plan = service.pending().await.unwrap().remove(0);
+    assert_eq!(plan.status, "running");
+    assert!(plan.completed.is_empty());
+    let ownership = parakeet_infrastructure::jobs::FileProcessingOwnership::for_database(
+        &tmp.path().join("test.db"),
+    )
+    .unwrap();
+    let lease = ownership.try_acquire(&plan.id).await.unwrap().unwrap();
+    assert!(matches!(
+        service.finalize("r", None).await,
+        Err(parakeet_application::meeting::FinalizeMeetingError::Conflict(_))
+    ));
+    drop(lease);
+    let done = service.finalize("r", None).await.unwrap();
+    assert_eq!(done.completed.len(), 1);
+    assert_eq!(engine.calls.lock().unwrap().len(), 1);
+    let mut forged = done.clone();
+    forged.completed[0].run_id = "not-a-real-run".into();
+    assert!(
+        store
+            .replace_finalization("r", Some(&done), &forged)
+            .await
+            .unwrap()
+    );
+    assert!(matches!(
+        service.finalize("r", None).await,
+        Err(parakeet_application::meeting::FinalizeMeetingError::Conflict(_))
+    ));
+    assert!(
+        !store
+            .replace_finalization("r", Some(&done), &done)
+            .await
+            .unwrap()
+    );
+}
+#[tokio::test]
+async fn meeting_missing_source_is_failure_even_when_playback_exists() {
+    use std::sync::Arc;
+    let (tmp, store) = database().await;
+    let mut b = bundle();
+    let mut playback = b.tracks[0].clone();
+    playback.id = "playback".into();
+    playback.kind = TrackKind::Playback;
+    playback.available = true;
+    b.tracks.push(playback);
+    store.import(&b).await.unwrap();
+    let store = Arc::new(store);
+    let engine = Arc::new(MeetingEngine::default());
+    let service = meeting_service(&tmp, store.clone(), engine.clone(), store.clone());
+    let error = service.finalize("r", None).await.unwrap_err();
+    let retained = error.retained().unwrap();
+    assert_eq!(retained["finalization"]["status"], "failed");
+    assert_eq!(retained["finalization"]["failures"][0]["track_id"], "track");
+    assert!(engine.calls.lock().unwrap().is_empty());
+}
+
+struct MeetingRevisionRace(std::sync::atomic::AtomicUsize);
+#[async_trait::async_trait]
+impl parakeet_application::LocalModels for MeetingRevisionRace {
+    async fn selection(
+        &self,
+    ) -> Result<parakeet_application::ModelSelection, parakeet_application::CapabilityError> {
+        FixtureModels.selection().await
+    }
+    async fn list(
+        &self,
+    ) -> Result<Vec<parakeet_application::ModelInfo>, parakeet_application::CapabilityError> {
+        FixtureModels.list().await
+    }
+    async fn install(
+        &self,
+        id: &str,
+    ) -> Result<parakeet_application::ModelInfo, parakeet_application::CapabilityError> {
+        FixtureModels.install(id).await
+    }
+    async fn verify(
+        &self,
+        id: &str,
+    ) -> Result<parakeet_application::ModelInfo, parakeet_application::CapabilityError> {
+        let mut m = FixtureModels.verify(id).await?;
+        if self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst) >= 2 {
+            m.revision = "changed-between-preflight-and-start".into();
+        }
+        Ok(m)
+    }
+    async fn select(&self, id: &str) -> Result<(), parakeet_application::CapabilityError> {
+        FixtureModels.select(id).await
+    }
+    async fn select_embedding(
+        &self,
+        id: &str,
+    ) -> Result<(), parakeet_application::CapabilityError> {
+        FixtureModels.select_embedding(id).await
+    }
+    async fn remove(&self, id: &str) -> Result<(), parakeet_application::CapabilityError> {
+        FixtureModels.remove(id).await
+    }
+}
+#[tokio::test]
+async fn meeting_revision_change_between_preflight_and_run_is_refused() {
+    use std::sync::Arc;
+    let (tmp, store) = database().await;
+    let mut b = bundle();
+    b.tracks[0].available = true;
+    store.import(&b).await.unwrap();
+    let store = Arc::new(store);
+    let engine = Arc::new(MeetingEngine::default());
+    let ownership = Arc::new(
+        parakeet_infrastructure::jobs::FileProcessingOwnership::for_database(
+            &tmp.path().join("test.db"),
+        )
+        .unwrap(),
+    );
+    let models = Arc::new(MeetingRevisionRace(std::sync::atomic::AtomicUsize::new(0)));
+    let processing = Arc::new(parakeet_application::processing::ProcessingService::new(
+        store.clone(),
+        store.clone(),
+        models.clone(),
+        engine.clone(),
+        store.clone(),
+        ownership.clone(),
+    ));
+    let service = parakeet_application::meeting::MeetingService::new(
+        Arc::new(parakeet_application::capture::CaptureService::new(
+            Arc::new(FixtureCapture),
+            store.clone(),
+        )),
+        store.clone(),
+        store.clone(),
+        models,
+        processing,
+        ownership,
+    );
+    let error = service.finalize("r", None).await.unwrap_err();
+    assert_eq!(
+        error.retained().unwrap()["finalization"]["model_revision"],
+        "test"
+    );
+    assert!(store.detail("r").await.unwrap().unwrap().runs.is_empty());
+    assert!(engine.calls.lock().unwrap().is_empty());
+}

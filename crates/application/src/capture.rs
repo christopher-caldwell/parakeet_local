@@ -6,10 +6,15 @@ pub struct CaptureRequest {
     pub system_audio: bool,
     pub title: String,
     pub maximum_seconds: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub final_transcription: Option<crate::meeting::MeetingFinalization>,
 }
 impl CaptureRequest {
     pub fn validate(&self) -> Result<(), ValidationError> {
         Recording::validate_title(&self.title)?;
+        if let Some(plan) = &self.final_transcription {
+            plan.validate()?;
+        }
         if self
             .microphone_uid
             .as_ref()
@@ -61,6 +66,17 @@ impl CaptureService {
     }
     pub async fn recover(&self, path: &Path) -> Result<ImportBundle, RecoverCaptureError> {
         let bundle = self.capture.recover(path).await?;
+        let mut bundle = bundle;
+        if let Some(value) = bundle
+            .recording
+            .metadata
+            .get("requested_final_transcription")
+            .filter(|v| !v.is_null())
+        {
+            let plan: crate::meeting::MeetingFinalization =
+                serde_json::from_value(value.clone()).map_err(CapabilityError::new)?;
+            plan.attach(&mut bundle).map_err(CapabilityError::new)?;
+        }
         self.writes.import(&bundle).await?;
         Ok(bundle)
     }
@@ -70,7 +86,10 @@ impl CaptureService {
         stop: Arc<AtomicBool>,
     ) -> Result<ImportBundle, CaptureRecordingError> {
         request.validate()?;
-        let bundle = self.capture.record(&request, stop).await?;
+        let mut bundle = self.capture.record(&request, stop).await?;
+        if let Some(plan) = &request.final_transcription {
+            plan.attach(&mut bundle)?;
+        }
         self.writes.import(&bundle).await?;
         Ok(bundle)
     }

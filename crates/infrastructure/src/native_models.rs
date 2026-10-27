@@ -2,10 +2,7 @@ use crate::{audio, models::ModelFiles};
 use parakeet_application::{processing::*, *};
 use parakeet_domain::*;
 use serde_json::{Value, json};
-use std::{
-    io::{BufWriter, Write},
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 
 pub struct NemotronJob<'a> {
     pub runtime: &'a tokio::runtime::Handle,
@@ -29,21 +26,18 @@ pub fn nemotron(job: NemotronJob<'_>) -> Result<EngineOutput, CapabilityError> {
         executable,
     } = job;
 
-    let decoded = Instant::now();
-    let samples = runtime.block_on(audio::decode(track, request.start_ms, duration))?;
-    let decode_seconds = decoded.elapsed().as_secs_f64();
-    let audio_seconds = samples.len() as f64 / 16000.;
     let scratch = models.root.join("work").join(&run.id);
     std::fs::create_dir_all(&scratch).map_err(CapabilityError::new)?;
     let pcm = scratch.join("audio.f32");
-    let mut writer = BufWriter::new(std::fs::File::create(&pcm).map_err(CapabilityError::new)?);
-    for sample in samples {
-        writer
-            .write_all(&sample.to_le_bytes())
-            .map_err(CapabilityError::new)?;
-    }
-    writer.flush().map_err(CapabilityError::new)?;
-    drop(writer);
+    let decoded = Instant::now();
+    let samples = runtime.block_on(audio::decode_to_file(
+        track,
+        request.start_ms,
+        duration,
+        &pcm,
+    ))?;
+    let decode_seconds = decoded.elapsed().as_secs_f64();
+    let audio_seconds = samples as f64 / 16000.;
     let directory =
         std::fs::canonicalize(models.directory(&request.model)?).map_err(CapabilityError::new)?;
     let options = scratch.join("request.json");
@@ -106,7 +100,7 @@ pub fn nemotron(job: NemotronJob<'_>) -> Result<EngineOutput, CapabilityError> {
     if let Some(object) = helper_metrics.as_object_mut() {
         object.remove("intervals");
     }
-    let metrics = json!({"wall_seconds":wall,"model_load_seconds":raw["model_load_seconds"],"decode_seconds":decode_seconds,"audio_seconds":audio_seconds,"real_time_factor":wall/audio_seconds,"helper_metrics":helper_metrics,"overlap_preserved":true,"timing_space":if track.meeting_offset_ms().is_some(){"meeting"}else{"track_local_only_in_raw"},"embedding_capability":false});
+    let metrics = json!({"wall_seconds":wall,"model_load_seconds":raw["model_load_seconds"],"decode_seconds":decode_seconds,"decode_storage":"streamed_f32_disk_v1","pcm_bytes":samples*4,"audio_seconds":audio_seconds,"real_time_factor":wall/audio_seconds,"helper_metrics":helper_metrics,"overlap_preserved":true,"timing_space":if track.meeting_offset_ms().is_some(){"meeting"}else{"track_local_only_in_raw"},"embedding_capability":false});
     // Only this job's derived PCM scratch is removed. Original sources and raw model evidence remain intact.
     let _ = std::fs::remove_file(&pcm);
     let _ = std::fs::remove_file(&options);

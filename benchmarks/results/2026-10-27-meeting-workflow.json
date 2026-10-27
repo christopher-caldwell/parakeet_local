@@ -1,0 +1,63 @@
+{
+  "protocol": 1,
+  "date": "2026-10-27",
+  "hardware": {
+    "model": "Mac14,12",
+    "memory_gib": 16,
+    "os": "macOS 26.3.1"
+  },
+  "meeting_workflow": {
+    "new_isolated_recordings": 6,
+    "completed_finalization_plans": 6,
+    "source_runs_completed": 8,
+    "source_runs_failed_and_retained": 2,
+    "two_source_offsets_ms": [
+      0,
+      1250
+    ],
+    "completed_source_reused_after_failure": true,
+    "repeated_finalization_added_no_runs": true,
+    "explicit_title_preserved": true,
+    "system_capture_cli_seconds": 7.8,
+    "interrupted_capture_recovered_seconds": 3.1,
+    "pending_plan_identity_survived_process_death": true,
+    "recovered_partial_capture_state_preserved": true,
+    "native_resume_and_start_stop_exercised": true,
+    "new_capture_resets_old_find_and_library_filters": true,
+    "microphone_exercised": false
+  },
+  "normalization_probe": {
+    "input": "Thirty minutes of generated mono silence, 16 kHz FLAC",
+    "input_sha256": "4e0bdfdd9372a16c9d420392abbfcb9ce14329a7ec0ed36efb1f0630333a7b25",
+    "decoded_bytes": 115200000,
+    "memory": {
+      "mode": "memory",
+      "samples": 28800000,
+      "wall_seconds": 0.769061708,
+      "maximum_resident_set_size_bytes": 242696192
+    },
+    "disk": {
+      "mode": "disk",
+      "samples": 28800000,
+      "wall_seconds": 0.540664208,
+      "maximum_resident_set_size_bytes": 16384000
+    },
+    "measurement": "Separate decoder test processes under /usr/bin/time -l; not aggregate application/CoreML memory",
+    "ffmpeg": "ffmpeg version 9.0.2 Copyright (c) 2000-2026 the FFmpeg developers"
+  },
+  "real_model_regression": {
+    "model": "nemotron3-fast128",
+    "same_public_input": true,
+    "intervals_before": 3,
+    "intervals_after": 3,
+    "intervals_equal": true,
+    "accuracy_comparison": false
+  },
+  "limitations": [
+    "Fine-grained inference progress/cancellation, priority scheduling and within-source chunk resume remain unfinished.",
+    "Live preview, retention controls and microphone/Bluetooth/dual-source hardware acceptance remain separate work.",
+    "The 30-minute normalization probe is synthetic, sequential, and measures one preparation stage; Core ML and OS file-cache memory are not established by it.",
+    "Diarization equivalence on one 11-second public clip is a regression check, not broader accuracy or long-meeting quality proof.",
+    "Only system capture was exercised; microphone permission remains not determined and M3 is untested."
+  ]
+}

@@ -6,6 +6,7 @@ use sqlx::{
 };
 use std::{path::Path, time::Duration};
 mod library;
+mod meetings;
 mod runs;
 mod settings;
 mod speakers;

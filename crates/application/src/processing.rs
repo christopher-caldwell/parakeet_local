@@ -96,12 +96,22 @@ impl ProcessingService {
         }
     }
     pub async fn run(&self, request: ProcessRequest) -> Result<ProcessingRun, ProcessingError> {
-        self.run_inner(request, None).await
+        self.run_inner(request, None, None).await
+    }
+    pub(crate) async fn run_meeting(
+        &self,
+        request: ProcessRequest,
+        finalization_id: &str,
+        expected_revision: &str,
+    ) -> Result<ProcessingRun, ProcessingError> {
+        self.run_inner(request, None, Some((finalization_id, expected_revision)))
+            .await
     }
     async fn run_inner(
         &self,
         mut request: ProcessRequest,
         retry_of: Option<&ProcessingRun>,
+        finalization: Option<(&str, &str)>,
     ) -> Result<ProcessingRun, ProcessingError> {
         if request.model == "selected-asr" || request.model == "selected-diarization" {
             let selected = self.models.selection().await?;
@@ -148,7 +158,9 @@ impl ProcessingService {
             )
             .into());
         }
-        if retry_of.is_some_and(|old| old.model_revision != model.revision) {
+        if retry_of.is_some_and(|old| old.model_revision != model.revision)
+            || finalization.is_some_and(|(_, revision)| revision != model.revision)
+        {
             return Err(ProcessingError::Conflict("model revision changed; start an explicit new transcription instead of retrying old settings".into()));
         }
         if !model.verified {
@@ -171,7 +183,7 @@ impl ProcessingService {
             status: "running".into(),
             started_at: now(),
             completed_at: None,
-            configuration: json!({"request":request,"track":track,"receipt":receipt(),"ownership_protocol":OWNERSHIP_PROTOCOL,"retry_of_run_id":retry_of.map(|r| &r.id)}),
+            configuration: json!({"request":request,"track":track,"receipt":receipt(),"ownership_protocol":OWNERSHIP_PROTOCOL,"retry_of_run_id":retry_of.map(|r| &r.id),"meeting_finalization_id":finalization.map(|(id,_)|id)}),
             result: Value::Null,
             error: None,
         };
@@ -236,7 +248,14 @@ impl ProcessingService {
                 "stored request belongs to a different recording".into(),
             ));
         }
-        Ok(self.run_inner(request, Some(&prior)).await?)
+        let meeting_id = prior.configuration["meeting_finalization_id"].as_str();
+        Ok(self
+            .run_inner(
+                request,
+                Some(&prior),
+                meeting_id.map(|id| (id, prior.model_revision.as_str())),
+            )
+            .await?)
     }
 }
 operation_error!(TranscribeRecordingError,sources{Read:PersistenceError=>"persistence",Processing:ProcessingError=>"nested"},values{NotFound=>"not_found",Unavailable=>"source",Incomplete=>"processing"});

@@ -212,3 +212,63 @@ fn speaker_word_scoring_uses_verified_evidence_without_initializing_storage() {
     assert_eq!(run(&root, &command).0, 2);
     assert!(!root.exists());
 }
+
+#[test]
+fn meeting_finalization_commands_keep_provisioning_and_consent_explicit() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("app");
+    let (code, _) = run(&root, &["meetings", "pending-transcriptions"]);
+    assert_eq!(code, 1);
+    assert!(!root.exists());
+    assert_eq!(run(&root, &["db", "create"]).0, 0);
+    assert_eq!(run(&root, &["db", "migrate"]).0, 0);
+    let (code, settings) = run(&root, &["capture", "settings"]);
+    assert_eq!(code, 0);
+    assert_eq!(settings["data"]["transcribe_meetings_after_stop"], false);
+    assert_eq!(
+        run(
+            &root,
+            &["capture", "settings", "--transcribe-after-stop", "true"]
+        )
+        .0,
+        0
+    );
+    assert_eq!(
+        run(&root, &["capture", "settings"]).1["data"]["transcribe_meetings_after_stop"],
+        true
+    );
+    let (code, pending) = run(&root, &["meetings", "pending-transcriptions"]);
+    assert_eq!(code, 0);
+    assert_eq!(pending["data"], json!([]));
+    assert!(!root.join("parakeet.db.processing-leases").exists());
+    let (code, missing) = run(&root, &["meetings", "finalize", "missing"]);
+    assert_eq!(code, 3);
+    assert_eq!(missing["error"]["kind"], "not_found");
+    let (code, invalid) = run(
+        &root,
+        &[
+            "capture",
+            "record",
+            "--system",
+            "--seconds",
+            "0",
+            "--transcribe",
+        ],
+    );
+    assert_eq!(code, 2);
+    assert_eq!(invalid["error"]["kind"], "invalid_input");
+    let (code, _) = run(
+        &root,
+        &[
+            "capture",
+            "record",
+            "--system",
+            "--seconds",
+            "1",
+            "--transcribe",
+        ],
+    );
+    assert_ne!(code, 0);
+    assert!(!root.join("captures").exists());
+    assert!(!root.join("capture.lock").exists());
+}

@@ -116,6 +116,11 @@ enum Dictation {
 }
 #[derive(Subcommand)]
 enum Capture {
+    /// Inspect or explicitly change desktop automatic-final-transcription behavior.
+    Settings {
+        #[arg(long)]
+        transcribe_after_stop: Option<bool>,
+    },
     Devices,
     Permissions,
     Recoverable,
@@ -131,6 +136,9 @@ enum Capture {
         title: String,
         #[arg(long, default_value_t = 60)]
         seconds: u64,
+        /// Run pinned local ASR on every saved source after stopping; audio is retained on failure.
+        #[arg(long)]
+        transcribe: bool,
     },
 }
 #[derive(Subcommand)]
@@ -151,6 +159,13 @@ enum Models {
 }
 #[derive(Subcommand)]
 enum Meetings {
+    /// Resume durable final transcription; completed source work is reused.
+    Finalize {
+        id: String,
+        #[arg(long)]
+        model: Option<String>,
+    },
+    PendingTranscriptions,
     Fingerprint {
         id: String,
         #[arg(long)]
@@ -455,6 +470,14 @@ fn yt_dlp() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("yt-dlp"))
 }
 fn writes(command: &Command) -> bool {
+    if let Command::Capture {
+        command: Capture::Settings {
+            transcribe_after_stop,
+        },
+    } = command
+    {
+        return transcribe_after_stop.is_some();
+    }
     if let Command::Dictation {
         command:
             Dictation::AudioSettings {
@@ -473,6 +496,7 @@ fn writes(command: &Command) -> bool {
         } | Command::Meetings {
             command: Meetings::Import { dry_run: false, .. }
                 | Meetings::ImportSourceDb { dry_run: false, .. }
+                | Meetings::Finalize { .. }
                 | Meetings::Rename { .. }
                 | Meetings::Fingerprint { .. }
                 | Meetings::Relink { dry_run: false, .. }
@@ -753,6 +777,17 @@ async fn execute(cli: Cli) -> anyhow::Result<Value> {
         store.clone(),
         Arc::new(parakeet_infrastructure::audio::LocalAudioIdentity),
     );
+    let meeting = parakeet_application::meeting::MeetingService::new(
+        Arc::new(parakeet_application::capture::CaptureService::new(
+            native.clone(),
+            store.clone(),
+        )),
+        store.clone(),
+        store.clone(),
+        models.clone(),
+        processing.clone(),
+        ownership.clone(),
+    );
     let result = match cli.command {
         Command::Jobs { command } => match command {
             Jobs::Pending => value(recovery.pending().await?),
@@ -760,6 +795,10 @@ async fn execute(cli: Cli) -> anyhow::Result<Value> {
             Jobs::Retry { id } => value(processing.retry(&id).await?),
         },
         Command::Meetings { command } => match command {
+            Meetings::Finalize { id, model } => {
+                value(meeting.finalize(&id, model.as_deref()).await?)
+            }
+            Meetings::PendingTranscriptions => value(meeting.pending().await?),
             Meetings::Fingerprint { id, track } => value(
                 locations
                     .fingerprint(
@@ -937,6 +976,19 @@ async fn execute(cli: Cli) -> anyhow::Result<Value> {
                 .await?,
         ),
         Command::Capture {
+            command: Capture::Settings {
+                transcribe_after_stop,
+            },
+        } => {
+            let service = AudioSettingsService::new(store.clone(), store.clone());
+            let mut preferences = service.get().await?;
+            if let Some(enabled) = transcribe_after_stop {
+                preferences.transcribe_meetings_after_stop = enabled;
+                service.save(&preferences).await?;
+            }
+            value(preferences)
+        }
+        Command::Capture {
             command: Capture::Recover { directory },
         } => value(
             parakeet_application::capture::CaptureService::new(native, store)
@@ -950,16 +1002,19 @@ async fn execute(cli: Cli) -> anyhow::Result<Value> {
                     system,
                     title,
                     seconds,
+                    transcribe,
                 },
         } => value(
-            parakeet_application::capture::CaptureService::new(native, store)
+            meeting
                 .record(
                     parakeet_application::capture::CaptureRequest {
                         microphone_uid,
                         system_audio: system,
                         title,
                         maximum_seconds: seconds,
+                        final_transcription: None,
                     },
+                    transcribe,
                     Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 )
                 .await?,
@@ -1331,6 +1386,13 @@ fn kind(error: &anyhow::Error) -> &'static str {
             parakeet_application::evaluation::RunEvaluationError,
             parakeet_application::evaluation::ReadEvaluationReportError
         );
+        if let Some(e) = cause.downcast_ref::<parakeet_application::meeting::RecordMeetingError>() {
+            return e.kind();
+        }
+        if let Some(e) = cause.downcast_ref::<parakeet_application::meeting::FinalizeMeetingError>()
+        {
+            return e.kind();
+        }
         if cause.is::<ValidationError>() {
             return "invalid_input";
         }
@@ -1373,7 +1435,22 @@ async fn main() {
         Ok(data) => println!("{}", json!({"schema_version":1,"ok":true,"data":data})),
         Err(error) => {
             let kind = kind(&error);
-            let retained = error.downcast_ref::<IncompleteMedia>().map(|e| &e.0);
+            let retained = error
+                .downcast_ref::<IncompleteMedia>()
+                .map(|e| json!(e.0))
+                .or_else(|| {
+                    error.chain().find_map(|e| {
+                        e.downcast_ref::<parakeet_application::meeting::FinalizeMeetingError>()
+                            .and_then(|e| e.retained())
+                    })
+                })
+                .or_else(|| {
+                    error.chain().find_map(|e| {
+                        e.downcast_ref::<parakeet_application::meeting::RecordMeetingError>()
+                            .and_then(|e| e.retained_recording_id())
+                            .map(|id| json!({"recording_id":id}))
+                    })
+                });
             println!(
                 "{}",
                 json!({"schema_version":1,"ok":false,"retained_result":retained,"error":{"kind":kind,"message":error.to_string(),"causes":error.chain().map(ToString::to_string).collect::<std::collections::BTreeSet<_>>()}})

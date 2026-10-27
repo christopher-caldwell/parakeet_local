@@ -67,7 +67,9 @@ enum Update {
     SuggestionReview(SpeakerSuggestionReview),
     Settings(Vec<gestures::Shortcut>, Vec<PromptProfile>),
     Devices(serde_json::Value),
-    Captured(Result<reader::Document, String>),
+    Captured(Result<reader::Document, String>, Option<String>),
+    MeetingFinalized(Result<reader::Document, String>, Option<String>),
+    MeetingPlans(Vec<parakeet_application::meeting::MeetingFinalization>),
 }
 struct Workbench {
     #[cfg(feature = "performance")]
@@ -94,6 +96,8 @@ struct Workbench {
     settings: Arc<SettingsService>,
     playback: Arc<PlaybackService>,
     capture: Arc<CaptureService>,
+    meeting: Arc<parakeet_application::meeting::MeetingService>,
+    meeting_plans: Vec<parakeet_application::meeting::MeetingFinalization>,
     audio_inspection: Arc<AudioInspectionService>,
     audio_settings: Arc<AudioSettingsService>,
     dictation_listener: Arc<DictationListener>,
@@ -107,6 +111,7 @@ struct Workbench {
     devices: serde_json::Value,
     audio_preferences: AudioPreferences,
     focus: FocusHandle,
+    main_window: AnyWindowHandle,
     heartbeat_last: Instant,
     heartbeat_max_ms: f64,
     heartbeat_running: bool,
@@ -265,9 +270,16 @@ impl Workbench {
                                 }
                             }
                             Update::Candidates(recording,c) => {if this.requested_recording.as_deref()==Some(recording.as_str()){this.candidates = c;}},
-                            Update::Jobs(jobs) => this.pending_jobs = jobs,
+                            Update::Jobs(jobs) => {this.pending_jobs = jobs;this.load_meeting_plans(cx);},
+                            Update::MeetingPlans(plans) => this.meeting_plans = plans,
+                            Update::MeetingFinalized(result, warning) => {
+                                match result {Ok(d)=>this.receive_detail(d),Err(e)=>{this.status=e.clone();this.last_error=Some(e);cx.notify();return;}}
+                                this.load_meeting_plans(cx);
+                                if let Some(warning)=warning {this.status=warning.clone();this.last_error=Some(warning);cx.notify();return;}
+                            },
                             Update::Recovered(report, jobs) => {
                                 this.pending_jobs = jobs;
+                                this.load_meeting_plans(cx);
                                 this.status = format!("Recovered {} interrupted jobs; {} active; {} older jobs need manual inspection",report.interrupted.len(),report.active.len(),report.unmanaged.len());
                                 cx.notify(); return;
                             }
@@ -296,10 +308,22 @@ impl Workbench {
                                 }
                             }
                             Update::Devices(d) => this.devices = d,
-                            Update::Captured(result) => {
+                            Update::Captured(result, warning) => {
                                 this.capture_stop = None;
                                 match result {
                                     Ok(d) => {
+                                        this.editing_title=false;this.editing_segment=None;this.segment_page=0;
+                                        this.recording_tab=library::RecordingTab::Transcript;
+                                        this.show_transcript_find=false;this.transcript_query.clear();
+                                        this.cluster_review=None;this.selected_clusters.clear();this.candidates.clear();
+                                        this.suggestions.clear();this.suggestion_review=None;
+                                        this.reader_list.reset(0);
+                                        this.library_filter=library::LibraryFilter::All;
+                                        let find=this.transcript_find.clone();let search=this.search.clone();
+                                        let _=cx.update_window(this.main_window,move|_,window,cx|{
+                                            find.update(cx,|input,cx|input.set_value("",window,cx));
+                                            search.update(cx,|input,cx|input.set_value("",window,cx));
+                                        });
                                         this.requested_recording = Some(d.recording.id.clone());
                                         this.selected_track = d
                                             .tracks
@@ -314,6 +338,7 @@ impl Workbench {
                                         this.receive_detail(d);
                                         this.area = Area::Library;
                                         this.reload(cx);
+                                        if let Some(warning)=warning {this.status=warning.clone();this.last_error=Some(warning);cx.notify();return;}
                                     }
                                     Err(e) => {
                                         this.status = e;
@@ -824,6 +849,37 @@ impl Render for Workbench {
                     .child(button("refresh-jobs","Refresh pending jobs").self_start().on_click(cx.listener(|this,_,_,cx|{let service=this.recovery.clone();this.task("Reading pending jobs",async move{Ok(Update::Jobs(service.pending().await?))},cx); })))
                     .child(button("recover-jobs","Recover abandoned processing jobs").self_start().on_click(cx.listener(|this,_,_,cx|{let service=this.recovery.clone();this.task("Recovering abandoned jobs",async move{let report=service.recover().await?;Ok(Update::Recovered(report,service.pending().await?))},cx); })))
                     .child(caption(if self.pending_jobs.is_empty(){"No unfinished processing jobs. Failed or interrupted runs can be retried from their recording’s Processing tab.".into()}else{format!("{} unfinished jobs. Open a recording’s Processing tab to retry a settled failure.",self.pending_jobs.len())}));
+                content=content.child(section("Meeting transcripts", "Resume pending or failed final passes. Recover abandoned source jobs above before resuming an interrupted pass."));
+                for plan in &self.meeting_plans {
+                    let id = plan.recording_id.clone();
+                    content = content.child(
+                        div()
+                            .p_3()
+                            .bg(rgb(PANEL))
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .child(format!(
+                                "{} · {} · {}/{} sources",
+                                self.records
+                                    .iter()
+                                    .find(|r| r.id == id)
+                                    .map(|r| r.title())
+                                    .unwrap_or(&id),
+                                plan.status,
+                                plan.completed.len(),
+                                plan.track_ids.len()
+                            ))
+                            .child(
+                                button(format!("open-finalization-{}", plan.id), "Open recording")
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.open(id.clone(), window, cx);
+                                        this.recording_tab = library::RecordingTab::Processing;
+                                        cx.notify();
+                                    })),
+                            ),
+                    );
+                }
                 for run in &self.pending_jobs {
                     let recording = self
                         .records
@@ -1032,11 +1088,18 @@ impl Render for Workbench {
             }
             Area::Capture => {
                 content=content.child(section("Record a meeting","Choose your microphone and audio sources. Separate source recordings are saved for accurate review."));
+                let health = self.capture.status();
                 content = content.child(
                     button("refresh-audio-devices", "Refresh inputs")
                         .self_start()
                         .on_click(cx.listener(|this, _, _, cx| this.navigate(Area::Capture, cx))),
                 );
+                content = content.child(choice("auto-final-transcription", if self.audio_preferences.transcribe_meetings_after_stop {"After Stop: transcribe locally (on)"} else {"After Stop: save audio only"},self.audio_preferences.transcribe_meetings_after_stop)
+                    .disabled(self.capture_stop.is_some()).on_click(cx.listener(|this,_,_,cx|{
+                        this.audio_preferences.transcribe_meetings_after_stop = !this.audio_preferences.transcribe_meetings_after_stop;
+                        let preferences=this.audio_preferences.clone();let service=this.audio_settings.clone();
+                        this.task("Saving meeting transcription preference",async move{service.save(&preferences).await?;Ok(Update::Message("Meeting transcription preference saved".into()))},cx);
+                    }))).child(caption("Uses the selected installed local ASR model. Audio is saved first; failed final transcription can be resumed."));
                 if self.devices["devices"]
                     .as_array()
                     .is_none_or(|devices| devices.is_empty())
@@ -1095,7 +1158,7 @@ impl Render for Workbench {
                                 cx.listener(|this, _, _, cx| this.start_capture(true, false, cx)),
                             ))
                             .child(
-                                danger("stop-recording", "Stop & save").disabled(self.capture_stop.is_none()).on_click(cx.listener(
+                                danger("stop-recording", "Stop & save").disabled(self.capture_stop.is_none() || health["state"] == "completed").on_click(cx.listener(
                                     |this, _, _, cx| {
                                         if let Some(stop) = &this.capture_stop {
                                             stop.store(true, Ordering::SeqCst);
@@ -1110,7 +1173,9 @@ impl Render for Workbench {
                         "Capture state: {}",
                         self.capture.status()["state"].as_str().unwrap_or("unknown")
                     ));
-                let health = self.capture.status();
+                if self.capture_stop.is_some() && health["state"] == "completed" {
+                    content = content.child(pill("Audio saved · finishing transcription", ACCENT));
+                }
                 if let Some(message) = health["message"].as_str() {
                     content = content.child(format!("Capture warning: {message}"));
                 }
@@ -1676,22 +1741,32 @@ impl Workbench {
             system_audio,
             title: format!("Meeting {}", now()),
             maximum_seconds: 7200,
+            final_transcription: None,
         };
+        let transcribe = self.audio_preferences.transcribe_meetings_after_stop;
         let stop = Arc::new(AtomicBool::new(false));
         self.capture_stop = Some(stop.clone());
-        let capture = self.capture.clone();
+        let meeting = self.meeting.clone();
         let lib = self.library.clone();
         self.task(
             "Recording — waiting for first buffers",
             async move {
-                let result = async {
-                    let bundle = capture.record(request, stop).await?;
-                    Ok::<_, anyhow::Error>(lib.show(&bundle.recording.id).await?)
-                }
-                .await;
-                Ok(Update::Captured(
-                    result.map(reader::Document::new).map_err(|e| e.to_string()),
-                ))
+                let (id, warning) = match meeting.record(request, transcribe, stop).await {
+                    Ok(report) => (Some(report.recording_id), None),
+                    Err(error) => (
+                        error.retained_recording_id().map(str::to_owned),
+                        Some(error.to_string()),
+                    ),
+                };
+                let result = match id {
+                    Some(id) => lib
+                        .show(&id)
+                        .await
+                        .map(reader::Document::new)
+                        .map_err(|e| e.to_string()),
+                    None => Err(warning.clone().unwrap_or_else(|| "Recording failed".into())),
+                };
+                Ok(Update::Captured(result, warning))
             },
             cx,
         );
@@ -1833,7 +1908,7 @@ fn main() -> anyhow::Result<()> {
     let recovery = Arc::new(parakeet_application::jobs::ProcessingRecoveryService::new(
         store.clone(),
         store.clone(),
-        ownership,
+        ownership.clone(),
     ));
     let settings = Arc::new(SettingsService::new(
         store.clone(),
@@ -1876,6 +1951,14 @@ fn main() -> anyhow::Result<()> {
     };
     let audio_inspection = Arc::new(AudioInspectionService::new(native.clone()));
     let capture = Arc::new(CaptureService::new(native.clone(), store.clone()));
+    let meeting = Arc::new(parakeet_application::meeting::MeetingService::new(
+        capture.clone(),
+        store.clone(),
+        store.clone(),
+        models.clone(),
+        processing.clone(),
+        ownership,
+    ));
     let audio_settings = Arc::new(AudioSettingsService::new(store.clone(), store.clone()));
     let audio_preferences = runtime.block_on(audio_settings.get())?;
     let dictation_state = Arc::new(Mutex::new(serde_json::json!({"state":"idle"})));
@@ -2009,6 +2092,8 @@ fn main() -> anyhow::Result<()> {
                             settings,
                             playback,
                             capture,
+                            meeting,
+                            meeting_plans: vec![],
                             audio_inspection,
                             audio_settings,
                             dictation_listener,
@@ -2022,6 +2107,7 @@ fn main() -> anyhow::Result<()> {
                             devices: serde_json::Value::Null,
                             audio_preferences,
                             focus,
+                            main_window: window.window_handle(),
                             heartbeat_last: Instant::now(),
                             heartbeat_max_ms: 0.,
                             heartbeat_running: false,

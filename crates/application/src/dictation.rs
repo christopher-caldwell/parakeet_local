@@ -117,6 +117,7 @@ impl DictationService {
                     system_audio: false,
                     title: format!("Dictation {}", now()),
                     maximum_seconds: 120,
+                    final_transcription: None,
                 },
                 control.stop.clone(),
             )

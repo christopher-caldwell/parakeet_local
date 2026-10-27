@@ -8,6 +8,35 @@ pub enum ConfirmAction {
 }
 
 impl Workbench {
+    pub(super) fn load_meeting_plans(&mut self, cx: &mut Context<Self>) {
+        let service = self.meeting.clone();
+        self.task(
+            "Checking unfinished meeting transcripts",
+            async move { Ok(Update::MeetingPlans(service.pending().await?)) },
+            cx,
+        );
+    }
+    pub(super) fn finalize_meeting(&mut self, id: String, cx: &mut Context<Self>) {
+        let service = self.meeting.clone();
+        let library = self.library.clone();
+        self.task(
+            "Finishing transcription from saved source audio",
+            async move {
+                let warning = service
+                    .finalize(&id, None)
+                    .await
+                    .err()
+                    .map(|e| e.to_string());
+                let detail = library
+                    .show(&id)
+                    .await
+                    .map(reader::Document::new)
+                    .map_err(|e| e.to_string());
+                Ok(Update::MeetingFinalized(detail, warning))
+            },
+            cx,
+        );
+    }
     pub(super) fn navigate(&mut self, area: Area, cx: &mut Context<Self>) {
         self.area = area;
         match area {

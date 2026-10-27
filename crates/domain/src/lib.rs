@@ -310,6 +310,8 @@ mod tests {
 pub struct AudioPreferences {
     pub microphone_uid: Option<String>,
     pub system_audio: bool,
+    #[serde(default)]
+    pub transcribe_meetings_after_stop: bool,
 }
 
 pub mod reconciliation;
