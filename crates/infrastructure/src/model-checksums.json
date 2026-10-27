@@ -1,0 +1,126 @@
+{
+  "nemotron3-fast128": {
+    "bytes": 199096435,
+    "revision": "1b0b133f6f8820292010afd776d8f9fbc9fca17e",
+    "sha256": {
+      "learnable_sil_emb.bin": "d4417b3c0eabdf7c47032fac2b5b5a7ee83d819a6ddda8fd8eaf74e2b5cc4ac7",
+      "monolithic/v2/Nemotron3Diarizer_fast128.mlmodelc/analytics/coremldata.bin": "a71e06616a3ae7bddef06ce5dfc7fe523a286e489f63a8da2fc4f1e940d560a4",
+      "monolithic/v2/Nemotron3Diarizer_fast128.mlmodelc/coremldata.bin": "ebcca7245d8d774305752b9f2b79433ad1858f8a06df3b326e0ae6305d981d25",
+      "monolithic/v2/Nemotron3Diarizer_fast128.mlmodelc/model.mil": "e7c029a46d9f327bec4c47fc34e5d32ee2cec9ce596950af0c403d05146b4ead",
+      "monolithic/v2/Nemotron3Diarizer_fast128.mlmodelc/weights/weight.bin": "e8c90d2d0e16787a420de6805fd5b7a95c116fac0163208b5bc4d8a9ae459ca4"
+    }
+  },
+  "nemotron3-offline": {
+    "bytes": 199162403,
+    "revision": "1b0b133f6f8820292010afd776d8f9fbc9fca17e",
+    "sha256": {
+      "learnable_sil_emb.bin": "d4417b3c0eabdf7c47032fac2b5b5a7ee83d819a6ddda8fd8eaf74e2b5cc4ac7",
+      "monolithic/v2/Nemotron3Diarizer_offline.mlmodelc/analytics/coremldata.bin": "491594df92282a4f2cef65e96d236e210a5c4627063e37e822ec858aaaad416d",
+      "monolithic/v2/Nemotron3Diarizer_offline.mlmodelc/coremldata.bin": "8b790c919c65744648c17290a26d3371e0e55db655310e7f8445080757b0bf08",
+      "monolithic/v2/Nemotron3Diarizer_offline.mlmodelc/model.mil": "ea5673d9e9ec785e7c8fb628acd82f9f86214c46b6584eaacdb6faddcb3f0277",
+      "monolithic/v2/Nemotron3Diarizer_offline.mlmodelc/weights/weight.bin": "bab76e5f190d0e4a4e174e7fcb1e9beea58c6b2be56e665e2cac8fba6d10f7f1"
+    }
+  },
+  "speakrs-community-1-coreml": {
+    "bytes": 272600614,
+    "revision": "67f963b6a1d94fcd4678948237b3cc8bd69bf1d8",
+    "sha256": {
+      "plda_lda.npy": "e20c9b012bebd1aabda5a38a127e63a43cf35debdc502715fc143e2fb6bc3c4b",
+      "plda_mean1.npy": "e424c0c352182aa8e0f555dec1f3b30e29a20b9ed6b25d339f112af92e51e36f",
+      "plda_mean2.npy": "6f6fb708a2037197b5b84ffeaa8f140cb878088fbecd6ab042ad26a7691bd2cf",
+      "plda_mu.npy": "d286d48acf99bbc1ed1502fed0a3e361ae5626ce1870c8be9f7397c5e47886c6",
+      "plda_psi.npy": "d7128c9ed2f28a9781971805131129f077c04f948e2df12e52dcdb99f2b4e5f5",
+      "plda_tr.npy": "e700b68cb319de3fafb5fa093eb9222c23c447084741f8d3a533640d425510ee",
+      "segmentation-3.0-b32.mlmodelc/analytics/coremldata.bin": "129d4f2316a01d29c2636cb72fea64880086685250918bd6a89ea2b770286e68",
+      "segmentation-3.0-b32.mlmodelc/coremldata.bin": "ac710fb9bcd0310d0c40fd82f2350ca5287b18596da33470bf5185be148aad81",
+      "segmentation-3.0-b32.mlmodelc/model.mil": "cb2ee400e54e7cd1ba1dfac3d60dc36c3d01f0152e5d4a559f7873eb7715d96f",
+      "segmentation-3.0-b32.mlmodelc/weights/weight.bin": "c3189a64946c75bc24fcb98afe89ad78c52bdbadfdf65e857fb1b81e2cc9fbb2",
+      "segmentation-3.0-b64.mlmodelc/analytics/coremldata.bin": "7497fe39c383a49061eae9ebb3052a59360752ee96deeee46ae701f9afbd6e4d",
+      "segmentation-3.0-b64.mlmodelc/coremldata.bin": "0460ffe22d22a0ae0dc86c0cc22d94c074f29bbd6be1434707a66b5e154796c8",
+      "segmentation-3.0-b64.mlmodelc/model.mil": "d2d35b55977eb6631cfb456eb67e8a771e834ac972ae051196ec68e9cacd9bac",
+      "segmentation-3.0-b64.mlmodelc/weights/weight.bin": "0b8ef91e4a97b435f0f3a4bb66ca647ff53820edc4cb747c242413045a4aaa56",
+      "segmentation-3.0.mlmodelc/analytics/coremldata.bin": "129d4f2316a01d29c2636cb72fea64880086685250918bd6a89ea2b770286e68",
+      "segmentation-3.0.mlmodelc/coremldata.bin": "ac710fb9bcd0310d0c40fd82f2350ca5287b18596da33470bf5185be148aad81",
+      "segmentation-3.0.mlmodelc/model.mil": "cb2ee400e54e7cd1ba1dfac3d60dc36c3d01f0152e5d4a559f7873eb7715d96f",
+      "segmentation-3.0.mlmodelc/weights/weight.bin": "c3189a64946c75bc24fcb98afe89ad78c52bdbadfdf65e857fb1b81e2cc9fbb2",
+      "wespeaker-chunk-emb-p1s-w111.mlmodelc/analytics/coremldata.bin": "0182f87233c3333be26446c1134f21145d0dc7c8a0ea97e09fb88fdafdcffce4",
+      "wespeaker-chunk-emb-p1s-w111.mlmodelc/coremldata.bin": "7ca6093680e486d7c0a9c13bfdf21fafd77dc08ec345a43981aa0ac1131e54a1",
+      "wespeaker-chunk-emb-p1s-w111.mlmodelc/model.mil": "46f7ede43705b74e626693fc7d01b7cc21652bf0fdf95888f388374932d9ee34",
+      "wespeaker-chunk-emb-p1s-w111.mlmodelc/weights/weight.bin": "b4c0cb7d03b8fd43923a3a4c002321d381113789a27273aa070da4eae693f3c7",
+      "wespeaker-chunk-emb-p1s-w21.mlmodelc/analytics/coremldata.bin": "1387900f3e56403c2f81861c3b93ec69028cb9a29fe73ad2fbc03433a4003e5b",
+      "wespeaker-chunk-emb-p1s-w21.mlmodelc/coremldata.bin": "31e3299dfb25d8165c0e7783f753d323572f988406dda7970310b9cc8f9d313f",
+      "wespeaker-chunk-emb-p1s-w21.mlmodelc/model.mil": "61f48809599ce8e7ebbb6bbd02c5298d61089e4f092f764c8b066e5988da169f",
+      "wespeaker-chunk-emb-p1s-w21.mlmodelc/weights/weight.bin": "a2e7c10340339c18bb7bddeb952f9b36b081d09bb15b372d6003a46667fb7d7e",
+      "wespeaker-chunk-emb-p1s-w36.mlmodelc/analytics/coremldata.bin": "7a5a434d7a10e7903a8a4ccd52227139870f41dc5a76e907d6a83ca7ba24779e",
+      "wespeaker-chunk-emb-p1s-w36.mlmodelc/coremldata.bin": "a16ac9accd7f945b02d03cd3b15885152d698cdb87e4ac3641350882d308f87c",
+      "wespeaker-chunk-emb-p1s-w36.mlmodelc/model.mil": "1c9618aba9457b30e095f6fbbeed9b40787d415854150146b7ec1f91e048edf2",
+      "wespeaker-chunk-emb-p1s-w36.mlmodelc/weights/weight.bin": "35c2339da4c98b2f76140611c549608b3087277cd0de4e81456e55b0d4c15cd3",
+      "wespeaker-chunk-emb-p1s-w51.mlmodelc/analytics/coremldata.bin": "9b46b26429aa1b0f585cf919335995bfa272c49398d5f06bf8e882ff446cb2a9",
+      "wespeaker-chunk-emb-p1s-w51.mlmodelc/coremldata.bin": "d67e24cf8b151090f18a99031511f4a7fe8185b32503afcdadbb986b12f0c901",
+      "wespeaker-chunk-emb-p1s-w51.mlmodelc/model.mil": "9390b75222de14826f908633fe3d5cf5cb17f37069edf94d5c66e903aeb0d047",
+      "wespeaker-chunk-emb-p1s-w51.mlmodelc/weights/weight.bin": "c4cd6f10933cf89fbcc6e2c7b5060b584e33cd7f446dadfbcabca3cea6ada4ee",
+      "wespeaker-chunk-emb-p1s-w81.mlmodelc/analytics/coremldata.bin": "2c6ee3bf20d79830dafbf6c082d6183ab9487684896549ccc0db3f4a866edf79",
+      "wespeaker-chunk-emb-p1s-w81.mlmodelc/coremldata.bin": "420854829b005a33bb865bfe9f7796124f7c4b368c440302155f94764e365b97",
+      "wespeaker-chunk-emb-p1s-w81.mlmodelc/model.mil": "ad8a5a72c351a532d30dde0cf13c9e951c1e7cab5bbfc43c18bf7cc174fd6878",
+      "wespeaker-chunk-emb-p1s-w81.mlmodelc/weights/weight.bin": "a7b2228cae71118b65b325492fc7a8d4c3120913d532ef234ad2857c2f5a82c1",
+      "wespeaker-fbank-30s.mlmodelc/analytics/coremldata.bin": "413a9d484295f712f6a496624abd9a663e72149d2fe43f8ad101dc1dc09981d0",
+      "wespeaker-fbank-30s.mlmodelc/coremldata.bin": "d52fb49c6521e14c9366e0194e1e91f4550d8ba39d31e03e72bfe014b1e826fe",
+      "wespeaker-fbank-30s.mlmodelc/model.mil": "34a76696a6318312ce0557b93e0d4defabfdbc540a682ae5dfbdc80d1f52f52d",
+      "wespeaker-fbank-30s.mlmodelc/weights/weight.bin": "27396cb0afdd09164a9d6b2dbd10688bed15230948b3e0a6692ec490c03ae4d7",
+      "wespeaker-fbank-b32.mlmodelc/analytics/coremldata.bin": "b4a6a692403029bf4d417d17ba0e43ab89482e9d862d4ed7d897b309d7455910",
+      "wespeaker-fbank-b32.mlmodelc/coremldata.bin": "4241bd2543b6face59368f98e9cb7a049c46db8cc5ebd70a12814d3382324ede",
+      "wespeaker-fbank-b32.mlmodelc/model.mil": "acee98c155b533afa6a7eb3d5e2158cb4005f85999be06f12276f94c7fab9d34",
+      "wespeaker-fbank-b32.mlmodelc/weights/weight.bin": "27396cb0afdd09164a9d6b2dbd10688bed15230948b3e0a6692ec490c03ae4d7",
+      "wespeaker-fbank.mlmodelc/analytics/coremldata.bin": "b4a6a692403029bf4d417d17ba0e43ab89482e9d862d4ed7d897b309d7455910",
+      "wespeaker-fbank.mlmodelc/coremldata.bin": "4241bd2543b6face59368f98e9cb7a049c46db8cc5ebd70a12814d3382324ede",
+      "wespeaker-fbank.mlmodelc/model.mil": "acee98c155b533afa6a7eb3d5e2158cb4005f85999be06f12276f94c7fab9d34",
+      "wespeaker-fbank.mlmodelc/weights/weight.bin": "27396cb0afdd09164a9d6b2dbd10688bed15230948b3e0a6692ec490c03ae4d7",
+      "wespeaker-multimask-tail-b32.mlmodelc/analytics/coremldata.bin": "77b60e64442b2140adebed82813bf619f76d92c9f419639093a50a27744ac14b",
+      "wespeaker-multimask-tail-b32.mlmodelc/coremldata.bin": "5e5467edd5d317c287cfa06474216990b8dfff1b7f6e725fb2e238a2264d8b16",
+      "wespeaker-multimask-tail-b32.mlmodelc/model.mil": "15af971119deecf2729de0c32a9f9af17cf6769cf3a10d45ada114ddd7c54d3b",
+      "wespeaker-multimask-tail-b32.mlmodelc/weights/weight.bin": "18f777be6e47d2d9d5792d475457add3b71a677814ac66cadc90e5410d14b252",
+      "wespeaker-voxceleb-resnet34-tail-b3.mlmodelc/analytics/coremldata.bin": "07abd12d7cdb8af793b6d439b40bd9e5c1f44b9eb69cbb3d3d272f494a77a556",
+      "wespeaker-voxceleb-resnet34-tail-b3.mlmodelc/coremldata.bin": "7e35919b7985082e3fe0fa8554679632383ef815f863f29a133a23a0bf17898a",
+      "wespeaker-voxceleb-resnet34-tail-b3.mlmodelc/model.mil": "630709365400a429358025104c67a240ae9dc5c555dd9f9c72203be33ca51fc6",
+      "wespeaker-voxceleb-resnet34-tail-b3.mlmodelc/weights/weight.bin": "18f777be6e47d2d9d5792d475457add3b71a677814ac66cadc90e5410d14b252",
+      "wespeaker-voxceleb-resnet34-tail-b32.mlmodelc/analytics/coremldata.bin": "07abd12d7cdb8af793b6d439b40bd9e5c1f44b9eb69cbb3d3d272f494a77a556",
+      "wespeaker-voxceleb-resnet34-tail-b32.mlmodelc/coremldata.bin": "7e35919b7985082e3fe0fa8554679632383ef815f863f29a133a23a0bf17898a",
+      "wespeaker-voxceleb-resnet34-tail-b32.mlmodelc/model.mil": "630709365400a429358025104c67a240ae9dc5c555dd9f9c72203be33ca51fc6",
+      "wespeaker-voxceleb-resnet34-tail-b32.mlmodelc/weights/weight.bin": "18f777be6e47d2d9d5792d475457add3b71a677814ac66cadc90e5410d14b252",
+      "wespeaker-voxceleb-resnet34-tail.mlmodelc/analytics/coremldata.bin": "07abd12d7cdb8af793b6d439b40bd9e5c1f44b9eb69cbb3d3d272f494a77a556",
+      "wespeaker-voxceleb-resnet34-tail.mlmodelc/coremldata.bin": "7e35919b7985082e3fe0fa8554679632383ef815f863f29a133a23a0bf17898a",
+      "wespeaker-voxceleb-resnet34-tail.mlmodelc/model.mil": "630709365400a429358025104c67a240ae9dc5c555dd9f9c72203be33ca51fc6",
+      "wespeaker-voxceleb-resnet34-tail.mlmodelc/weights/weight.bin": "18f777be6e47d2d9d5792d475457add3b71a677814ac66cadc90e5410d14b252",
+      "wespeaker-voxceleb-resnet34.min_num_samples.txt": "e4df891c484d7abb985dadf539fa1883a646dab6337af5cae4159c587b7050cc"
+    }
+  },
+  "speakrs-community-1-cpu": {
+    "bytes": 32692756,
+    "revision": "67f963b6a1d94fcd4678948237b3cc8bd69bf1d8",
+    "sha256": {
+      "plda_lda.npy": "e20c9b012bebd1aabda5a38a127e63a43cf35debdc502715fc143e2fb6bc3c4b",
+      "plda_mean1.npy": "e424c0c352182aa8e0f555dec1f3b30e29a20b9ed6b25d339f112af92e51e36f",
+      "plda_mean2.npy": "6f6fb708a2037197b5b84ffeaa8f140cb878088fbecd6ab042ad26a7691bd2cf",
+      "plda_mu.npy": "d286d48acf99bbc1ed1502fed0a3e361ae5626ce1870c8be9f7397c5e47886c6",
+      "plda_psi.npy": "d7128c9ed2f28a9781971805131129f077c04f948e2df12e52dcdb99f2b4e5f5",
+      "plda_tr.npy": "e700b68cb319de3fafb5fa093eb9222c23c447084741f8d3a533640d425510ee",
+      "segmentation-3.0.safetensors": "88e7883cf56f679170e162419efddf970f929915281ebce80e351c42b5a7115d",
+      "wespeaker-multimask-tail.safetensors": "b97b090ceebcf10924732ad4552a2d867d76d38dcc1409a13687a6ba71ff1ef3",
+      "wespeaker-voxceleb-resnet34.min_num_samples.txt": "e4df891c484d7abb985dadf539fa1883a646dab6337af5cae4159c587b7050cc"
+    }
+  },
+  "whisper-base.en": {
+    "bytes": 147964211,
+    "revision": "5359861c739e955e79d9a303bcbc70fb988958b1",
+    "sha256": {
+      "ggml-base.en.bin": "a03779c86df3323075f5e796cb2ce5029f00ec8869eee3fdfb897afe36c6d002"
+    }
+  },
+  "whisper-small.en": {
+    "bytes": 487614201,
+    "revision": "5359861c739e955e79d9a303bcbc70fb988958b1",
+    "sha256": {
+      "ggml-small.en.bin": "c6138d6d58ecc8322097e0f987c32f1be8bb0a18532a3f88f734d1bbf9c41e5d"
+    }
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT data FROM voice_examples WHERE ?1 IS NULL OR profile_id=?1 ORDER BY id\n",
+  "describe": {
+    "columns": [
+      {
+        "name": "data",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "b37015c772c361a224d6636ee8525f990a634865065236adf183d943edcceb7b"
+}

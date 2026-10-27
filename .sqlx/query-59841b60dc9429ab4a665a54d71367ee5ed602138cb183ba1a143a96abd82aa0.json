@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO shortcuts(id,data) VALUES(?1,?2)\n",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "59841b60dc9429ab4a665a54d71367ee5ed602138cb183ba1a143a96abd82aa0"
+}

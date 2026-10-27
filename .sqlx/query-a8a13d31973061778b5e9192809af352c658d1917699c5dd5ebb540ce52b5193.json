@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT c.data,c.profile_id FROM corrections c JOIN segments s ON s.id=c.segment_id WHERE s.recording_id=?1 ORDER BY c.sequence\n",
+  "describe": {
+    "columns": [
+      {
+        "name": "data",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "profile_id",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      true
+    ]
+  },
+  "hash": "a8a13d31973061778b5e9192809af352c658d1917699c5dd5ebb540ce52b5193"
+}

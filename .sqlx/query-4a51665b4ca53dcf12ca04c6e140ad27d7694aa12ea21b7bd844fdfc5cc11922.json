@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO runs(id,recording_id,kind,status,data) VALUES(?1,?2,?3,?4,?5)\n",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "4a51665b4ca53dcf12ca04c6e140ad27d7694aa12ea21b7bd844fdfc5cc11922"
+}

@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT data FROM segments WHERE recording_id=?1 AND (\n run_id IN (\n   SELECT r.id FROM runs r WHERE r.recording_id=?1 AND r.status='completed' AND r.kind='transcription'\n   AND r.rowid=(SELECT MAX(n.rowid) FROM runs n WHERE n.recording_id=r.recording_id AND n.status='completed' AND n.kind='transcription' AND json_extract(n.data,'$.configuration.track.id') IS json_extract(r.data,'$.configuration.track.id'))\n ) OR (run_id='import:'||?1 AND NOT EXISTS (SELECT 1 FROM runs WHERE recording_id=?1 AND kind='transcription' AND status='completed'))\n) ORDER BY start_ms IS NULL,start_ms,ordinal,id\n",
+  "describe": {
+    "columns": [
+      {
+        "name": "data",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "bb5fc395dd092b09a9c1728ca6f7f7b03f0f048f498e6f290d10a78d215b7d2a"
+}

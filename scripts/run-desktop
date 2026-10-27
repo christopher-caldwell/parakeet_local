@@ -1,0 +1,13 @@
+#!/bin/sh
+set -eu
+# Provisioning/migrations remain explicit CLI operations.
+if [ "$#" -ne 1 ]; then
+  echo 'Usage: scripts/run-desktop <existing-data-root>' >&2
+  exit 2
+fi
+parakeet_root=$(cd "$1" && pwd)
+if [ ! -f "$parakeet_root/parakeet.db" ]; then
+  echo 'No library database. Run parakeet db create, then parakeet db migrate with this data root.' >&2
+  exit 1
+fi
+PARAKEET_DATA_ROOT="$parakeet_root" exec 'target/Parakeet Local.app/Contents/MacOS/ParakeetLocal'

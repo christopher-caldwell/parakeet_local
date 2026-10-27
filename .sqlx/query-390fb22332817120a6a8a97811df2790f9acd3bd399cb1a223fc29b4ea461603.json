@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT data FROM speaker_suggestions WHERE (?1 IS NULL OR recording_id=?1) ORDER BY rowid\n",
+  "describe": {
+    "columns": [
+      {
+        "name": "data",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "390fb22332817120a6a8a97811df2790f9acd3bd399cb1a223fc29b4ea461603"
+}

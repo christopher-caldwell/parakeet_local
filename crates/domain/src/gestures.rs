@@ -1,0 +1,139 @@
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Shortcut {
+    pub id: String,
+    pub key: String,
+    pub modifiers: Vec<String>,
+    pub enabled: bool,
+}
+impl Shortcut {
+    pub fn validate(&self) -> Result<(), crate::ValidationError> {
+        if self.id.is_empty()
+            || self.key.is_empty()
+            || self
+                .modifiers
+                .iter()
+                .any(|m| !["cmd", "ctrl", "alt", "shift"].contains(&m.as_str()))
+        {
+            return Err(crate::ValidationError(
+                "shortcut needs an ID, key, and canonical cmd/ctrl/alt/shift modifiers".into(),
+            ));
+        }
+        let key = self.key.to_lowercase();
+        let supported = [
+            "home", "end", "pageup", "pagedown", "space", "escape", "f1", "f2", "f3", "f4", "f5",
+            "f6", "f7", "f8", "f9", "f10", "f11", "f12",
+        ];
+        if !supported.contains(&key.as_str()) {
+            return Err(crate::ValidationError("native shortcuts currently support Home/End/PageUp/PageDown/Space/Escape and F1–F12".into()));
+        }
+        if self
+            .modifiers
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+            != self.modifiers.len()
+        {
+            return Err(crate::ValidationError("shortcut modifier repeated".into()));
+        }
+        if self.enabled && self.modifiers.iter().any(|m| m == "cmd") && key == "space" {
+            return Err(crate::ValidationError(
+                "Command-Space conflicts with the standard macOS Spotlight shortcut".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn conflicts(&self, other: &Self) -> bool {
+        let mut a = self.modifiers.clone();
+        a.sort();
+        a.dedup();
+        let mut b = other.modifiers.clone();
+        b.sort();
+        b.dedup();
+        self.enabled && other.enabled && self.key.eq_ignore_ascii_case(&other.key) && a == b
+    }
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InsertionTarget {
+    pub bundle_id: String,
+    pub process_id: i32,
+    pub element_token: String,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GestureEffect {
+    None,
+    Start(InsertionTarget),
+    Finish(InsertionTarget),
+    Cancel,
+}
+#[derive(Debug, Clone, Default)]
+pub struct HoldGesture {
+    owner: Option<String>,
+    target: Option<InsertionTarget>,
+    deadline_ms: u64,
+}
+impl HoldGesture {
+    pub fn down(&mut self, binding: &str, target: InsertionTarget, now_ms: u64) -> GestureEffect {
+        if self.owner.is_some() {
+            return GestureEffect::None;
+        }
+        self.owner = Some(binding.into());
+        self.target = Some(target.clone());
+        self.deadline_ms = now_ms.saturating_add(120_000);
+        GestureEffect::Start(target)
+    }
+    pub fn up(&mut self, binding: &str) -> GestureEffect {
+        if self.owner.as_deref() != Some(binding) {
+            return GestureEffect::None;
+        }
+        self.owner = None;
+        self.target
+            .take()
+            .map(GestureEffect::Finish)
+            .unwrap_or(GestureEffect::None)
+    }
+    pub fn cancel(&mut self) -> GestureEffect {
+        self.owner = None;
+        self.target = None;
+        GestureEffect::Cancel
+    }
+    pub fn tick(&mut self, now_ms: u64) -> GestureEffect {
+        if self.owner.is_some() && now_ms >= self.deadline_ms {
+            self.cancel()
+        } else {
+            GestureEffect::None
+        }
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn target() -> InsertionTarget {
+        InsertionTarget {
+            bundle_id: "com.example".into(),
+            process_id: 1,
+            element_token: "focus".into(),
+        }
+    }
+    #[test]
+    fn ownership_repeat_and_target_are_stable() {
+        let mut g = HoldGesture::default();
+        assert!(matches!(
+            g.down("home", target(), 0),
+            GestureEffect::Start(_)
+        ));
+        assert_eq!(g.down("home", target(), 1), GestureEffect::None);
+        assert_eq!(g.down("f6", target(), 2), GestureEffect::None);
+        assert_eq!(g.up("f6"), GestureEffect::None);
+        assert_eq!(g.up("home"), GestureEffect::Finish(target()));
+    }
+    #[test]
+    fn lost_release_cancels_without_paste() {
+        let mut g = HoldGesture::default();
+        g.down("home", target(), 0);
+        assert_eq!(g.tick(120_000), GestureEffect::Cancel);
+        assert_eq!(g.up("home"), GestureEffect::None);
+    }
+}

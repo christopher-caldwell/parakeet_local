@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO tracks(id,recording_id,data) VALUES(?1,?2,?3)\n",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "77e1b85966886f41096450216192690503756567ffd4b53ebae214243f9a7911"
+}

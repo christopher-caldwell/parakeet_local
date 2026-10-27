@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO corrections(id,segment_id,profile_id,data)\nSELECT ?1,?2,?3,?4 WHERE (SELECT COUNT(*) FROM corrections WHERE segment_id=?2)=?5\n",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "6749849a7d2decc9ba96270186a232e69ae21937227edeeab392ceb2e7b1bec0"
+}

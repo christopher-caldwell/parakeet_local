@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO dictations(id,recording_id,data) VALUES(?1,?2,?3)\n",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "e8033d9aac8c56b6daa1ad8ee9813e292440d22ff65df539fe8786a49b68791f"
+}

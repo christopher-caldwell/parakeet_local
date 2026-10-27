@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE recordings SET title_override=?2 WHERE id=?1\n",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "ceb9fce4c937af2950637a26ed98afb103259da374502eec0524f885229e9c9a"
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO segments(id,recording_id,run_id,start_ms,ordinal,data) VALUES(?1,?2,?3,?4,?5,?6)\n",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": []
+  },
+  "hash": "1d333c8834fbea4efad2a5c0e98a9a9e6d9700174e5e070ebfca7fde2d9d8903"
+}

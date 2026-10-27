@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO voice_examples(id,profile_id,data) VALUES(?1,?2,?3) ON CONFLICT(id) DO NOTHING\n",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "9f1213b19e552ee83baef9f3f52db8514530b4505d6aad776cb2f70d7619a00e"
+}

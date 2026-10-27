@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO suggestion_resolutions(id,suggestion_id,profile_id,data)\nSELECT ?1,?2,?3,?4 WHERE (SELECT COUNT(*) FROM suggestion_resolutions WHERE suggestion_id=?2)=?5\n",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "1839e0085ba01b57c16b5a524580b62f0509c19e150239b6ef850177222fe33c"
+}

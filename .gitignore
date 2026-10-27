@@ -1,0 +1,12 @@
+/target/
+/.references/
+/.local/
+/.schema.db*
+*.wav
+*.m4a
+*.mp3
+.DS_Store
+
+/.local-*.log
+__pycache__/
+*.pyc

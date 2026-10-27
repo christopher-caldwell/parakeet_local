@@ -1,0 +1,27 @@
+#!/bin/sh
+set -eu
+scripts/cargo build -p parakeet-cli -p parakeet-desktop
+scripts/build-native
+scripts/build-model-runtime
+bundle='target/Parakeet Local.app'
+mkdir -p "$bundle/Contents/MacOS" "$bundle/Contents/Resources"
+cp target/debug/parakeet-desktop "$bundle/Contents/MacOS/.ParakeetLocal.new"
+mv -f "$bundle/Contents/MacOS/.ParakeetLocal.new" "$bundle/Contents/MacOS/ParakeetLocal"
+cp target/native/parakeet-bridge "$bundle/Contents/MacOS/parakeet-bridge"
+cp target/native/parakeet-model-runtime "$bundle/Contents/MacOS/parakeet-model-runtime"
+cat > "$bundle/Contents/Info.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleIdentifier</key><string>dev.caldwell.parakeet-local</string>
+<key>CFBundleName</key><string>Parakeet Local</string>
+<key>CFBundleExecutable</key><string>ParakeetLocal</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+<key>CFBundleVersion</key><string>1</string>
+<key>CFBundleShortVersionString</key><string>0.1.0</string>
+<key>LSMinimumSystemVersion</key><string>14.0</string>
+<key>NSMicrophoneUsageDescription</key><string>Record speech locally from your explicitly selected microphone.</string>
+<key>NSHighResolutionCapable</key><true/>
+</dict></plist>
+PLIST
+codesign --force --deep --sign - "$bundle"

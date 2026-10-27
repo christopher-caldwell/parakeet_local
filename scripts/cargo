@@ -1,0 +1,5 @@
+#!/bin/sh
+set -eu
+# Homebrew cargo otherwise finds an older Homebrew rustc before rustup's toolchain.
+toolchain_bin=$(dirname "$(rustup which --toolchain 1.99.1 cargo)")
+PATH="$toolchain_bin:$PATH" exec "$toolchain_bin/cargo" "$@"

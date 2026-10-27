@@ -1,0 +1,62 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id, source_key, source_kind, source_title, title_override, created_at, duration_ms, metadata FROM recordings\nWHERE ?1 IS NULL OR instr(lower(COALESCE(title_override,source_title)),lower(?1))>0 OR id IN (SELECT recording_id FROM segments WHERE instr(lower(json_extract(data,'$.text')),lower(?1))>0)\nORDER BY created_at DESC,id\n",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "source_key",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "source_kind",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "source_title",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "title_override",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "created_at",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "duration_ms",
+        "ordinal": 6,
+        "type_info": "Integer"
+      },
+      {
+        "name": "metadata",
+        "ordinal": 7,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "63a9137a76eba471d0e2078b601e476dac4721aad3c62c4077f49413518fa09d"
+}

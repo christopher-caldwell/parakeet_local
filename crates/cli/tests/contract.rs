@@ -1,0 +1,138 @@
+use serde_json::{Value, json};
+use std::{path::Path, process::Command};
+fn run(root: &Path, args: &[&str]) -> (i32, Value) {
+    let output = Command::new(env!("CARGO_BIN_EXE_parakeet"))
+        .arg("--data-root")
+        .arg(root)
+        .args(args)
+        .output()
+        .unwrap();
+    let data: Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|_| {
+        panic!(
+            "invalid stdout: {}",
+            String::from_utf8_lossy(&output.stdout)
+        )
+    });
+    assert_eq!(data["schema_version"], 1);
+    (output.status.code().unwrap(), data)
+}
+#[test]
+fn health_and_import_plan_do_not_initialize_storage() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("absent");
+    let (code, result) = run(&root, &["doctor"]);
+    assert_eq!(code, 0);
+    assert_eq!(result["data"]["database"]["initialized"], false);
+    assert!(!root.exists());
+    let source = tmp.path().join("source");
+    std::fs::create_dir(&source).unwrap();
+    std::fs::write(
+        source.join("manifest.json"),
+        json!({"meeting":{"id":"fixture","title":"Source title","createdAt":"2026-01-01"}})
+            .to_string(),
+    )
+    .unwrap();
+    let original = std::fs::read(source.join("manifest.json")).unwrap();
+    let (code, result) = run(
+        &root,
+        &["meetings", "import", source.to_str().unwrap(), "--dry-run"],
+    );
+    assert_eq!(code, 0);
+    assert_eq!(result["data"]["recordings"].as_array().unwrap().len(), 1);
+    assert!(!root.exists());
+    assert_eq!(
+        original,
+        std::fs::read(source.join("manifest.json")).unwrap()
+    );
+}
+#[test]
+fn json_errors_idempotency_and_durable_title_override() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("app");
+    assert_eq!(run(&root, &["db", "create"]).0, 0);
+    assert_eq!(run(&root, &["db", "migrate"]).0, 0);
+    let (code, error) = run(&root, &["meetings", "show", "missing"]);
+    assert_eq!(code, 3);
+    assert_eq!(error["error"]["kind"], "not_found");
+    let source = tmp.path().join("source");
+    std::fs::create_dir(&source).unwrap();
+    std::fs::write(
+        source.join("manifest.json"),
+        json!({"meeting":{"id":"fixture","title":"Source title","createdAt":"2026-01-01"}})
+            .to_string(),
+    )
+    .unwrap();
+    std::fs::write(source.join("transcript.json"),json!({"transcriptSegments":[{"startMs":5000,"endMs":6000,"text":"Later"},{"startMs":1000,"endMs":2000,"text":"Earlier"}]}).to_string()).unwrap();
+    let (_, r) = run(&root, &["meetings", "import", source.to_str().unwrap()]);
+    assert_eq!(r["data"]["imported"], 1);
+    let id = r["data"]["recordings"][0].as_str().unwrap();
+    assert_eq!(
+        run(&root, &["meetings", "rename", id, "My explicit title"]).0,
+        0
+    );
+    let (_, r) = run(&root, &["meetings", "import", source.to_str().unwrap()]);
+    assert_eq!(r["data"]["imported"], 0);
+    assert_eq!(r["data"]["existing"], 1);
+    let (_, r) = run(&root, &["meetings", "show", id]);
+    assert_eq!(
+        r["data"]["recording"]["title_override"],
+        "My explicit title"
+    );
+    assert_eq!(r["data"]["segments"][0]["text"], "Earlier");
+    let (code, error) = run(&root, &["does-not-exist"]);
+    assert_eq!(code, 2);
+    assert_eq!(error["error"]["kind"], "invalid_arguments");
+}
+
+#[test]
+fn unverified_personal_labels_cannot_be_scored_as_ground_truth() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("app");
+    assert_eq!(run(&root, &["db", "create"]).0, 0);
+    assert_eq!(run(&root, &["db", "migrate"]).0, 0);
+    let suite = temp.path().join("suite.json");
+    std::fs::write(&suite,json!({"id":"fixture","dataset":"unverified fixture","split":"diagnostic","labels":"unverified_personal","entries":[{"id":"r","audio":"/not/read","reference":"/not/read"}],"models":["whisper-base.en"],"collar_ms":0,"score_overlap":true}).to_string()).unwrap();
+    let (code, error) = run(&root, &["benchmark", "run", suite.to_str().unwrap()]);
+    assert_eq!(code, 2);
+    assert_eq!(error["error"]["kind"], "invalid_input");
+    assert!(
+        error["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("unverified")
+    );
+}
+
+#[test]
+fn audio_settings_inspection_preserves_explicit_device_selection() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("app");
+    assert_eq!(run(&root, &["db", "create"]).0, 0);
+    assert_eq!(run(&root, &["db", "migrate"]).0, 0);
+    assert_eq!(
+        run(
+            &root,
+            &[
+                "dictation",
+                "audio-settings",
+                "--microphone-uid",
+                "fixture-input",
+                "--system",
+                "true"
+            ]
+        )
+        .0,
+        0
+    );
+    let (_, read) = run(&root, &["dictation", "audio-settings"]);
+    assert_eq!(read["data"]["microphone_uid"], "fixture-input");
+    assert_eq!(read["data"]["system_audio"], true);
+    let (_, updated) = run(&root, &["dictation", "audio-settings", "--system", "false"]);
+    assert_eq!(updated["data"]["microphone_uid"], "fixture-input");
+    assert_eq!(updated["data"]["system_audio"], false);
+    let (_, cleared) = run(
+        &root,
+        &["dictation", "audio-settings", "--clear-microphone"],
+    );
+    assert!(cleared["data"]["microphone_uid"].is_null());
+}

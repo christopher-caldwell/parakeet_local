@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT data,profile_id FROM corrections WHERE segment_id=?1 ORDER BY sequence\n",
+  "describe": {
+    "columns": [
+      {
+        "name": "data",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "profile_id",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      true
+    ]
+  },
+  "hash": "cb40e176d1012863ecc001b715c8d61fe4deded00af2a4eaea27ce8df8df6466"
+}

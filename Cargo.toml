@@ -1,0 +1,33 @@
+[workspace]
+resolver = "2"
+members = ["crates/domain", "crates/application", "crates/database", "crates/infrastructure", "crates/cli", "crates/desktop"]
+exclude = ["vendor/gpui", "vendor/gpui-apple", "vendor/gpui-base", "vendor/taffy"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+license = "GPL-3.0-or-later"
+
+[workspace.dependencies]
+parakeet-domain = { path = "crates/domain" }
+parakeet-application = { path = "crates/application" }
+parakeet-database = { path = "crates/database" }
+parakeet-infrastructure = { path = "crates/infrastructure" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+uuid = { version = "1", features = ["v4", "v5", "serde"] }
+chrono = { version = "0.4", default-features = false, features = ["std", "clock", "serde"] }
+async-trait = "0.1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "process", "io-util", "fs", "time", "signal"] }
+sqlx = { version = "=0.8.6", default-features = false, features = ["runtime-tokio-rustls", "sqlite", "macros", "migrate"] }
+
+[patch.crates-io]
+taffy = { path = "vendor/taffy" }
+gpui-pre = { path = "vendor/gpui" }
+gpui-base = { path = "vendor/gpui-base" }
+gpui-pre-apple = { path = "vendor/gpui-apple" }
+
+[profile.dev.package.sha2]
+opt-level = 3

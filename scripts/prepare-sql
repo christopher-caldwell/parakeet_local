@@ -1,0 +1,13 @@
+#!/bin/sh
+set -eu
+python3 - <<'PY'
+from pathlib import Path
+import sqlite3
+p=Path('.schema.db')
+p.unlink(missing_ok=True)
+c=sqlite3.connect(p)
+for m in sorted(Path('crates/database/migrations').glob('*.sql')):
+    c.executescript(m.read_text())
+c.close()
+PY
+SQLX_OFFLINE=false DATABASE_URL=sqlite://.schema.db scripts/cargo sqlx prepare --workspace -- --all-targets

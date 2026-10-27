@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO prompt_profiles(id,bundle_id,data) VALUES(?1,?2,?3) ON CONFLICT(id) DO UPDATE SET bundle_id=excluded.bundle_id,data=excluded.data\n",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "13addff0ab00075a498eae8646ca6cf5af244af18053cee7d8c70affe08f6c6f"
+}

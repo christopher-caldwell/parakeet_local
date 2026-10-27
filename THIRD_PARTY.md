@@ -1,0 +1,13 @@
+# Sources and attribution
+
+The project is GPL-3.0-or-later; the full GPL text is in `LICENSE`. Third-party components retain their own notices and licenses. Models and datasets are not included in Git.
+
+- MacParakeet, Daniel Moon, GPL-3.0, inspected at `590b6c253bd27bc55723f0e8c8394b64467c09de`: product behavior, artifact and CLI contracts, capture/diarization/media reference. No installed MacParakeet binary is required by this application's speech runtime. An isolated, telemetry-disabled installation was used only for public-data comparison.
+- Smaller Talk, Christopher Caldwell, inspected at `19d69563f979a8a80c311fbc0389453f440a390a`: selected GPUI integration foundations. `vendor/gpui`, `vendor/gpui-apple`, `vendor/gpui-base`, and `vendor/taffy` preserve their upstream license files. The input-state accessibility role/value patch is local to this project. See those source directories for existing upstream patches/notices.
+- Control Tower at `d78ff63ac58d0429fdf7da1055b78de18c6aaf5b`: architectural reference for shared application services and independent driving adapters. Its HTTP architecture was not copied.
+- FluidAudio / FluidInference, Apache-2.0, commit `1b0ed50d686873128a4129b3510ce3914c849bab`: the selected local Nemotron source subset is in `native/fluidaudio` with its license and modification notes.
+- speakrs 0.7.0, Whisper/whisper.cpp/whisper-rs and other Rust dependencies are resolved in `Cargo.lock`; their source licenses remain applicable. WeSpeaker: Hongji Wang et al., *Wespeaker: A research and production oriented speaker embedding learning toolkit*, ICASSP 2023. Pyannote: Hervé Bredin, *pyannote.audio 2.1 speaker diarization pipeline: principle, benchmark, and recipe*, Interspeech 2023.
+- Converted weights: OpenAI Whisper / ggerganov GGML (MIT); NVIDIA Nemotron 3 / FluidInference Core ML conversion (OpenMDW-1.1); pyannote Community-1 and WeSpeaker weights (CC BY 4.0 with upstream model-card provenance/access notes). Exact model revisions and public source links are in `docs/audio-models.md`.
+- VoxConverse: Joon Son Chung et al., *Spot the conversation: speaker diarisation in the wild*, Interspeech 2020; official labels/audio access under CC BY 4.0 for research, underlying source video rights remain with their owners. LibriSpeech: Vassil Panayotov et al., *LibriSpeech: an ASR corpus based on public domain audio books*, ICASSP 2015; OpenSLR 12, CC BY 4.0. JFK smoke audio is the public-address sample distributed with whisper.cpp. Big Buck Bunny is the Blender Foundation public test media used for deliberate YouTube import verification.
+
+Private audio, embeddings, names, transcripts and original user records are excluded from these attribution artifacts and public numeric summaries.

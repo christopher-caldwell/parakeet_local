@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM shortcuts\n",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "b5ceea2e2a2dcd15f985f4cbc9559207f2b30b966b9820392fdae61fbca23fbb"
+}

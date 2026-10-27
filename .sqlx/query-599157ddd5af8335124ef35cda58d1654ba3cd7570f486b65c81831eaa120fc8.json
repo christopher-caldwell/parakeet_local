@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT profile_id,data FROM suggestion_resolutions WHERE suggestion_id=?1 ORDER BY sequence\n",
+  "describe": {
+    "columns": [
+      {
+        "name": "profile_id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "data",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      false
+    ]
+  },
+  "hash": "599157ddd5af8335124ef35cda58d1654ba3cd7570f486b65c81831eaa120fc8"
+}

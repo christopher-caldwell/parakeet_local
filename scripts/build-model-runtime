@@ -1,0 +1,8 @@
+#!/bin/sh
+set -eu
+mkdir -p target/native
+parakeet_output="target/native/.parakeet-model-runtime-build-$$"
+trap 'rm -f "$parakeet_output"' EXIT HUP INT TERM
+swiftc -parse-as-library -D Diarizer -O native/fluidaudio/*.swift native/model-runtime.swift -framework CoreML -framework Accelerate -o "$parakeet_output"
+
+mv -f "$parakeet_output" target/native/parakeet-model-runtime
