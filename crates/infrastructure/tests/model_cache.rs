@@ -176,7 +176,8 @@ async fn silence_noise_and_tone_publish_no_text() {
 #[ignore = "requires explicit local model probe root and public speech audio"]
 async fn public_speech_survives_speech_chunking() {
     let root = PathBuf::from(std::env::var_os("PARAKEET_MODEL_PROBE_ROOT").expect("model copies"));
-    let audio = PathBuf::from(std::env::var_os("PARAKEET_MODEL_PROBE_AUDIO").expect("public audio"));
+    let audio =
+        PathBuf::from(std::env::var_os("PARAKEET_MODEL_PROBE_AUDIO").expect("public audio"));
     let models = Arc::new(ModelFiles::new(root));
     assert!(models.verify("whisper-base.en").await.unwrap().verified);
     let engine = LocalSpeech::new(models, PathBuf::from("unused-native-helper"));
@@ -204,7 +205,11 @@ async fn public_speech_survives_speech_chunking() {
         error: None,
     };
     let output = engine.process(&request, track, &run).await.unwrap();
-    let words: usize = output.segments.iter().map(|s| s.text.split_whitespace().count()).sum();
+    let words: usize = output
+        .segments
+        .iter()
+        .map(|s| s.text.split_whitespace().count())
+        .sum();
     println!(
         "audio={}s speech={}s chunks={} words={words} rtf={}",
         output.metrics["audio_seconds"],

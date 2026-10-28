@@ -90,6 +90,9 @@ pub struct RecordingDetail {
     pub attributions: Vec<parakeet_domain::reconciliation::SegmentAttribution>,
     #[serde(default)]
     pub word_attributions: Vec<parakeet_domain::word_timing::WordAttribution>,
+    /// Me / Them / Unknown per segment: where the audio came from, never a confirmed identity.
+    #[serde(default)]
+    pub source_attributions: Vec<parakeet_domain::reconciliation::SourceAttribution>,
     pub unmapped_corrected_segments: Vec<String>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -307,6 +310,17 @@ impl LibraryService {
         }
         let intervals = latest.into_values().flatten().collect::<Vec<_>>();
         d.attributions = parakeet_domain::reconciliation::reconcile(&d.segments, &intervals);
+        let bleed: Vec<parakeet_domain::reconciliation::BleedSpan> = serde_json::from_value(
+            d.recording.metadata["meeting_analysis"]["bleed"]["spans"].clone(),
+        )
+        .unwrap_or_default();
+        d.source_attributions = parakeet_domain::reconciliation::attribute_sources(
+            &d.segments,
+            &d.attributions,
+            &intervals,
+            &d.tracks,
+            &bleed,
+        );
         d.word_attributions = parakeet_domain::word_timing::reconcile_words(
             &d.segments,
             &intervals,
@@ -338,9 +352,19 @@ impl LibraryService {
         for segment in d.segments {
             let correction = parakeet_domain::corrections::resolve(&segment.id, &d.corrections);
             let words = correction.text.as_deref().unwrap_or(&segment.text);
+            let source = d
+                .source_attributions
+                .iter()
+                .find(|a| a.segment_id == segment.id)
+                .map(|a| match a.category.as_str() {
+                    "me" => "Me (microphone)",
+                    "them" => "Them (system audio)",
+                    _ => "Unknown source",
+                })
+                .unwrap_or("Unknown source");
             let speaker = match correction.speaker.as_ref() {
                 Some(parakeet_domain::corrections::SpeakerOverride::Profile(id)) => id.as_str(),
-                _ => "Unknown",
+                _ => source,
             };
             let time = segment
                 .start_ms

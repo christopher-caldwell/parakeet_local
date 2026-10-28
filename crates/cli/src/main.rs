@@ -946,15 +946,20 @@ async fn execute(cli: Cli) -> anyhow::Result<Value> {
         guarded_audio.clone(),
         Arc::new(parakeet_infrastructure::audio::LocalAudioIdentity),
     );
-    let analysis = Arc::new(parakeet_application::analysis::MeetingAnalysisService::new(
-        store.clone(),
-        store.clone(),
-        processing.clone(),
-        speakers.clone(),
-        models.clone(),
-        Arc::new(parakeet_infrastructure::audio::LocalAudioIdentity),
-        ownership.clone(),
-    ));
+    let analysis = Arc::new(
+        parakeet_application::analysis::MeetingAnalysisService::new(
+            store.clone(),
+            store.clone(),
+            processing.clone(),
+            speakers.clone(),
+            models.clone(),
+            Arc::new(parakeet_infrastructure::audio::LocalAudioIdentity),
+            ownership.clone(),
+        )
+        .with_bleed_detection(Arc::new(
+            parakeet_infrastructure::bleed::LocalBleedDetection,
+        )),
+    );
     let meeting = parakeet_application::meeting::MeetingService::new(
         Arc::new(parakeet_application::capture::CaptureService::new(
             native.clone(),

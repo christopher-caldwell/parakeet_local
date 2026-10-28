@@ -797,6 +797,19 @@ impl Workbench {
             },
         };
         let imported = correction.speaker.is_none() && imported_claim(segment).is_some();
+        let source_label = detail.row_attributions[index]
+            .and_then(|i| detail.source_attributions.get(i))
+            .map(|a| match a.category.as_str() {
+                "me" => ("Me · microphone".to_owned(), MUTED),
+                "them" => ("Them · system audio".to_owned(), MUTED),
+                _ => (
+                    format!(
+                        "Unknown source · {}",
+                        a.reasons.join(", ").replace('_', " ")
+                    ),
+                    WARNING,
+                ),
+            });
         let suggested = correction.speaker.is_none()
             && !imported
             && suggested_name(self, detail, segment).is_some();
@@ -840,6 +853,9 @@ impl Workbench {
                     })
                     .when(suggested, |row| {
                         row.child(pill("Suggested · not confirmed", ACCENT))
+                    })
+                    .when_some(source_label, |row, (text, color)| {
+                        row.child(pill(text, color))
                     })
                     .child(caption(source))
                     .child(

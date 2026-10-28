@@ -46,6 +46,9 @@ pub struct MeetingAnalysis {
     pub candidates: Vec<EnrollmentCandidate>,
     pub suggestions: BTreeMap<String, String>,
     pub failures: Vec<String>,
+    /// Where the microphone only carried far-end speech; used to withhold "Me".
+    #[serde(default)]
+    pub bleed: Option<BleedSummary>,
     pub updated_at: String,
 }
 impl MeetingAnalysis {
@@ -125,7 +128,26 @@ impl AnalyzeMeetingError {
         }
     }
 }
+/// Stretches of the microphone mostly explained by the system source (far-end speech heard
+/// through speakers). Recorded as evidence; the audio and transcripts are never altered.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BleedSummary {
+    pub method: String,
+    pub delay_ms: i64,
+    pub analyzed_seconds: f64,
+    pub flagged_seconds: f64,
+    pub spans: Vec<parakeet_domain::reconciliation::BleedSpan>,
+}
+#[async_trait]
+pub trait BleedDetection: Send + Sync {
+    async fn detect(
+        &self,
+        microphone: &AudioTrack,
+        system: &AudioTrack,
+    ) -> Result<BleedSummary, CapabilityError>;
+}
 pub struct MeetingAnalysisService {
+    bleed: Option<Arc<dyn BleedDetection>>,
     queries: Arc<dyn LibraryQueries>,
     writes: Arc<dyn MeetingAnalysisWrites>,
     processing: Arc<ProcessingService>,
@@ -145,6 +167,7 @@ impl MeetingAnalysisService {
         ownership: Arc<dyn ProcessingOwnership>,
     ) -> Self {
         Self {
+            bleed: None,
             queries,
             writes,
             processing,
@@ -153,6 +176,11 @@ impl MeetingAnalysisService {
             identity,
             ownership,
         }
+    }
+    /// Optional: lets analysis record where the microphone only carries the system source.
+    pub fn with_bleed_detection(mut self, detector: Arc<dyn BleedDetection>) -> Self {
+        self.bleed = Some(detector);
+        self
     }
     pub async fn show(
         &self,
@@ -195,7 +223,7 @@ impl MeetingAnalysisService {
         input: AnalyzeMeetingInput,
         recipe: Option<AnalysisRecipe>,
     ) -> Result<MeetingAnalysis, AnalyzeMeetingError> {
-        let driver = Self::new(
+        let mut driver = Self::new(
             self.queries.clone(),
             self.writes.clone(),
             self.processing.clone(),
@@ -204,6 +232,7 @@ impl MeetingAnalysisService {
             self.identity.clone(),
             self.ownership.clone(),
         );
+        driver.bleed = self.bleed.clone();
         tokio::spawn(async move { driver.drive(input, recipe).await })
             .await
             .map_err(CapabilityError::new)?
@@ -359,6 +388,7 @@ impl MeetingAnalysisService {
                 candidates: vec![],
                 suggestions: BTreeMap::new(),
                 failures: vec![],
+                bleed: None,
                 updated_at: now(),
             }
         };
@@ -558,6 +588,7 @@ impl MeetingAnalysisService {
                 self.save(Some(&prior), plan).await?;
             }
         }
+        self.check_bleed(plan).await?;
         let prior = plan.clone();
         plan.stage = "preparing_speakers".into();
         self.save(Some(&prior), plan).await?;
@@ -605,6 +636,42 @@ impl MeetingAnalysisService {
             }
         }
         Ok(())
+    }
+}
+impl MeetingAnalysisService {
+    /// Best effort: a missing detector, a single source or a failing check never fails analysis;
+    /// without the evidence, "Me" simply relies on the other safeguards.
+    async fn check_bleed(&self, plan: &mut MeetingAnalysis) -> Result<(), AnalyzeMeetingError> {
+        let Some(detector) = &self.bleed else {
+            return Ok(());
+        };
+        if plan.bleed.is_some() {
+            return Ok(());
+        }
+        let mic = plan
+            .sources
+            .iter()
+            .map(|s| &s.track)
+            .find(|t| t.kind == TrackKind::Microphone);
+        let system = plan
+            .sources
+            .iter()
+            .map(|s| &s.track)
+            .find(|t| t.kind == TrackKind::System);
+        let (Some(mic), Some(system)) = (mic.cloned(), system.cloned()) else {
+            return Ok(());
+        };
+        let prior = plan.clone();
+        plan.stage = "checking_bleed".into();
+        self.save(Some(&prior), plan).await?;
+        let prior = plan.clone();
+        match detector.detect(&mic, &system).await {
+            Ok(summary) => plan.bleed = Some(summary),
+            Err(error) => plan
+                .failures
+                .push(format!("bleed check unavailable: {error}")),
+        }
+        self.save(Some(&prior), plan).await
     }
 }
 fn read_plan(recording: &Recording) -> Result<Option<MeetingAnalysis>, ValidationError> {
