@@ -53,28 +53,6 @@ fn reason_label(reason: StorageProtection) -> &'static str {
         MultipleHardLinks => "Files with multiple links",
     }
 }
-pub(super) fn cleanup_state_label(
-    state: parakeet_application::cleanup::CleanupState,
-) -> &'static str {
-    use parakeet_application::cleanup::CleanupState::*;
-    match state {
-        Reviewed => "Ready to stage",
-        Applying => "Moving to recovery",
-        Staged => "In recovery",
-        Restoring => "Restoring",
-        Restored => "Restored",
-        NeedsAttention => "Needs attention",
-    }
-}
-fn review_date(raw: &str) -> String {
-    chrono::DateTime::parse_from_rfc3339(raw)
-        .map(|d| {
-            d.with_timezone(&chrono::Local)
-                .format("%b %-d, %H:%M:%S")
-                .to_string()
-        })
-        .unwrap_or_else(|_| raw.chars().take(20).collect())
-}
 impl Workbench {
     pub(super) fn preview_storage(
         &mut self,
@@ -86,14 +64,12 @@ impl Workbench {
         }
         self.storage_busy = true;
         let service = self.storage.clone();
-        let cleanup = self.cleanup.clone();
         self.task(
             "Measuring local storage without changing files",
             async move {
                 let result = async {
-                    Ok((
-                        Arc::new(service.preview(policy).await.map_err(|e| e.to_string())?),
-                        cleanup.list().await.map_err(|e| e.to_string())?,
+                    Ok(Arc::new(
+                        service.preview(policy).await.map_err(|e| e.to_string())?,
                     ))
                 }
                 .await;
@@ -105,7 +81,7 @@ impl Workbench {
     pub(super) fn storage_view(&self, cx: &mut Context<Self>) -> Div {
         let mut view = div().flex().flex_col().gap_3().child(section(
             "Storage",
-            "Inspect usage, review completed processing files, and restore staged files.",
+            "Inspect how much space the library uses.",
         ));
         view = view.child(
             button("refresh-storage", "Refresh saved-policy preview")
@@ -161,10 +137,9 @@ impl Workbench {
                         })),
                 ),
         );
-        view = view.child(self.cleanup_panel(cx));
         let Some(preview) = &self.storage_preview else {
             return view.child(caption(
-                "Refresh to measure storage. A saved policy does not enable automatic cleanup.",
+                "Refresh to measure storage. A saved policy never removes files.",
             ));
         };
         view=view.child(section(if preview.hypothetical{"Hypothetical retention preview"}else{"Saved-policy preview"},policy_label(&preview.effective_policy)))
@@ -290,162 +265,5 @@ impl Workbench {
                     );
                 })),
         )
-    }
-}
-
-impl Workbench {
-    pub(super) fn run_cleanup(
-        &mut self,
-        id: String,
-        digest: Option<String>,
-        cx: &mut Context<Self>,
-    ) {
-        if self.storage_busy {
-            return;
-        }
-        self.storage_busy = true;
-        let service = self.cleanup.clone();
-        self.task(
-            "Updating reviewed processing files",
-            async move {
-                let result = async {
-                    let review = if let Some(digest) = digest {
-                        service
-                            .apply(parakeet_application::cleanup::ApplyCleanupInput {
-                                id: id.to_string(),
-                                review_digest: digest.to_string(),
-                                confirmed: true,
-                            })
-                            .await
-                            .map_err(|e| e.to_string())?
-                    } else {
-                        service.restore(&id).await.map_err(|e| e.to_string())?
-                    };
-                    Ok((
-                        service.list().await.map_err(|e| e.to_string())?,
-                        Some(review),
-                    ))
-                }
-                .await;
-                Ok(Update::CleanupReviews(result))
-            },
-            cx,
-        );
-    }
-    fn cleanup_panel(&self, cx: &mut Context<Self>) -> Div {
-        use parakeet_application::cleanup::CleanupState;
-        let mut view=div().p_4().rounded_lg().bg(rgb(PANEL)).flex().flex_col().gap_2()
-            .child(section("Reviewed cleanup", "Stage completed processing files in recovery, then restore when needed. Staging frees no disk space; permanent deletion is not available."));
-        let policy = self
-            .storage_preview
-            .as_ref()
-            .map(|p| p.effective_policy.clone());
-        view = view.child(
-            button("review-cleanup", "Review up to 40 eligible files")
-                .self_start()
-                .disabled(self.storage_busy || policy.is_none())
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    if this.storage_busy {
-                        return;
-                    }
-                    this.storage_busy = true;
-                    let service = this.cleanup.clone();
-                    let policy = policy.clone();
-                    this.task(
-                        "Hashing a concrete cleanup review",
-                        async move {
-                            let result = async {
-                                let review = service
-                                    .review(parakeet_application::cleanup::ReviewCleanupInput {
-                                        policy,
-                                        limit: 40,
-                                    })
-                                    .await
-                                    .map_err(|e| e.to_string())?;
-                                Ok((service.list().await.map_err(|e| e.to_string())?, review))
-                            }
-                            .await;
-                            Ok(Update::CleanupReviews(result))
-                        },
-                        cx,
-                    );
-                })),
-        );
-        if !self.cleanup_reviews.is_empty() {
-            view = view.child(caption(
-                "Recent reviews · choose one to inspect its exact file list",
-            ));
-        }
-        for review in &self.cleanup_reviews {
-            let id = review.id.clone();
-            let label = format!(
-                "{} · {} {} · {}",
-                cleanup_state_label(review.state),
-                review.files.len(),
-                if review.files.len() == 1 {
-                    "file"
-                } else {
-                    "files"
-                },
-                review_date(&review.reviewed_at)
-            );
-            view = view.child(
-                button(SharedString::from(format!("cleanup-{id}")), label)
-                    .self_start()
-                    .disabled(self.storage_busy)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.cleanup_selected =
-                            this.cleanup_reviews.iter().find(|r| r.id == id).cloned();
-                        this.confirm_action = None;
-                        cx.notify();
-                    })),
-            );
-        }
-        if let Some(review) = &self.cleanup_selected {
-            view = view
-                .child(caption(format!(
-                    "Review {} · {} · {}",
-                    review.id,
-                    cleanup_state_label(review.state),
-                    size_label(review.files.iter().map(|f| f.bytes).sum())
-                )))
-                .child(caption(format!("SHA-256 review digest: {}", review.digest)));
-            for file in &review.files {
-                view = view.child(caption(format!(
-                    "{} · {}",
-                    file.relative_path,
-                    size_label(file.bytes)
-                )));
-            }
-            for error in &review.errors {
-                view = view.child(pill(error.clone(), WARNING));
-            }
-            let id = review.id.clone();
-            let digest = review.digest.clone();
-            if review.state == CleanupState::Reviewed {
-                view = view.child(
-                    button("stage-cleanup", "Move reviewed files to recovery…")
-                        .self_start()
-                        .disabled(self.storage_busy)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.confirm_action = Some(shell::ConfirmAction::StageCleanup {
-                                id: id.clone(),
-                                digest: digest.clone(),
-                            });
-                            cx.notify();
-                        })),
-                );
-            } else if review.state != CleanupState::Restored {
-                view = view.child(
-                    button("restore-cleanup", "Restore retained files")
-                        .self_start()
-                        .disabled(self.storage_busy)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.run_cleanup(id.clone(), None, cx)
-                        })),
-                );
-            }
-        }
-        view
     }
 }

@@ -12,7 +12,7 @@ parakeet --data-root <existing-root> storage set-policy --completed-scratch-days
 parakeet --data-root <existing-root> storage set-policy --keep-all --expected-revision 1
 ```
 
-`usage`, `policy` and `preview` are read-only. An age/keep-all argument overrides only that preview. `set-policy` saves a preview threshold and requires the observed revision; another writer winning returns conflict/exit 5. Invalid ages return exit 2. The threshold accepts 1–3650 elapsed 24-hour days after a run's completion, independent of source recording date and file mtime. A preview-policy save grants no cleanup permission. There is no automatic removal. Preview JSON exposes `automatic_cleanup: false` and `execution_available: false`: an observational preview cannot be executed directly. The separate [reviewed staging/restore workflow](cleanup.md) now supplies a concrete reviewed operation; staging does not free disk space.
+`usage`, `policy` and `preview` are read-only. An age/keep-all argument overrides only that preview. `set-policy` saves a preview threshold and requires the observed revision; another writer winning returns conflict/exit 5. Invalid ages return exit 2. The threshold accepts 1–3650 elapsed 24-hour days after a run's completion, independent of source recording date and file mtime. A preview-policy save grants no cleanup permission. There is no automatic removal. Preview JSON exposes `automatic_cleanup: false` and `execution_available: false`: an observational preview cannot be executed directly.
 
 ## Accounting scope
 
@@ -38,4 +38,3 @@ The isolated library inventory observed approximately 1.38 GB of root file sizes
 
 Explicit schema-3-to-4 migration was tested on an isolated snapshot, then on the personal Parakeet Local library after a SQLite backup. All 13 pre-existing table content hashes were unchanged. The personal library remains 18 recordings/three confirmed examples, Keep all/revision 0, with automatic transcription still off. Original MacParakeet sources remain read-only. Private receipts are under `.local/storage-pass/`; public aggregates are in `benchmarks/results/2026-10-27-storage-preview.json`.
 
-Next independent step: reviewed, recoverable cleanup of eligible completed scratch with fresh revalidation and restore support. That code can be developed using current fixtures; applying any policy to personal data remains an explicit action. Raw/source audio removal, model removal, abandoned-job recovery and speaker deletion remain separate operations.

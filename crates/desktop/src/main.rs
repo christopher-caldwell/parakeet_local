@@ -77,24 +77,7 @@ enum Update {
     Dictations(Vec<DictationReceipt>),
     Message(String),
     Jobs(Vec<ProcessingRun>),
-    StoragePreview(
-        Result<
-            (
-                Arc<parakeet_application::storage::RetentionPreview>,
-                Vec<parakeet_application::cleanup::CleanupReview>,
-            ),
-            String,
-        >,
-    ),
-    CleanupReviews(
-        Result<
-            (
-                Vec<parakeet_application::cleanup::CleanupReview>,
-                Option<parakeet_application::cleanup::CleanupReview>,
-            ),
-            String,
-        >,
-    ),
+    StoragePreview(Result<Arc<parakeet_application::storage::RetentionPreview>, String>),
     StoragePolicySaved(Result<parakeet_application::storage::RetentionPolicySnapshot, String>),
     Recovered(
         parakeet_application::jobs::ProcessingRecoveryReport,
@@ -127,9 +110,6 @@ struct Workbench {
     recovery: Arc<parakeet_application::jobs::ProcessingRecoveryService>,
     pending_jobs: Vec<ProcessingRun>,
     storage: Arc<parakeet_application::storage::StorageService>,
-    cleanup: Arc<parakeet_application::cleanup::CleanupService<SqliteStore, SqliteStore>>,
-    cleanup_reviews: Vec<parakeet_application::cleanup::CleanupReview>,
-    cleanup_selected: Option<parakeet_application::cleanup::CleanupReview>,
     storage_preview: Option<Arc<parakeet_application::storage::RetentionPreview>>,
     storage_policy: Option<parakeet_application::storage::RetentionPolicySnapshot>,
     storage_days: Entity<InputState>,
@@ -359,8 +339,7 @@ impl Workbench {
                                 return;
                             }
                             Update::Candidates(recording,c) => {if this.requested_recording.as_deref()==Some(recording.as_str()){this.candidates = c;}},
-                            Update::StoragePreview(result) => {this.storage_busy=false;match result {Ok((preview,reviews))=>{this.storage_policy=Some(preview.saved_policy.clone());this.storage_preview=Some(preview);if let Some(selected)=&this.cleanup_selected {this.cleanup_selected=reviews.iter().find(|r|r.id==selected.id).cloned();}this.cleanup_reviews=reviews;},Err(error)=>{this.last_error=Some(error);this.status="Storage inspection failed; no files changed".into();cx.notify();return;}}},
-                            Update::CleanupReviews(result) => {this.storage_busy=false; match result {Ok((reviews,selected))=> {this.cleanup_reviews=reviews;this.cleanup_selected=selected;if let Some(r)=&this.cleanup_selected {this.status=format!("{} · {} files · no space reclaimed",storage::cleanup_state_label(r.state),r.files.len());if !r.errors.is_empty() {this.last_error=Some(r.errors.join("; "));}}else{this.status="No files qualified for this bounded review; no files moved".into();}},Err(error)=>{this.last_error=Some(error);this.status="Cleanup request failed; inspect saved reviews before retrying".into();}}cx.notify();return;},
+                            Update::StoragePreview(result) => {this.storage_busy=false;match result {Ok(preview)=>{this.storage_policy=Some(preview.saved_policy.clone());this.storage_preview=Some(preview);},Err(error)=>{this.last_error=Some(error);this.status="Storage inspection failed; no files changed".into();cx.notify();return;}}},
                             Update::StoragePolicySaved(result) => {this.storage_busy=false;match result {Ok(policy)=>{this.storage_policy=Some(policy);this.storage_preview=None;this.status="Preview policy saved. No files were removed; refresh to inspect it.".into();},Err(error)=>{this.last_error=Some(error);this.status="Preview policy could not be saved; refresh before retrying".into();}}cx.notify();return;},
                             Update::Jobs(jobs) => {this.pending_jobs = jobs;this.load_meeting_plans(cx);},
                             Update::MeetingPlans(plans) => this.meeting_plans = plans,
@@ -2040,22 +2019,13 @@ fn main() -> anyhow::Result<()> {
     let source = Arc::new(MacParakeetArtifacts);
     let models = Arc::new(ModelFiles::new(root.join("models")));
     let engine = Arc::new(LocalSpeech::new(models.clone(), model_runtime_executable()));
-    let guarded_audio = Arc::new(parakeet_infrastructure::cleanup::GuardedAudioWrites {
-        gate: parakeet_infrastructure::cleanup::StorageGate::for_database(
+    let guarded_audio = Arc::new(parakeet_infrastructure::storage_gate::GuardedAudioWrites {
+        gate: parakeet_infrastructure::storage_gate::StorageGate::for_database(
             &root.join("parakeet.db"),
         )?,
         library: store.clone(),
         locations: store.clone(),
     });
-    let cleanup = Arc::new(parakeet_application::cleanup::CleanupService::new(
-        store.clone(),
-        store.clone(),
-        Arc::new(parakeet_infrastructure::cleanup::LocalCleanupFiles::new(
-            root.clone(),
-            root.join("parakeet.db"),
-            models.clone(),
-        )?),
-    ));
     let library = Arc::new(LibraryService::new(
         store.clone(),
         guarded_audio.clone(),
@@ -2301,9 +2271,6 @@ fn main() -> anyhow::Result<()> {
                             recovery,
                             pending_jobs: vec![],
                             storage,
-                            cleanup,
-                            cleanup_reviews: Vec::new(),
-                            cleanup_selected: None,
                             storage_preview: None,
                             storage_policy: None,
                             storage_days,

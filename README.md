@@ -95,4 +95,3 @@ The [native performance guide](docs/ui-performance.md) follows Smaller Talk's lo
 
 The [meeting workflow](docs/meeting-workflow.md) adds explicit automatic local transcription after Stop, durable per-source progress and resume. `meetings finalize ID` resumes saved work without repeating completed sources; `meetings pending-transcriptions` lists unfinished plans. CLI recording opts in with `capture record --transcribe`; `capture settings --transcribe-after-stop true` changes the desktop preference only.
 
-The [reviewed cleanup guide](docs/cleanup.md) covers concrete file reviews, reversible staging and no-overwrite restore through Storage or `storage cleanup`. Staging retains all bytes and frees no space; no automatic or permanent removal is enabled.
