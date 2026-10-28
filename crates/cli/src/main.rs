@@ -380,6 +380,10 @@ enum Speakers {
     Candidates {
         meeting: String,
     },
+    /// Clips worth listening to for each imported label; labels stay unverified claims.
+    ImportedCandidates {
+        meeting: String,
+    },
     /// Name a whole anonymous cluster after listening; undoable as one unit.
     IdentifyCluster {
         recording: String,
@@ -1378,6 +1382,9 @@ async fn execute(cli: Cli) -> anyhow::Result<Value> {
                         })
                         .await?,
                 )
+            }
+            Speakers::ImportedCandidates { meeting } => {
+                value(speakers.imported_label_candidates(&meeting).await?)
             }
             Speakers::UndoIdentification { id } => value(speakers.undo_identification(&id).await?),
             Speakers::Identifications { recording } => {

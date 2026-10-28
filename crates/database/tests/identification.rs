@@ -97,6 +97,17 @@ fn interval(speaker: &str, start: i64, end: i64) -> SpeakerInterval {
     }
 }
 async fn fixture() -> (tempfile::TempDir, Arc<SqliteStore>, SpeakerService) {
+    fixture_with(vec![
+        segment("s1", 0, 6_000),
+        segment("s2", 7_000, 13_000),
+        segment("s3", 14_000, 20_000),
+        segment("s4", 30_000, 36_000),
+    ])
+    .await
+}
+async fn fixture_with(
+    segments: Vec<TranscriptSegment>,
+) -> (tempfile::TempDir, Arc<SqliteStore>, SpeakerService) {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("test.db");
     create_empty(&path).await.unwrap();
@@ -126,12 +137,7 @@ async fn fixture() -> (tempfile::TempDir, Arc<SqliteStore>, SpeakerService) {
             modified_unix_ms: None,
             provenance: json!({}),
         }],
-        segments: vec![
-            segment("s1", 0, 6_000),
-            segment("s2", 7_000, 13_000),
-            segment("s3", 14_000, 20_000),
-            segment("s4", 30_000, 36_000),
-        ],
+        segments,
         original: json!({}),
         warnings: vec![],
     };
@@ -390,4 +396,38 @@ async fn accepting_a_suggestion_admits_a_reversible_example_and_rejecting_admits
             .len(),
         before
     );
+}
+fn imported(id: &str, start: i64, end: i64, claim: &str) -> TranscriptSegment {
+    let mut s = segment(id, start, end);
+    s.speaker_claim = Some(claim.into());
+    s.evidence = json!({"origin":"imported_unverified"});
+    s
+}
+#[tokio::test]
+async fn imported_labels_only_propose_clean_clips_and_enroll_nothing() {
+    let (_tmp, _store, service) = fixture_with(vec![
+        imported("a1", 0, 6_000, "Alex"),
+        imported("a2", 10_000, 16_000, "Alex"),
+        imported("a3", 15_000, 21_000, "Sam"),
+        imported("o1", 30_000, 36_000, "Others 1"),
+        imported("m1", 40_000, 46_000, "Me"),
+        imported("short", 50_000, 51_000, "Alex"),
+    ])
+    .await;
+    let candidates = service.imported_label_candidates("r").await.unwrap();
+    let names: Vec<_> = candidates.iter().map(|c| c.claim.as_str()).collect();
+    // Sam overlaps Alex's second clip, so neither overlapping clip is offered.
+    assert_eq!(names, ["Alex", "Me"]);
+    // a2 overlaps another label on the same source, and the one-second clip is too short.
+    let alex = &candidates[0];
+    assert_eq!(
+        alex.clips
+            .iter()
+            .map(|c| c.segment_id.as_str())
+            .collect::<Vec<_>>(),
+        ["a1"]
+    );
+    assert!(candidates[1].is_self);
+    assert!(candidates.iter().all(|c| c.claim != "Others 1"));
+    assert!(service.examples(None).await.unwrap().is_empty());
 }

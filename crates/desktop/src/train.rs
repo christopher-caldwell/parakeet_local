@@ -77,6 +77,7 @@ impl Workbench {
         } else {
             view = view.child(caption("All prepared voices are handled for this session."));
         }
+        view = view.child(self.imported_clip_view(cx));
         for (index, done) in self.train_done.iter().enumerate() {
             let id = done.id.clone();
             let name = self
@@ -117,6 +118,91 @@ impl Workbench {
                             })),
                     ),
             );
+        }
+        view
+    }
+    /// Labels imported from another app are claims. They only suggest clips; each one is
+    /// enrolled after the user listens and picks the person.
+    fn imported_clip_view(&self, cx: &mut Context<Self>) -> Div {
+        let mut view = div().flex().flex_col().gap_2().child(
+            quiet("train-imported", "Suggest clips from imported labels")
+                .self_start()
+                .on_click(cx.listener(|this, _, _, cx| {
+                    let Some(detail) = &this.detail else { return };
+                    let id = detail.recording.id.clone();
+                    let service = this.speakers.clone();
+                    this.task(
+                        "Finding clips for imported labels",
+                        async move {
+                            Ok(Update::ImportedClips(
+                                id.clone(),
+                                service.imported_label_candidates(&id).await?,
+                            ))
+                        },
+                        cx,
+                    );
+                })),
+        );
+        for (group_index, group) in self.imported_clips.iter().enumerate() {
+            view = view.child(caption(format!(
+                "Imported label \"{}\" (unverified claim) — pick the person above, listen, then confirm each clip",
+                group.claim
+            )));
+            for (clip_index, clip) in group.clips.iter().enumerate() {
+                let play = clip.clone();
+                let enroll = clip.clone();
+                let key = group_index * 100 + clip_index;
+                view = view.child(
+                    div()
+                        .flex()
+                        .gap_2()
+                        .child(
+                            quiet(
+                                ("train-clip-play", key),
+                                format!("Play {:.0}s", clip.local_start_ms as f64 / 1000.),
+                            )
+                            .on_click(cx.listener(
+                                move |this, _, _, cx| {
+                                    this.play_range(
+                                        play.track_id.clone(),
+                                        play.local_start_ms,
+                                        play.local_end_ms,
+                                        cx,
+                                    )
+                                },
+                            )),
+                        )
+                        .child(
+                            button(("train-clip-enroll", key), "This is the selected person")
+                                .disabled(self.train_person.is_none() || self.pending > 0)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    let (Some(person), Some(detail)) =
+                                        (this.train_person.clone(), &this.detail)
+                                    else {
+                                        return;
+                                    };
+                                    let input = EnrollSpeakerInput {
+                                        profile_id: person.clone(),
+                                        recording_id: detail.recording.id.clone(),
+                                        track_id: enroll.track_id.clone(),
+                                        start_ms: enroll.local_start_ms,
+                                        end_ms: enroll.local_end_ms,
+                                        confirmed: true,
+                                    };
+                                    let service = this.speakers.clone();
+                                    this.task(
+                                        "Extracting local verified embedding",
+                                        async move {
+                                            service.enroll(input).await?;
+                                            let examples = service.examples(Some(&person)).await?;
+                                            Ok(Update::Examples(person, examples))
+                                        },
+                                        cx,
+                                    );
+                                })),
+                        ),
+                );
+            }
         }
         view
     }

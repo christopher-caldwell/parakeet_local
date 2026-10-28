@@ -67,6 +67,7 @@ enum Update {
         )>,
     ),
     IdentificationUndone(UndoIdentificationReport),
+    ImportedClips(String, Vec<ImportedLabelCandidates>),
     RefreshSelected,
     SegmentSaved(String),
     Models(Vec<ModelInfo>),
@@ -189,6 +190,7 @@ struct Workbench {
     profiles: Vec<SpeakerProfile>,
     examples: Vec<VoiceExampleSummary>,
     candidates: Vec<EnrollmentCandidate>,
+    imported_clips: Vec<ImportedLabelCandidates>,
     train_person: Option<String>,
     train_skipped: Vec<String>,
     train_done: Vec<ClusterIdentification>,
@@ -335,6 +337,9 @@ impl Workbench {
                                 cx.notify();
                                 return;
                             }
+                            Update::ImportedClips(recording, clips) => {
+                                if this.requested_recording.as_deref() == Some(recording.as_str()) { this.imported_clips = clips; }
+                            }
                             Update::IdentificationUndone(report) => {
                                 if let Some(done) = this.train_done.iter_mut().find(|i| i.id == report.identification.id) { *done = report.identification.clone(); }
                                 this.status = format!("Reverted {} lines and removed {} examples", report.reverted_segments, report.removed_examples);
@@ -391,7 +396,7 @@ impl Workbench {
                                         this.editing_title=false;this.editing_segment=None;this.segment_page=0;
                                         this.recording_tab=library::RecordingTab::Transcript;
                                         this.show_transcript_find=false;this.transcript_query.clear();
-                                        this.cluster_review=None;this.selected_clusters.clear();this.candidates.clear();
+                                        this.cluster_review=None;this.selected_clusters.clear();this.candidates.clear();this.imported_clips.clear();
                                         this.suggestions.clear();this.suggestion_review=None;
                                         this.reader_list.reset(0);
                                         this.library_filter=library::LibraryFilter::All;
@@ -2321,6 +2326,7 @@ fn main() -> anyhow::Result<()> {
                             profiles,
                             examples: vec![],
                             candidates: vec![],
+                            imported_clips: vec![],
                             train_person: None,
                             train_skipped: vec![],
                             train_done: vec![],
