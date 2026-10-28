@@ -40,6 +40,7 @@ impl Workbench {
     pub(super) fn navigate(&mut self, area: Area, cx: &mut Context<Self>) {
         self.area = area;
         match area {
+            Area::Storage => self.preview_storage(None, cx),
             Area::Jobs => {
                 let service = self.recovery.clone();
                 self.task(
@@ -170,6 +171,7 @@ impl Workbench {
             (Area::Speakers, "Speakers", "people", "⌘4"),
             (Area::Models, "Local models", "models", ""),
             (Area::Jobs, "Background jobs", "jobs", ""),
+            (Area::Storage, "Storage", "models", ""),
             (Area::Privacy, "Privacy & AI", "shield", ""),
         ]
         .into_iter()

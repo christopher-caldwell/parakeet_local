@@ -1864,3 +1864,323 @@ async fn cancellation_stops_remaining_sources_in_both_recording_workflows() {
         }
     }
 }
+
+#[tokio::test]
+async fn storage_policy_defaults_is_versioned_and_read_only_preview_does_not_initialize_models() {
+    use parakeet_application::storage::*;
+    use parakeet_domain::storage::RetentionPolicy;
+    use std::sync::Arc;
+    let (tmp, store) = database().await;
+    let store = Arc::new(store);
+    let inspection = Arc::new(parakeet_infrastructure::storage::LocalStorageInspection {
+        root: tmp.path().into(),
+        database: tmp.path().join("test.db"),
+    });
+    let service = Arc::new(StorageService::new(
+        store.clone(),
+        store.clone(),
+        inspection,
+    ));
+    let first = service.policy().await.unwrap();
+    assert_eq!(first.revision, 0);
+    assert_eq!(first.policy, RetentionPolicy::default());
+    let preview = service.preview(None).await.unwrap();
+    assert!(preview.candidates.is_empty());
+    assert!(!preview.automatic_cleanup);
+    assert!(!preview.execution_available);
+    assert!(!tmp.path().join("models").exists());
+    let p = RetentionPolicy {
+        completed_scratch_after_days: Some(30),
+    };
+    let saved = service.save_policy(p, 0).await.unwrap();
+    assert_eq!(saved.revision, 1);
+    let (a, b) = tokio::join!(
+        service.save_policy(
+            RetentionPolicy {
+                completed_scratch_after_days: Some(7)
+            },
+            1
+        ),
+        service.save_policy(
+            RetentionPolicy {
+                completed_scratch_after_days: Some(90)
+            },
+            1
+        )
+    );
+    assert_ne!(a.is_ok(), b.is_ok());
+    assert_eq!(service.policy().await.unwrap().revision, 2);
+    assert!(matches!(
+        service.save_policy(RetentionPolicy::default(), 1).await,
+        Err(SaveRetentionPolicyError::Conflict(_))
+    ));
+    assert!(
+        service
+            .save_policy(
+                RetentionPolicy {
+                    completed_scratch_after_days: Some(0)
+                },
+                2
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(service.policy().await.unwrap().revision, 2);
+    let readonly = SqliteStore::new(open_read_only(&tmp.path().join("test.db")).await.unwrap());
+    assert_eq!(readonly.retention_policy().await.unwrap().revision, 2);
+    assert!(
+        readonly
+            .save_retention_policy(&RetentionPolicy::default(), 2, "invalid read-only mutation")
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn storage_preview_only_admits_old_owned_completed_scratch_without_losing_evidence() {
+    use parakeet_application::storage::*;
+    use parakeet_domain::storage::{RetentionPolicy, StorageProtection};
+    use std::sync::Arc;
+    let (tmp, store) = database().await;
+    let audio = tmp.path().join("original.wav");
+    std::fs::write(&audio, b"read-only source fixture").unwrap();
+    let original = std::fs::read(&audio).unwrap();
+    let mut eligible = None;
+    for name in [
+        "eligible",
+        "active",
+        "failed",
+        "interrupted",
+        "recent",
+        "unresolved",
+        "pending",
+        "speaker",
+        "correction",
+        "unmanaged",
+    ] {
+        let mut b = bundle();
+        b.recording.id = name.into();
+        b.recording.source_key = format!("fixture:{name}");
+        b.recording.title_override = Some(format!("User title {name}"));
+        if name == "pending" {
+            b.recording.metadata["meeting_finalization"] = json!({"status":"failed"});
+        }
+        b.tracks[0].id = format!("track-{name}");
+        b.tracks[0].recording_id = name.into();
+        b.tracks[0].path = audio.to_str().unwrap().into();
+        b.tracks[0].available = true;
+        b.segments[0].id = format!("segment-{name}");
+        b.segments[0].recording_id = name.into();
+        b.segments[0].run_id = format!("import-{name}");
+        b.segments[0].track_id = Some(b.tracks[0].id.clone());
+        store.import(&b).await.unwrap();
+        let mut run = ProcessingRun {
+            id: uuid::Uuid::new_v4().to_string(),
+            recording_id: name.into(),
+            kind: "transcription".into(),
+            model: "fixture".into(),
+            model_revision: "fixture".into(),
+            status: "running".into(),
+            started_at: "2020-01-01T00:00:00Z".into(),
+            completed_at: None,
+            configuration: if name == "unmanaged" {
+                json!({})
+            } else {
+                json!({"ownership_protocol":"file-lock-v1"})
+            },
+            result: json!({"raw":"original result remains in the database"}),
+            error: None,
+        };
+        store.start(&run).await.unwrap();
+        if name != "active" {
+            run.status = if ["failed", "interrupted"].contains(&name) {
+                name
+            } else {
+                "completed"
+            }
+            .into();
+            run.completed_at = Some(match name {
+                "recent" => parakeet_application::now(),
+                "unresolved" => "not a timestamp".into(),
+                _ => "2020-01-02T00:00:00Z".into(),
+            });
+            store.finish(&run, &[]).await.unwrap();
+        }
+        let work = tmp
+            .path()
+            .join("models/work")
+            .join(&run.id)
+            .join("whisper-chunks");
+        std::fs::create_dir_all(&work).unwrap();
+        std::fs::write(work.join("chunk-0000.json"), b"checkpoint fixture").unwrap();
+        if name == "eligible" {
+            eligible = Some(run.id.clone());
+            std::fs::write(work.join("chunk-0001.json.partial"), b"uncertain").unwrap();
+            std::fs::hard_link(&audio, work.parent().unwrap().join("audio.f32")).unwrap();
+            let request = work.parent().unwrap().join("request.json");
+            std::fs::write(&request, b"linked request fixture").unwrap();
+            std::fs::hard_link(&request, tmp.path().join("other-link")).unwrap();
+        }
+        if name == "speaker" {
+            store
+                .create_profile(&SpeakerProfile {
+                    id: "profile".into(),
+                    name: "Fixture person".into(),
+                    created_at: "fixture".into(),
+                })
+                .await
+                .unwrap();
+            store
+                .enroll(&VoiceExample {
+                    id: "example".into(),
+                    profile_id: "profile".into(),
+                    recording_id: name.into(),
+                    track_id: format!("track-{name}"),
+                    start_ms: 0,
+                    end_ms: 1000,
+                    model: "fixture".into(),
+                    revision: "1".into(),
+                    capture_domain: "fixture".into(),
+                    vector: vec![1., 0.],
+                    verified_at: "human fixture".into(),
+                })
+                .await
+                .unwrap();
+        }
+        if name == "correction" {
+            store
+                .correct(
+                    &Correction {
+                        id: "correction".into(),
+                        segment_id: format!("segment-{name}"),
+                        profile_id: None,
+                        replacement_text: Some("Human correction".into()),
+                        action: "text".into(),
+                        created_at: "fixture".into(),
+                    },
+                    0,
+                )
+                .await
+                .unwrap();
+        }
+    }
+    let unknown = tmp
+        .path()
+        .join("models/work")
+        .join(uuid::Uuid::new_v4().to_string());
+    std::fs::create_dir_all(&unknown).unwrap();
+    std::fs::write(unknown.join("audio.f32"), b"unknown owner").unwrap();
+    for path in [
+        "models/weights/model.bin",
+        "captures/recoverable/source.caf",
+        "playback/current.wav",
+        "clipboard-recovery/journal.json",
+    ] {
+        let p = tmp.path().join(path);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, b"protected fixture").unwrap();
+    }
+    let store = Arc::new(store);
+    let service = StorageService::new(
+        store.clone(),
+        store.clone(),
+        Arc::new(parakeet_infrastructure::storage::LocalStorageInspection {
+            root: tmp.path().into(),
+            database: tmp.path().join("test.db"),
+        }),
+    );
+    let readonly_default = service.preview(None).await.unwrap();
+    assert!(readonly_default.candidates.is_empty());
+    let preview = service
+        .preview(Some(RetentionPolicy {
+            completed_scratch_after_days: Some(1),
+        }))
+        .await
+        .unwrap();
+    assert!(preview.hypothetical);
+    assert_eq!(preview.saved_policy.revision, 0);
+    assert_eq!(preview.candidates.len(), 1);
+    assert_eq!(preview.candidates[0].run_id, eligible.unwrap());
+    assert_eq!(
+        preview.candidate_totals.logical_bytes,
+        b"checkpoint fixture".len() as u64
+    );
+    for reason in [
+        StorageProtection::ActiveRun,
+        StorageProtection::RecoverableRun,
+        StorageProtection::TooRecentOrFuture,
+        StorageProtection::CompletionTimeUnknown,
+        StorageProtection::PendingMeeting,
+        StorageProtection::SpeakerReference,
+        StorageProtection::ManualCorrection,
+        StorageProtection::UnknownRun,
+        StorageProtection::LinkedAudio,
+        StorageProtection::MultipleHardLinks,
+        StorageProtection::UncertainArtifact,
+        StorageProtection::Models,
+        StorageProtection::RecordedAudio,
+        StorageProtection::Playback,
+        StorageProtection::Recovery,
+    ] {
+        assert!(
+            preview.protected.contains_key(&reason),
+            "missing {reason:?}"
+        );
+    }
+    let protected = preview
+        .protected
+        .values()
+        .map(|s| s.logical_bytes)
+        .sum::<u64>();
+    assert_eq!(
+        protected + preview.candidate_totals.logical_bytes,
+        preview.usage.owned_totals.logical_bytes
+    );
+    assert_eq!(std::fs::read(&audio).unwrap(), original);
+    assert_eq!(store.examples(None).await.unwrap().len(), 1);
+    let corrected = store.detail("correction").await.unwrap().unwrap();
+    assert_eq!(
+        corrected.recording.title_override.as_deref(),
+        Some("User title correction")
+    );
+    assert_eq!(corrected.corrections.len(), 1);
+    assert!(!preview.execution_available);
+    assert!(!preview.automatic_cleanup);
+}
+
+#[tokio::test]
+async fn storage_accounting_separates_database_override_and_referenced_external_audio() {
+    use parakeet_application::storage::StorageService;
+    use std::sync::Arc;
+    let (tmp, store) = database().await;
+    let root = tmp.path().join("owned");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(root.join("owned.bin"), b"owned").unwrap();
+    let outside = tmp.path().join("outside.wav");
+    std::fs::write(&outside, b"external source bytes").unwrap();
+    let mut b = bundle();
+    b.tracks[0].path = outside.to_str().unwrap().into();
+    b.tracks[0].available = true;
+    store.import(&b).await.unwrap();
+    let store = Arc::new(store);
+    let service = StorageService::new(
+        store.clone(),
+        store,
+        Arc::new(parakeet_infrastructure::storage::LocalStorageInspection {
+            root: root.clone(),
+            database: tmp.path().join("test.db"),
+        }),
+    );
+    let report = service.usage().await.unwrap();
+    assert_eq!(report.owned_totals.logical_bytes, 5);
+    assert!(report.database_outside_root_bytes > 0);
+    assert_eq!(
+        report.referenced_external_file_bytes,
+        b"external source bytes".len() as u64
+    );
+    assert_eq!(report.external_audio.len(), 1);
+    assert_eq!(report.unresolved_audio_references, 0);
+    assert!(report.complete);
+    assert_eq!(std::fs::read(outside).unwrap(), b"external source bytes");
+    assert_eq!(std::fs::read_dir(root).unwrap().count(), 1);
+}

@@ -146,3 +146,5 @@ fn decode<T: serde::de::DeserializeOwned>(value: &str) -> Result<T, PersistenceE
 
 mod source;
 pub use source::MacParakeetCatalog;
+
+mod storage;

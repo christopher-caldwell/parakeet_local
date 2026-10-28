@@ -36,6 +36,10 @@ struct Cli {
 }
 #[derive(Subcommand)]
 enum Command {
+    Storage {
+        #[command(subcommand)]
+        command: Storage,
+    },
     Jobs {
         #[command(subcommand)]
         command: Jobs,
@@ -86,6 +90,30 @@ enum Command {
     Benchmark {
         #[command(subcommand)]
         command: Benchmark,
+    },
+}
+#[derive(Subcommand)]
+enum Storage {
+    /// Read-only file accounting, including referenced audio outside this root.
+    Usage,
+    /// Read the saved preview policy; defaults to keep all.
+    Policy,
+    /// Preview candidates without changing policy or removing files.
+    Preview {
+        #[arg(long, conflicts_with = "keep_all")]
+        completed_scratch_days: Option<u16>,
+        #[arg(long)]
+        keep_all: bool,
+    },
+    /// Save a preview policy only. It never starts cleanup.
+    #[command(group(clap::ArgGroup::new("choice").required(true).args(["completed_scratch_days","keep_all"])))]
+    SetPolicy {
+        #[arg(long, conflicts_with = "keep_all")]
+        completed_scratch_days: Option<u16>,
+        #[arg(long)]
+        keep_all: bool,
+        #[arg(long)]
+        expected_revision: u64,
     },
 }
 #[derive(Subcommand)]
@@ -493,7 +521,9 @@ fn writes(command: &Command) -> bool {
     }
     matches!(
         command,
-        Command::Jobs {
+        Command::Storage {
+            command: Storage::SetPolicy { .. }
+        } | Command::Jobs {
             command: Jobs::Recover | Jobs::Retry { .. } | Jobs::Cancel { .. }
         } | Command::Meetings {
             command: Meetings::Import { dry_run: false, .. }
@@ -791,7 +821,47 @@ async fn execute(cli: Cli) -> anyhow::Result<Value> {
         processing.clone(),
         ownership.clone(),
     );
+    let storage = parakeet_application::storage::StorageService::new(
+        store.clone(),
+        store.clone(),
+        Arc::new(parakeet_infrastructure::storage::LocalStorageInspection {
+            root: root.clone(),
+            database: database.clone(),
+        }),
+    );
     let result = match cli.command {
+        Command::Storage { command } => match command {
+            Storage::Usage => value(storage.usage().await?),
+            Storage::Policy => value(storage.policy().await?),
+            Storage::Preview {
+                completed_scratch_days,
+                keep_all,
+            } => value(
+                storage
+                    .preview(if keep_all || completed_scratch_days.is_some() {
+                        Some(parakeet_domain::storage::RetentionPolicy {
+                            completed_scratch_after_days: completed_scratch_days,
+                        })
+                    } else {
+                        None
+                    })
+                    .await?,
+            ),
+            Storage::SetPolicy {
+                completed_scratch_days,
+                keep_all: _,
+                expected_revision,
+            } => value(
+                storage
+                    .save_policy(
+                        parakeet_domain::storage::RetentionPolicy {
+                            completed_scratch_after_days: completed_scratch_days,
+                        },
+                        expected_revision,
+                    )
+                    .await?,
+            ),
+        },
         Command::Jobs { command } => match command {
             Jobs::Show { id } => value(
                 parakeet_application::processing_control::ProcessingControlService::new(
@@ -1342,6 +1412,10 @@ fn kind(error: &anyhow::Error) -> &'static str {
     for cause in error.chain() {
         macro_rules! classify {($($type:ty),*)=>{$(if let Some(error)=cause.downcast_ref::<$type>(){let kind=error.kind();if kind!="nested"{return kind;}})*};}
         classify!(
+            parakeet_application::storage::InspectStorageError,
+            parakeet_application::storage::ReadRetentionPolicyError,
+            parakeet_application::storage::SaveRetentionPolicyError,
+            parakeet_application::storage::PreviewRetentionError,
             ImportRecordingsError,
             parakeet_application::scoring::ScoreEvaluationError,
             parakeet_application::audio_locations::FingerprintAudioError,

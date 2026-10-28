@@ -287,3 +287,97 @@ fn job_inspection_and_control_keep_read_only_and_mutating_commands_distinct() {
     assert_eq!(run(&root, &["jobs", "cancel", "missing"]).0, 3);
     assert!(!root.join("parakeet.db.processing-leases").exists());
 }
+
+#[test]
+fn storage_inspection_is_read_only_and_policy_saves_require_an_explicit_revision() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("absent");
+    for args in [
+        &["storage", "usage"][..],
+        &["storage", "preview"][..],
+        &["storage", "policy"][..],
+    ] {
+        assert_ne!(run(&root, args).0, 0);
+        assert!(!root.exists());
+    }
+    assert_eq!(run(&root, &["db", "create"]).0, 0);
+    assert_eq!(run(&root, &["db", "migrate"]).0, 0);
+    let (code, p) = run(&root, &["storage", "policy"]);
+    assert_eq!(code, 0);
+    assert_eq!(p["data"]["revision"], 0);
+    assert!(p["data"]["policy"]["completed_scratch_after_days"].is_null());
+    let (code, p) = run(
+        &root,
+        &["storage", "preview", "--completed-scratch-days", "30"],
+    );
+    assert_eq!(code, 0);
+    assert_eq!(p["data"]["hypothetical"], true);
+    assert_eq!(p["data"]["automatic_cleanup"], false);
+    assert_eq!(p["data"]["execution_available"], false);
+    assert!(!root.join("models").exists());
+    assert_eq!(
+        run(
+            &root,
+            &[
+                "storage",
+                "set-policy",
+                "--completed-scratch-days",
+                "30",
+                "--expected-revision",
+                "0"
+            ]
+        )
+        .0,
+        0
+    );
+    assert_eq!(
+        run(
+            &root,
+            &[
+                "storage",
+                "set-policy",
+                "--keep-all",
+                "--expected-revision",
+                "0"
+            ]
+        )
+        .0,
+        5
+    );
+    assert_eq!(
+        run(
+            &root,
+            &[
+                "storage",
+                "set-policy",
+                "--completed-scratch-days",
+                "0",
+                "--expected-revision",
+                "1"
+            ]
+        )
+        .0,
+        2
+    );
+    let p = run(&root, &["storage", "policy"]).1;
+    assert_eq!(p["data"]["revision"], 1);
+    assert_eq!(p["data"]["policy"]["completed_scratch_after_days"], 30);
+    assert_eq!(
+        run(
+            &root,
+            &[
+                "storage",
+                "set-policy",
+                "--keep-all",
+                "--expected-revision",
+                "1"
+            ]
+        )
+        .0,
+        0
+    );
+    assert_eq!(
+        run(&root, &["storage", "preview"]).1["data"]["effective_policy"]["completed_scratch_after_days"],
+        Value::Null
+    );
+}

@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE storage_policy SET revision=revision+1,data=?1,updated_at=?2\nWHERE id=1 AND revision=?3 RETURNING revision,data,updated_at\n",
+  "describe": {
+    "columns": [
+      {
+        "name": "revision",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "data",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "updated_at",
+        "ordinal": 2,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "46d7cf07eb5b2e1d7cb5e8a2350d3e97fa6c63bdd522513e38e9a211216aec7e"
+}

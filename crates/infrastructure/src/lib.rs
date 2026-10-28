@@ -17,3 +17,5 @@ mod word_timing;
 
 mod whisper_control;
 mod whisper_resume;
+
+pub mod storage;

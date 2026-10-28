@@ -5,6 +5,7 @@ mod library;
 mod performance;
 mod reader;
 mod shell;
+mod storage;
 mod ui;
 use gpui::{div, prelude::*, px, rgb, size, *};
 use gpui_base::input::{Input, InputEvent, InputState, Textarea, TextareaState};
@@ -36,6 +37,7 @@ enum Area {
     Privacy,
     Capture,
     Jobs,
+    Storage,
 }
 #[derive(Clone, Copy, PartialEq)]
 enum SpeakerMode {
@@ -60,6 +62,8 @@ enum Update {
     Dictations(Vec<DictationReceipt>),
     Message(String),
     Jobs(Vec<ProcessingRun>),
+    StoragePreview(Result<Arc<parakeet_application::storage::RetentionPreview>, String>),
+    StoragePolicySaved(Result<parakeet_application::storage::RetentionPolicySnapshot, String>),
     Recovered(
         parakeet_application::jobs::ProcessingRecoveryReport,
         Vec<ProcessingRun>,
@@ -89,6 +93,12 @@ struct Workbench {
     processing: Arc<ProcessingService>,
     recovery: Arc<parakeet_application::jobs::ProcessingRecoveryService>,
     pending_jobs: Vec<ProcessingRun>,
+    storage: Arc<parakeet_application::storage::StorageService>,
+    storage_preview: Option<Arc<parakeet_application::storage::RetentionPreview>>,
+    storage_policy: Option<parakeet_application::storage::RetentionPolicySnapshot>,
+    storage_days: Entity<InputState>,
+    storage_busy: bool,
+    storage_show_warnings: bool,
     job_control: Arc<parakeet_application::processing_control::ProcessingControlService>,
     job_monitor_running: bool,
     suggestions: Vec<SpeakerSuggestion>,
@@ -274,6 +284,8 @@ impl Workbench {
                                 }
                             }
                             Update::Candidates(recording,c) => {if this.requested_recording.as_deref()==Some(recording.as_str()){this.candidates = c;}},
+                            Update::StoragePreview(result) => {this.storage_busy=false;match result {Ok(preview)=>{this.storage_policy=Some(preview.saved_policy.clone());this.storage_preview=Some(preview);},Err(error)=>{this.last_error=Some(error);this.status="Storage inspection failed; no files changed".into();cx.notify();return;}}},
+                            Update::StoragePolicySaved(result) => {this.storage_busy=false;match result {Ok(policy)=>{this.storage_policy=Some(policy);this.storage_preview=None;this.status="Preview policy saved. No files were removed; refresh to inspect it.".into();},Err(error)=>{this.last_error=Some(error);this.status="Preview policy could not be saved; refresh before retrying".into();}}cx.notify();return;},
                             Update::Jobs(jobs) => {this.pending_jobs = jobs;this.load_meeting_plans(cx);},
                             Update::MeetingPlans(plans) => this.meeting_plans = plans,
                             Update::MeetingFinalized(result, warning) => {
@@ -847,6 +859,9 @@ impl Render for Workbench {
                 } else {
                     content = content.child(self.suggestion_panel(cx));
                 }
+            }
+            Area::Storage => {
+                content = content.child(self.storage_view(cx));
             }
             Area::Jobs => {
                 content=content.child(section("Background jobs","Review unfinished processing. Recovery preserves active work and original audio."))
@@ -1872,6 +1887,14 @@ fn main() -> anyhow::Result<()> {
     );
     let pool = runtime.block_on(parakeet_database::open_existing(&root.join("parakeet.db")))?;
     let store = Arc::new(SqliteStore::new(pool));
+    let storage = Arc::new(parakeet_application::storage::StorageService::new(
+        store.clone(),
+        store.clone(),
+        Arc::new(parakeet_infrastructure::storage::LocalStorageInspection {
+            root: root.clone(),
+            database: root.join("parakeet.db"),
+        }),
+    ));
     let source = Arc::new(MacParakeetArtifacts);
     let models = Arc::new(ModelFiles::new(root.join("models")));
     let engine = Arc::new(LocalSpeech::new(models.clone(), model_runtime_executable()));
@@ -2059,6 +2082,7 @@ fn main() -> anyhow::Result<()> {
                             state
                         });
                         let reader_editor_focus = edit_text.focus_handle(cx);
+                        let storage_days = input(window, cx, "30", "Days, 1–3650");
                         let shortcut_key = input(window, cx, "", "Home, F6, etc.");
                         let import_path =
                             input(window, cx, "", "Local audio file or meeting folder");
@@ -2096,6 +2120,12 @@ fn main() -> anyhow::Result<()> {
                             processing,
                             recovery,
                             pending_jobs: vec![],
+                            storage,
+                            storage_preview: None,
+                            storage_policy: None,
+                            storage_days,
+                            storage_busy: false,
+                            storage_show_warnings: false,
                             job_control,
                             job_monitor_running: false,
                             suggestions: vec![],

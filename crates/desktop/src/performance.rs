@@ -125,7 +125,7 @@ impl Workbench {
                     let input_buckets = input.latency_histogram.iter_recorded()
                         .map(|b| (b.value_iterated_to(), b.count_at_value())).collect::<Vec<_>>();
                     recorder.observe(json!({
-                        "area":match this.area { Area::Library=>"library",Area::Speakers=>"speakers",Area::Models=>"models",Area::Dictation=>"dictation",Area::Capture=>"capture",Area::Jobs=>"jobs",Area::Privacy=>"privacy" },
+                        "area":match this.area { Area::Library=>"library",Area::Speakers=>"speakers",Area::Models=>"models",Area::Dictation=>"dictation",Area::Capture=>"capture",Area::Jobs=>"jobs",Area::Privacy=>"privacy",Area::Storage=>"storage" },
                         "segments":this.detail.as_ref().map(|d|d.segments.len()),
                         "corrections":this.detail.as_ref().map(|d|d.corrections.len()),
                         "page":this.segment_page,"render_count":this.render_count,

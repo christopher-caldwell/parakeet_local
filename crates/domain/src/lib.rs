@@ -317,3 +317,5 @@ pub struct AudioPreferences {
 pub mod reconciliation;
 
 pub mod cluster_edits;
+
+pub mod storage;
