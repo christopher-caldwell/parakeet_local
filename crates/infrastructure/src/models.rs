@@ -9,6 +9,7 @@ use std::{
     collections::BTreeMap,
     fs::File,
     io::Read,
+    os::unix::fs::{MetadataExt, OpenOptionsExt},
     path::{Path, PathBuf},
     process::Stdio,
 };
@@ -82,8 +83,16 @@ impl ModelFiles {
             .write(true)
             .create(true)
             .truncate(false)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
             .open(self.root.join("model-access.lock"))
             .map_err(CapabilityError::new)?;
+        let metadata = file.metadata().map_err(CapabilityError::new)?;
+        if !metadata.is_file() || metadata.nlink() != 1 {
+            return Err(CapabilityError::message(
+                "model lock must be a single-link ordinary file",
+            ));
+        }
         fs2::FileExt::try_lock_exclusive(&file).map_err(|e| {
             CapabilityError::message(format!(
                 "another model install/inference/removal owns the model lease: {e}"

@@ -4,52 +4,68 @@ use parakeet_domain::storage::RetentionPolicy;
 #[async_trait::async_trait]
 impl StorageQueries for SqliteStore {
     async fn storage_runs(&self) -> Result<Vec<StorageRunFact>, PersistenceError> {
-        Ok(sqlx::query_file!("src/storage/runs.sql")
-            .fetch_all(&self.pool)
-            .await
-            .map_err(PersistenceError::new)?
-            .into_iter()
-            .map(|r| StorageRunFact {
-                id: r.id,
-                recording_id: r.recording_id,
-                status: r.status,
-                ownership_verified: r.ownership_verified,
-                completed_at: r.completed_at,
-                pending_meeting: r.pending_meeting,
-                speaker_reference: r.speaker_reference,
-                manual_correction: r.manual_correction,
-            })
-            .collect())
+        runs(&mut *self.pool.acquire().await.map_err(PersistenceError::new)?).await
     }
     async fn storage_audio(&self) -> Result<Vec<AudioStorageReference>, PersistenceError> {
-        Ok(sqlx::query_file!("src/storage/audio.sql")
-            .fetch_all(&self.pool)
-            .await
-            .map_err(PersistenceError::new)?
-            .into_iter()
-            .map(|r| AudioStorageReference {
-                track_id: r.id,
-                recording_id: r.recording_id,
-                path: r.path,
-            })
-            .collect())
+        audio(&mut *self.pool.acquire().await.map_err(PersistenceError::new)?).await
     }
     async fn retention_policy(&self) -> Result<RetentionPolicySnapshot, PersistenceError> {
-        let row = sqlx::query_file!("src/storage/policy.sql")
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(PersistenceError::new)?
-            .ok_or_else(|| {
-                PersistenceError::new(std::io::Error::other(
-                    "storage policy is missing; run explicit application database migrations",
-                ))
-            })?;
-        Ok(RetentionPolicySnapshot {
-            policy: decode(&row.data)?,
-            revision: row.revision as u64,
-            updated_at: row.updated_at,
-        })
+        policy(&mut *self.pool.acquire().await.map_err(PersistenceError::new)?).await
     }
+}
+
+pub(crate) async fn runs(
+    conn: &mut sqlx::SqliteConnection,
+) -> Result<Vec<StorageRunFact>, PersistenceError> {
+    Ok(sqlx::query_file!("src/storage/runs.sql")
+        .fetch_all(conn)
+        .await
+        .map_err(PersistenceError::new)?
+        .into_iter()
+        .map(|r| StorageRunFact {
+            id: r.id,
+            recording_id: r.recording_id,
+            status: r.status,
+            ownership_verified: r.ownership_verified,
+            completed_at: r.completed_at,
+            pending_meeting: r.pending_meeting,
+            speaker_reference: r.speaker_reference,
+            manual_correction: r.manual_correction,
+        })
+        .collect())
+}
+pub(crate) async fn audio(
+    conn: &mut sqlx::SqliteConnection,
+) -> Result<Vec<AudioStorageReference>, PersistenceError> {
+    Ok(sqlx::query_file!("src/storage/audio.sql")
+        .fetch_all(conn)
+        .await
+        .map_err(PersistenceError::new)?
+        .into_iter()
+        .map(|r| AudioStorageReference {
+            track_id: r.id,
+            recording_id: r.recording_id,
+            path: r.path,
+        })
+        .collect())
+}
+pub(crate) async fn policy(
+    conn: &mut sqlx::SqliteConnection,
+) -> Result<RetentionPolicySnapshot, PersistenceError> {
+    let row = sqlx::query_file!("src/storage/policy.sql")
+        .fetch_optional(conn)
+        .await
+        .map_err(PersistenceError::new)?
+        .ok_or_else(|| {
+            PersistenceError::new(std::io::Error::other(
+                "storage policy is missing; run explicit application database migrations",
+            ))
+        })?;
+    Ok(RetentionPolicySnapshot {
+        policy: decode(&row.data)?,
+        revision: row.revision as u64,
+        updated_at: row.updated_at,
+    })
 }
 #[async_trait::async_trait]
 impl StoragePolicyWrites for SqliteStore {

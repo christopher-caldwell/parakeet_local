@@ -12,7 +12,7 @@ parakeet --data-root <existing-root> storage set-policy --completed-scratch-days
 parakeet --data-root <existing-root> storage set-policy --keep-all --expected-revision 1
 ```
 
-`usage`, `policy` and `preview` are read-only. An age/keep-all argument overrides only that preview. `set-policy` saves a preview threshold and requires the observed revision; another writer winning returns conflict/exit 5. Invalid ages return exit 2. The threshold accepts 1–3650 elapsed 24-hour days after a run's completion, independent of source recording date and file mtime. A preview-policy save grants no cleanup permission. **There is no cleanup executor or automatic removal in this pass:** JSON exposes `automatic_cleanup: false` and `execution_available: false`.
+`usage`, `policy` and `preview` are read-only. An age/keep-all argument overrides only that preview. `set-policy` saves a preview threshold and requires the observed revision; another writer winning returns conflict/exit 5. Invalid ages return exit 2. The threshold accepts 1–3650 elapsed 24-hour days after a run's completion, independent of source recording date and file mtime. A preview-policy save grants no cleanup permission. There is no automatic removal. Preview JSON exposes `automatic_cleanup: false` and `execution_available: false`: an observational preview cannot be executed directly. The separate [reviewed staging/restore workflow](cleanup.md) now supplies a concrete reviewed operation; staging does not free disk space.
 
 ## Accounting scope
 
@@ -26,7 +26,7 @@ Only recognized job-owned scratch layouts are considered: complete Whisper chunk
 
 Original or referenced audio, all model data, SQLite data, playback, recovery journals, lease files and other unknown files are excluded. Inode matches to saved audio protect aliases regardless of path; files with multiple hard links remain excluded. Any speaker example, manual correction history or unresolved meeting finalization protects that recording's completed job files. Future/invalid timestamps cannot age files into eligibility. These rules live in Domain/Application; filesystem layout observation and SQL projections stay in outer adapters. No embeddings or person names are fetched for this report.
 
-Candidates are **potential completed files**, not authority to delete. Later execution must require a concrete reviewed file list, fresh source/reference/job checks, identity revalidation, exclusive ownership and a recoverable operation. An old preview or a saved non-null age must never implicitly authorize removal.
+Candidates are **potential completed files**, not authority to delete. The separate reviewed operation requires a concrete file list, fresh source/reference/job checks, identity revalidation, exclusive ownership and restore support. An old preview or a saved non-null age must never implicitly authorize removal.
 
 ## Native behavior and evidence
 

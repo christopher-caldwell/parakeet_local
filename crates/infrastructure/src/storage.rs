@@ -258,7 +258,7 @@ fn classify(
         Some("models") if parts.get(1) == Some(&"work") => Processing,
         Some("models") => Models,
         Some("playback") => Playback,
-        Some("clipboard-recovery") => Recovery,
+        Some("clipboard-recovery" | ".cleanup") => Recovery,
         Some("evaluations") => Evaluations,
         _ => Other,
     };

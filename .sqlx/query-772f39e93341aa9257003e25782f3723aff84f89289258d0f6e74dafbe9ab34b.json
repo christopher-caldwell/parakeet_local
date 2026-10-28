@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT data FROM cleanup_reviews ORDER BY updated_at DESC, id LIMIT 30\n",
+  "describe": {
+    "columns": [
+      {
+        "name": "data",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "772f39e93341aa9257003e25782f3723aff84f89289258d0f6e74dafbe9ab34b"
+}

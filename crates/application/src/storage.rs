@@ -243,7 +243,7 @@ impl StorageService {
         })
     }
 }
-fn protection(
+pub(crate) fn protection(
     file: &StorageFileObservation,
     runs: &BTreeMap<&str, &StorageRunFact>,
     policy: &RetentionPolicy,

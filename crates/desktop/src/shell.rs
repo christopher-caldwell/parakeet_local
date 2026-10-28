@@ -2,6 +2,7 @@ use super::*;
 
 #[derive(Clone)]
 pub enum ConfirmAction {
+    StageCleanup { id: String, digest: String },
     DeleteProfile(String),
     RemoveModel(String),
     RemoveExample { id: String, profile: String },
@@ -349,6 +350,7 @@ impl Workbench {
     }
     pub(super) fn confirmation(&self, cx: &mut Context<Self>) -> Div {
         let label = match &self.confirm_action {
+            Some(ConfirmAction::StageCleanup {id,..}) => format!("Move the exact file list in review {id} to recovery? You can restore it here. This does not free disk space."),
             Some(ConfirmAction::DeleteProfile(id)) => format!(
                 "Delete {} and their verified voice examples? This cannot be undone.",
                 self.profiles
@@ -364,6 +366,8 @@ impl Workbench {
             None => String::new(),
         };
         div()
+            .w_full()
+            .min_w_0()
             .flex_shrink_0()
             .bg(rgb(PANEL))
             .border_b_1()
@@ -373,58 +377,83 @@ impl Workbench {
             .flex()
             .items_center()
             .gap_3()
-            .child(div().flex_1().child(label))
+            .child(div().flex_1().min_w_0().whitespace_normal().child(label))
             .child(
-                quiet("cancel-delete", "Cancel").on_click(cx.listener(|this, _, _, cx| {
-                    this.confirm_action = None;
-                    cx.notify();
-                })),
-            )
-            .child(
-                danger("confirm-delete", "Confirm removal")
-                    .disabled(self.pending > 0)
+                quiet("cancel-delete", "Cancel")
+                    .flex_shrink_0()
                     .on_click(cx.listener(|this, _, _, cx| {
-                        match this.confirm_action.take() {
-                            Some(ConfirmAction::DeleteProfile(id)) => {
-                                let service = this.speakers.clone();
-                                this.task(
-                                    "Deleting local voice profile",
-                                    async move {
-                                        service.delete(&id).await?;
-                                        Ok(Update::Profiles(service.profiles().await?))
-                                    },
-                                    cx,
-                                );
-                            }
-                            Some(ConfirmAction::RemoveExample { id, profile }) => {
-                                let service = this.speakers.clone();
-                                this.task(
-                                    "Removing voice example",
-                                    async move {
-                                        service.remove_example(&id).await?;
-                                        Ok(Update::Examples(
-                                            profile.clone(),
-                                            service.examples(Some(&profile)).await?,
-                                        ))
-                                    },
-                                    cx,
-                                );
-                            }
-                            Some(ConfirmAction::RemoveModel(id)) => {
-                                let service = this.models.clone();
-                                this.task(
-                                    "Removing downloaded model files",
-                                    async move {
-                                        service.remove(&id).await?;
-                                        Ok(Update::Models(service.list().await?))
-                                    },
-                                    cx,
-                                );
-                            }
-                            None => {}
-                        }
+                        this.confirm_action = None;
                         cx.notify();
                     })),
+            )
+            .child(
+                danger(
+                    "confirm-delete",
+                    if matches!(
+                        self.confirm_action,
+                        Some(ConfirmAction::StageCleanup { .. })
+                    ) {
+                        "Move reviewed files"
+                    } else {
+                        "Confirm removal"
+                    },
+                )
+                .flex_shrink_0()
+                .disabled(
+                    if matches!(
+                        self.confirm_action,
+                        Some(ConfirmAction::StageCleanup { .. })
+                    ) {
+                        self.storage_busy
+                    } else {
+                        self.pending > 0
+                    },
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    match this.confirm_action.take() {
+                        Some(ConfirmAction::StageCleanup { id, digest }) => {
+                            this.run_cleanup(id, Some(digest), cx)
+                        }
+                        Some(ConfirmAction::DeleteProfile(id)) => {
+                            let service = this.speakers.clone();
+                            this.task(
+                                "Deleting local voice profile",
+                                async move {
+                                    service.delete(&id).await?;
+                                    Ok(Update::Profiles(service.profiles().await?))
+                                },
+                                cx,
+                            );
+                        }
+                        Some(ConfirmAction::RemoveExample { id, profile }) => {
+                            let service = this.speakers.clone();
+                            this.task(
+                                "Removing voice example",
+                                async move {
+                                    service.remove_example(&id).await?;
+                                    Ok(Update::Examples(
+                                        profile.clone(),
+                                        service.examples(Some(&profile)).await?,
+                                    ))
+                                },
+                                cx,
+                            );
+                        }
+                        Some(ConfirmAction::RemoveModel(id)) => {
+                            let service = this.models.clone();
+                            this.task(
+                                "Removing downloaded model files",
+                                async move {
+                                    service.remove(&id).await?;
+                                    Ok(Update::Models(service.list().await?))
+                                },
+                                cx,
+                            );
+                        }
+                        None => {}
+                    }
+                    cx.notify();
+                })),
             )
     }
     pub(super) fn receive_detail(&mut self, d: reader::Document) {

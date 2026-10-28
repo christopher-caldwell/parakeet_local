@@ -94,6 +94,11 @@ enum Command {
 }
 #[derive(Subcommand)]
 enum Storage {
+    /// Review, reversibly stage, or restore completed processing scratch.
+    Cleanup {
+        #[command(subcommand)]
+        command: Cleanup,
+    },
     /// Read-only file accounting, including referenced audio outside this root.
     Usage,
     /// Read the saved preview policy; defaults to keep all.
@@ -114,6 +119,32 @@ enum Storage {
         keep_all: bool,
         #[arg(long)]
         expected_revision: u64,
+    },
+}
+#[derive(Subcommand)]
+enum Cleanup {
+    /// Persist a bounded concrete review. No audio files are moved.
+    Review {
+        #[arg(long)]
+        completed_scratch_days: Option<u16>,
+        #[arg(long, default_value_t = 128)]
+        limit: usize,
+    },
+    List,
+    Show {
+        id: String,
+    },
+    /// Move exactly the reviewed files to recovery. Reclaims zero bytes.
+    Apply {
+        id: String,
+        #[arg(long)]
+        review_digest: String,
+        #[arg(long)]
+        confirm: bool,
+    },
+    /// Restore retained files without overwriting anything.
+    Restore {
+        id: String,
     },
 }
 #[derive(Subcommand)]
@@ -523,6 +554,11 @@ fn writes(command: &Command) -> bool {
         command,
         Command::Storage {
             command: Storage::SetPolicy { .. }
+                | Storage::Cleanup {
+                    command: Cleanup::Review { .. }
+                        | Cleanup::Apply { .. }
+                        | Cleanup::Restore { .. }
+                }
         } | Command::Jobs {
             command: Jobs::Recover | Jobs::Retry { .. } | Jobs::Cancel { .. }
         } | Command::Meetings {
@@ -775,7 +811,21 @@ async fn execute(cli: Cli) -> anyhow::Result<Value> {
         )
     })?;
     let store = Arc::new(SqliteStore::new(pool.clone()));
-    let library = LibraryService::new(store.clone(), store.clone(), source.clone());
+    let guarded_audio = Arc::new(parakeet_infrastructure::cleanup::GuardedAudioWrites {
+        gate: parakeet_infrastructure::cleanup::StorageGate::for_database(&database)?,
+        library: store.clone(),
+        locations: store.clone(),
+    });
+    let cleanup = parakeet_application::cleanup::CleanupService::new(
+        store.clone(),
+        store.clone(),
+        Arc::new(parakeet_infrastructure::cleanup::LocalCleanupFiles::new(
+            root.clone(),
+            database.clone(),
+            models.clone(),
+        )?),
+    );
+    let library = LibraryService::new(store.clone(), guarded_audio.clone(), source.clone());
     let engine = Arc::new(LocalSpeech::new(models.clone(), model_runtime_executable()));
     let ownership =
         Arc::new(parakeet_infrastructure::jobs::FileProcessingOwnership::for_database(&database)?);
@@ -807,13 +857,13 @@ async fn execute(cli: Cli) -> anyhow::Result<Value> {
     ));
     let locations = parakeet_application::audio_locations::AudioLocationService::new(
         store.clone(),
-        store.clone(),
+        guarded_audio.clone(),
         Arc::new(parakeet_infrastructure::audio::LocalAudioIdentity),
     );
     let meeting = parakeet_application::meeting::MeetingService::new(
         Arc::new(parakeet_application::capture::CaptureService::new(
             native.clone(),
-            store.clone(),
+            guarded_audio.clone(),
         )),
         store.clone(),
         store.clone(),
@@ -831,6 +881,22 @@ async fn execute(cli: Cli) -> anyhow::Result<Value> {
     );
     let result = match cli.command {
         Command::Storage { command } => match command {
+            Storage::Cleanup { command } => match command {
+                Cleanup::Review {
+                    completed_scratch_days,
+                    limit,
+                } => value(
+                    serde_json::json!({"review":cleanup.review(completed_scratch_days.map(|days| parakeet_domain::storage::RetentionPolicy {completed_scratch_after_days:Some(days)}),limit).await?,"reclaimed_bytes":0}),
+                ),
+                Cleanup::List => value(cleanup.list().await?),
+                Cleanup::Show { id } => value(cleanup.show(&id).await?),
+                Cleanup::Apply {
+                    id,
+                    review_digest,
+                    confirm,
+                } => cleanup_value(cleanup.apply(&id, &review_digest, confirm).await?),
+                Cleanup::Restore { id } => cleanup_value(cleanup.restore(&id).await?),
+            },
             Storage::Usage => value(storage.usage().await?),
             Storage::Policy => value(storage.policy().await?),
             Storage::Preview {
@@ -917,7 +983,7 @@ async fn execute(cli: Cli) -> anyhow::Result<Value> {
                 LegacyImportService::new(
                     Arc::new(parakeet_database::MacParakeetCatalog),
                     source.clone(),
-                    store.clone(),
+                    guarded_audio.clone(),
                 )
                 .import(ImportLegacyInput {
                     path: path.to_path_buf(),
@@ -1031,7 +1097,7 @@ async fn execute(cli: Cli) -> anyhow::Result<Value> {
         } => {
             let capture = Arc::new(parakeet_application::capture::CaptureService::new(
                 native.clone(),
-                store.clone(),
+                guarded_audio.clone(),
             ));
             let dictation = Arc::new(parakeet_application::dictation::DictationService::new(
                 capture,
@@ -1080,7 +1146,7 @@ async fn execute(cli: Cli) -> anyhow::Result<Value> {
         Command::Capture {
             command: Capture::Recover { directory },
         } => value(
-            parakeet_application::capture::CaptureService::new(native, store)
+            parakeet_application::capture::CaptureService::new(native, guarded_audio.clone())
                 .recover(&directory)
                 .await?,
         ),
@@ -1354,7 +1420,7 @@ async fn execute(cli: Cli) -> anyhow::Result<Value> {
         Command::Media {
             command: Media::Import { url },
         } => value(
-            MediaService::new(media, store.clone(), store)
+            MediaService::new(media, guarded_audio.clone(), store)
                 .import(&url)
                 .await?,
         ),
@@ -1362,7 +1428,11 @@ async fn execute(cli: Cli) -> anyhow::Result<Value> {
             command: Media::Transcribe { url, model },
         } => {
             let receipt = MediaTranscriptionService::new(
-                Arc::new(MediaService::new(media, store.clone(), store.clone())),
+                Arc::new(MediaService::new(
+                    media,
+                    guarded_audio.clone(),
+                    store.clone(),
+                )),
                 processing.clone(),
             )
             .transcribe(TranscribeMediaInput { url, model })
@@ -1406,12 +1476,16 @@ impl std::fmt::Display for IncompleteMedia {
 }
 impl std::error::Error for IncompleteMedia {}
 fn kind(error: &anyhow::Error) -> &'static str {
+    if error.downcast_ref::<IncompleteCleanup>().is_some() {
+        return "storage";
+    }
     if error.downcast_ref::<IncompleteMedia>().is_some() {
         return "processing";
     }
     for cause in error.chain() {
         macro_rules! classify {($($type:ty),*)=>{$(if let Some(error)=cause.downcast_ref::<$type>(){let kind=error.kind();if kind!="nested"{return kind;}})*};}
         classify!(
+            parakeet_application::cleanup::CleanupError,
             parakeet_application::storage::InspectStorageError,
             parakeet_application::storage::ReadRetentionPolicyError,
             parakeet_application::storage::SaveRetentionPolicyError,
@@ -1538,6 +1612,11 @@ async fn main() {
                 .downcast_ref::<IncompleteMedia>()
                 .map(|e| json!(e.0))
                 .or_else(|| {
+                    error
+                        .downcast_ref::<IncompleteCleanup>()
+                        .map(|e| json!(e.0))
+                })
+                .or_else(|| {
                     error.chain().find_map(|e| {
                         e.downcast_ref::<parakeet_application::meeting::FinalizeMeetingError>()
                             .and_then(|e| e.retained())
@@ -1564,4 +1643,25 @@ async fn main() {
             });
         }
     }
+}
+
+#[derive(Debug)]
+struct IncompleteCleanup(parakeet_application::cleanup::CleanupReview);
+impl std::fmt::Display for IncompleteCleanup {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "cleanup needs attention; files retained; inspect review {}",
+            self.0.id
+        )
+    }
+}
+impl std::error::Error for IncompleteCleanup {}
+fn cleanup_value(
+    review: parakeet_application::cleanup::CleanupReview,
+) -> anyhow::Result<serde_json::Value> {
+    if review.state == parakeet_application::cleanup::CleanupState::NeedsAttention {
+        return Err(IncompleteCleanup(review).into());
+    }
+    value(review)
 }
