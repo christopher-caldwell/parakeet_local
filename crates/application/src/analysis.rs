@@ -589,6 +589,7 @@ impl MeetingAnalysisService {
             }
         }
         self.check_bleed(plan).await?;
+        self.check_speaker_saturation(plan).await?;
         let prior = plan.clone();
         plan.stage = "preparing_speakers".into();
         self.save(Some(&prior), plan).await?;
@@ -639,6 +640,38 @@ impl MeetingAnalysisService {
     }
 }
 impl MeetingAnalysisService {
+    /// A diarizer that used every speaker slot may have merged different people on that source.
+    async fn check_speaker_saturation(
+        &self,
+        plan: &mut MeetingAnalysis,
+    ) -> Result<(), AnalyzeMeetingError> {
+        let Some(detail) = self.queries.detail(&plan.recording_id).await? else {
+            return Ok(());
+        };
+        let mut warnings = vec![];
+        for source in &plan.sources {
+            let run = source
+                .diarization
+                .as_ref()
+                .and_then(|id| detail.runs.iter().find(|r| &r.id == id));
+            if run.is_some_and(|r| r.result["metrics"]["speaker_slots_saturated"] == true) {
+                warnings.push(format!(
+                    "all speaker slots were used on source {}: different people may have been merged; verify its voices or diarize it with speakrs Community-1",
+                    source.track.id
+                ));
+            }
+        }
+        if warnings.is_empty() {
+            return Ok(());
+        }
+        let prior = plan.clone();
+        for warning in warnings {
+            if !plan.failures.contains(&warning) {
+                plan.failures.push(warning);
+            }
+        }
+        self.save(Some(&prior), plan).await
+    }
     /// Best effort: a missing detector, a single source or a failing check never fails analysis;
     /// without the evidence, "Me" simply relies on the other safeguards.
     async fn check_bleed(&self, plan: &mut MeetingAnalysis) -> Result<(), AnalyzeMeetingError> {

@@ -10,6 +10,8 @@ use parakeet_domain::*;
 use serde_json::json;
 use std::{sync::Arc, time::Instant};
 
+/// Speaker slots of the FluidAudio Nemotron presets (see docs/audio-models.md).
+const NEMOTRON_SPEAKER_SLOTS: usize = 8;
 #[derive(Clone)]
 pub struct LocalSpeech {
     models: Arc<ModelFiles>,
@@ -79,7 +81,15 @@ impl SpeechProcessing for LocalSpeech {
    let duration=req.duration_ms.or_else(||track.duration_ms.map(|d|d-req.start_ms)).ok_or_else(||CapabilityError::message("unknown source duration; specify an explicit bounded interval"))?;
    if duration<=0 || duration>7_200_000{return Err(CapabilityError::message("processing is bounded to two hours per run; specify a shorter interval"));}
    let started=Instant::now();let loaded=Instant::now();
-   if req.model.starts_with("nemotron3-"){return crate::native_models::nemotron(crate::native_models::NemotronJob{runtime:&runtime,models:&models,request:&req,track:&track,run:&run,duration,started,executable:&model_runtime,control:&control});}
+   if req.model.starts_with("nemotron3-"){
+    let mut output=crate::native_models::nemotron(crate::native_models::NemotronJob{runtime:&runtime,models:&models,request:&req,track:&track,run:&run,duration,started,executable:&model_runtime,control:&control})?;
+    // The model has a fixed number of speaker slots; using all of them means people may be merged.
+    let used=output.intervals.iter().map(|i|i.speaker.as_str()).collect::<std::collections::BTreeSet<_>>().len();
+    output.metrics["speaker_slots_used"]=json!(used);
+    output.metrics["speaker_slots_available"]=json!(NEMOTRON_SPEAKER_SLOTS);
+    output.metrics["speaker_slots_saturated"]=json!(used>=NEMOTRON_SPEAKER_SLOTS);
+    return Ok(output);
+   }
    if req.model.starts_with("whisper-"){
     control.publish(ProcessingStage::LoadingModel,0,Some(duration),0,None);
     crate::whisper::transcribe(crate::whisper::WhisperJob{runtime:&runtime,models:&models,cache:&cache,request:&req,track:&track,run:&run,control:&control,duration,started,directory:&directory})
