@@ -1309,6 +1309,7 @@ impl Render for Workbench {
                                         | "recording"
                                         | "waiting_or_stalled"
                                         | "source_failed"
+                                        | "source_interrupted"
                                 )
                             ) {
                                 "not capturing"

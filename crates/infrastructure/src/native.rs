@@ -374,6 +374,8 @@ impl AudioCapture for NativeBridge {
                         "completed" => "completed",
                         "failed" => "failed",
                         "source_failed" => "source_failed",
+                        "source_interrupted" => "source_interrupted",
+                        "source_resumed" => "recording",
                         _ => "starting",
                     };
                     merged.insert("state".into(), json!(state));
