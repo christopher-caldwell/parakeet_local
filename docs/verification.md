@@ -154,18 +154,6 @@ The read-only audit again confirms 48 original artifact fingerprints/JSON hashes
 
 **Next:** validated continuation from retained Whisper chunks, including source/model/settings verification, contiguous-prefix checks and resumed-versus-uninterrupted comparisons. Existing local models and public fixtures are sufficient; no user input is needed. Current retry still restarts its requested interval. Priorities, live preview, retention policy and the separate human hardware checks remain outstanding.
 
-## Validated within-source continuation
-
-**83 workspace tests pass** (Infrastructure now 23), plus the explicit real-model cache/word-mode/verification/75-second expiry probe. The decoder resource probe was skipped. Default/performance-feature Clippy with warnings denied, formatting, SQLx offline check and the signed normal release build pass; existing SQLx potentially-unused-cache/upstream warnings remain. No schema/query change was needed. See [checkpoint contracts and limits](chunk-resume.md) and the [public numeric report](../benchmarks/results/2026-10-27-chunk-resume.json).
-
-On the 634.578-second public AAC file, a two-chunk interruption, four-chunk interruption and final retry reused 239,976 ms of actual audio at a 240,000 ms requested timeline position, inferred seven remaining chunks, and matched all 46 uninterrupted transcript texts/times from the same binary. Engine wall time was 12.100 seconds uninterrupted and 9.486 seconds for final continuation, including checkpoint validation and source hashing. These are individual observations, not a general performance guarantee. The first conservative probe refused reuse because codec padding yielded 59.988-second windows; the fix preserves requested origins and actual lengths independently, with a regression test.
-
-The 89.285-second public speech fixture also resumed with experimental word timing, preserving recognized words and their timing/Unknown states. Corrupted-checksum fault injection reused zero chunks, completed a fresh pass and matched uninterrupted output. Native retry reused four chunks/seven new inference chunks, displayed that distinction and preserved prior runs/title. Real meeting finalization retained an interrupted source, reused two chunks, completed both sources and preserved 0/1250 ms offsets and title with three total runs. A separate deliberately incomplete isolated fixture retained its failed plan when microphone audio was absent; it did not claim a complete meeting or silently replace missing source identity.
-
-Private receipts are in `.local/chunk-resume/`. The final audit retains 48 unchanged original artifact fingerprints/JSON hashes, exactly three confirmed examples, unchanged model selection, no pending personal jobs and SQLite integrity/schema 3. The personal library remains 18 records with automatic-after-Stop off, and the ordinary release is restored there. This pass adds no microphone, physical keyboard, Bluetooth, M3 or personal speaker-accuracy acceptance evidence.
-
-Next independent step: storage accounting and an explicit retention preview/policy that protects original sources, confirmed voice examples and active/recoverable work. It can be implemented with current knowledge; enabling a personal cleanup policy and executing it should remain deliberate user actions. Queued priorities, live preview and the hardware/human checks remain separate outstanding work.
-
 ## Storage accounting and retention previews
 
 **91 workspace tests pass** (Application 2, CLI 10, Database 28, Desktop 2, Domain 24, Infrastructure 25). Default/performance-feature Clippy with warnings denied, formatting, regenerated SQLx metadata/offline check and the signed normal release build pass. The explicit model-cache/decoder probes were skipped for this metadata feature; real local Whisper was run and cancelled to exercise active/recoverable file protection. Existing upstream/compiler/cache warnings remain separate from those gates.
@@ -195,18 +183,6 @@ Schema 4→5 migration passed on an isolated SQLite snapshot and then on the per
 Staging retains bytes on the same volume and reclaims **zero space**. Permanent reclamation, expiry and batches above 128 files/512 MiB are not implemented. Advisory coordination covers current cooperating processes for the selected database/root; direct database edits, old binaries and arbitrary external filesystem writers remain outside it. Moving/replacing the root or database invalidates automatic review restoration. Source audio and uncertain/recoverable work remain protected.
 
 Next independent step: background job scheduling with explicit dictation priority and durable queue state, building on the current model ownership and cancellation controls. Current knowledge and simulated/public fixtures are sufficient; the separate physical microphone/keyboard, M3 and personal-identity acceptance checks still require their respective evidence.
-
-## Whole-project review at 64a6278
-
-Fresh baseline: **100 workspace tests pass**, with the same three intentional ordinary skips; default/performance Clippy and SQLx offline checks pass. The [top-to-bottom review](project-review.md) found six functional defects and Playbook contract drift. Four temporary desired-behavior probes fail for dictation stream-error cancellation, excerpt/full transcript selection, missing-source completeness and corrected-text library search. Actual release CLI probes reproduce foreign source-database rejection and benchmark import despite an exclusive storage gate. The gate-bypass probe does not exercise a complete file-move race; its stale-reference consequence is identified as an inference from production wiring. Private source/logs remain in `.local/zoom-out-review/`; no failing temporary test or product fix was shipped as part of this review.
-
-All 48 original fingerprints/JSON hashes and 14 personal-table hashes remain unchanged; 18 recordings, the exact three confirmed examples, zero personal cleanup reviews and SQLite integrity `ok`/schema 5 remain preserved. No new model, hardware, personal-quality or remote-AI acceptance is claimed. Architecture remains aligned, but full compliance and daily-replacement readiness are not established. **Next:** repair these correctness/contract defects before further queue/storage expansion; current knowledge and fixtures are sufficient. Then close the integrated post-meeting diarization/suggestion workflow and prepare a focused physical/identity checkpoint.
-
-## Correctness and contract repairs
-
-[R1–R7 are repaired](correctness-repairs.md). **107 workspace tests pass**; default Clippy, checked SQLx metadata, formatting and the signed native release pass. The four red reviewer probes are now permanent passing regressions. Added actual source/WAL/schema, coherent-result publication, corrected-search/Undo and CLI storage-gate coverage. Synthetic dictation verifies error/EOF/stop/caller-abort cancellation, without claiming real keyboard/editor delivery.
-
-The release CLI inspected ten actual source records without changing the original DB hash and ran local public-audio ASR plus an excerpt while retaining the full current transcript. Native display matched. Schema 6 is explicit; isolated snapshots were migrated, while personal migration is deferred until the integrated pass's backup/verification. No remote AI, personal enrollment or model selection changed. Next: integrated meeting analysis; current knowledge is sufficient.
 
 ## Integrated meeting and speaker workflow
 
