@@ -59,10 +59,12 @@ enum Update {
     Examples(String, Vec<VoiceExampleSummary>),
     Candidates(String, Vec<EnrollmentCandidate>),
     Identified(
-        String,
-        ClusterIdentification,
-        Vec<SpeakerProfile>,
-        reader::Document,
+        Box<(
+            String,
+            ClusterIdentification,
+            Vec<SpeakerProfile>,
+            reader::Document,
+        )>,
     ),
     IdentificationUndone(UndoIdentificationReport),
     RefreshSelected,
@@ -318,7 +320,8 @@ impl Workbench {
                                     this.examples = examples;
                                 }
                             }
-                            Update::Identified(candidate, identification, profiles, detail) => {
+                            Update::Identified(done) => {
+                                let (candidate, identification, profiles, detail) = *done;
                                 this.train_candidates_named.push((candidate, identification.id.clone()));
                                 this.status = format!("Named {} lines; {} voice examples saved", identification.segments.len(), identification.example_ids.len());
                                 this.train_done.push(identification);

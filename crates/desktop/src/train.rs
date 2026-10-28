@@ -229,12 +229,12 @@ impl Workbench {
                     .await?;
                 let profiles = service.profiles().await?;
                 let detail = library.show(&recording).await.map(reader::Document::new)?;
-                Ok(Update::Identified(
+                Ok(Update::Identified(Box::new((
                     candidate_id,
                     identification,
                     profiles,
                     detail,
-                ))
+                ))))
             },
             cx,
         );
