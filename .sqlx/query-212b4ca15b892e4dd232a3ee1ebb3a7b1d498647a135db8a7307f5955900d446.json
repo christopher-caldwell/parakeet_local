@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO cluster_identifications(id,recording_id,profile_id,data) VALUES(?1,?2,?3,?4)\n",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "212b4ca15b892e4dd232a3ee1ebb3a7b1d498647a135db8a7307f5955900d446"
+}

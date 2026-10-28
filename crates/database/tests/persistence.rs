@@ -495,6 +495,7 @@ async fn suggestion_resolution_is_durable_atomic_and_never_enrolls_predictions()
         segment_id: None,
         correction_id: None,
         created_at: "now".into(),
+        admitted_example_id: None,
     };
     assert!(!store.resolve_suggestion(&stale, 0, None, 0).await.unwrap());
     assert_eq!(

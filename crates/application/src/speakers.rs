@@ -1,6 +1,8 @@
 use super::*;
 use crate::processing::{EmbeddingRequest, VoiceEmbeddings};
 use parakeet_domain::recognition::{IdentityDecision, MatchPolicy, suggest};
+mod identification;
+pub use identification::*;
 operation_error!(ListSpeakersError,sources{Persistence:PersistenceError=>"persistence"},values{});
 operation_error!(ListVoiceExamplesError,sources{Persistence:PersistenceError=>"persistence"},values{});
 operation_error!(CreateSpeakerError,sources{Invalid:ValidationError=>"invalid_input",Persistence:PersistenceError=>"persistence"},values{});
@@ -27,6 +29,16 @@ pub struct SuggestSpeakerInput {
     pub more_ranges: Vec<(i64, i64)>,
     pub policy: MatchPolicy,
 }
+/// A saved correction plus the verified example it admitted, if any.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CorrectionOutcome {
+    #[serde(flatten)]
+    pub correction: Correction,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub example: Option<VoiceExampleSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub example_note: Option<String>,
+}
 #[derive(Debug, Clone)]
 pub struct CorrectSegmentInput {
     pub segment_id: String,
@@ -45,6 +57,14 @@ pub trait SpeakerQueries: Send + Sync {
         recording_id: Option<&str>,
     ) -> Result<Vec<SpeakerSuggestion>, PersistenceError>;
     async fn suggestion(&self, id: &str) -> Result<Option<SpeakerSuggestion>, PersistenceError>;
+    async fn identification(
+        &self,
+        id: &str,
+    ) -> Result<Option<ClusterIdentification>, PersistenceError>;
+    async fn identifications(
+        &self,
+        recording_id: Option<&str>,
+    ) -> Result<Vec<ClusterIdentification>, PersistenceError>;
 }
 #[async_trait]
 pub trait SpeakerWrites: Send + Sync {
@@ -62,6 +82,22 @@ pub trait SpeakerWrites: Send + Sync {
     async fn delete_profile(&self, id: &str) -> Result<bool, PersistenceError>;
     async fn enroll(&self, example: &VoiceExample) -> Result<(), PersistenceError>;
     async fn remove_example(&self, id: &str) -> Result<bool, PersistenceError>;
+    /// Atomically records a cluster identification, appends its segment corrections (each
+    /// against the expected revision) and inserts the examples it admitted. `false` on conflict.
+    async fn save_identification(
+        &self,
+        identification: &ClusterIdentification,
+        corrections: &[(Correction, usize)],
+        examples: &[VoiceExample],
+    ) -> Result<bool, PersistenceError>;
+    /// Atomically marks the identification undone, appends the reverting corrections and
+    /// deletes the examples it admitted. `false` if anything changed meanwhile.
+    async fn undo_identification(
+        &self,
+        identification: &ClusterIdentification,
+        corrections: &[(Correction, usize)],
+        example_ids: &[String],
+    ) -> Result<bool, PersistenceError>;
     async fn correct(
         &self,
         correction: &Correction,
@@ -91,6 +127,9 @@ pub struct VoiceExampleSummary {
     pub capture_domain: String,
     pub verified_at: String,
     pub vector_dimensions: usize,
+    /// Present when the example was admitted from a user's identification or correction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<parakeet_domain::ExampleOrigin>,
 }
 impl From<VoiceExample> for VoiceExampleSummary {
     fn from(e: VoiceExample) -> Self {
@@ -106,6 +145,7 @@ impl From<VoiceExample> for VoiceExampleSummary {
             capture_domain: e.capture_domain,
             verified_at: e.verified_at,
             vector_dimensions: e.vector.len(),
+            origin: e.origin,
         }
     }
 }
@@ -383,7 +423,7 @@ impl SpeakerService {
     pub async fn correct(
         &self,
         input: CorrectSegmentInput,
-    ) -> Result<Correction, CorrectSegmentError> {
+    ) -> Result<CorrectionOutcome, CorrectSegmentError> {
         let segment_id = input.segment_id.as_str();
         let profile_id = input.profile_id;
         let text = input.text;
@@ -422,7 +462,87 @@ impl SpeakerService {
                 "Another correction was saved; reread before applying this change".into(),
             ));
         }
-        Ok(c)
+        let (example, example_note) = match (&c.action[..], &c.profile_id) {
+            ("assign", Some(profile)) => self.admit_for_correction(&c, profile).await,
+            _ => (None, None),
+        };
+        Ok(CorrectionOutcome {
+            correction: c,
+            example,
+            example_note,
+        })
+    }
+    /// The user assigned a person to a segment: if that segment is clean single-speaker speech
+    /// long enough to embed, keep it as a reversible verified example.
+    async fn admit_for_correction(
+        &self,
+        correction: &Correction,
+        profile: &str,
+    ) -> (Option<VoiceExampleSummary>, Option<String>) {
+        let note = |why: &str| (None, Some(format!("no example admitted: {why}")));
+        let Ok(Some(segment)) = self.queries.segment(&correction.segment_id).await else {
+            return note("segment unavailable");
+        };
+        let Some(track_id) = segment.track_id.clone() else {
+            return note("segment has no source");
+        };
+        let Ok(Some(detail)) = self.library.detail(&segment.recording_id).await else {
+            return note("recording unavailable");
+        };
+        let Some(range) = identification::segment_local_range(&segment, &detail) else {
+            return note("segment timing is unresolved");
+        };
+        let Some(diarization) = current_diarization_runs(&detail.runs).remove(track_id.as_str())
+        else {
+            return note("no current diarization to confirm the speech is clean");
+        };
+        let intervals: Vec<SpeakerInterval> =
+            serde_json::from_value(diarization.result["intervals"].clone()).unwrap_or_default();
+        let attribution =
+            parakeet_domain::reconciliation::reconcile(std::slice::from_ref(&segment), &intervals);
+        if attribution
+            .first()
+            .is_none_or(|a| a.state != "anonymous_model_attribution" || a.overlapping_speech)
+        {
+            return note("segment is not clean single-speaker speech");
+        }
+        let (example, why) = self
+            .admit_confirmed_interval(
+                profile,
+                &segment.recording_id,
+                &track_id,
+                range,
+                parakeet_domain::ExampleOrigin {
+                    verified_by: "user_identification".into(),
+                    source_kind: "segment_correction".into(),
+                    source_id: correction.id.clone(),
+                },
+            )
+            .await;
+        match example {
+            Some(example) => match self.writes.enroll(&example).await {
+                Ok(()) => (Some(example.into()), None),
+                Err(error) => (None, Some(format!("no example admitted: {error}"))),
+            },
+            None => (None, why.map(|why| format!("no example admitted: {why}"))),
+        }
+    }
+    /// Removes examples a user action admitted; used when that action is undone.
+    async fn remove_admitted_examples(
+        &self,
+        source_kind: &str,
+        source_id: &str,
+    ) -> Result<(), PersistenceError> {
+        for example in self.queries.examples(None).await? {
+            if example
+                .origin
+                .as_ref()
+                .is_some_and(|o| o.source_kind == source_kind && o.source_id == source_id)
+            {
+                self.writes.remove_example(&example.id).await?;
+            }
+        }
+        Ok(())
     }
     pub async fn undo(&self, segment_id: &str) -> Result<Correction, UndoCorrectionError> {
         let history = self.queries.corrections(segment_id).await?;
@@ -444,7 +564,7 @@ impl SpeakerService {
                 "no correction to undo".into(),
             ));
         }
-        stack.pop();
+        let undone = stack.pop().map(|c| c.id.clone());
         let prior = stack.last();
         let c = Correction {
             id: new_id(),
@@ -458,6 +578,10 @@ impl SpeakerService {
             return Err(UndoCorrectionError::Conflict(
                 "Correction history changed; reread before undoing".into(),
             ));
+        }
+        if let Some(undone) = undone {
+            self.remove_admitted_examples("segment_correction", &undone)
+                .await?;
         }
         Ok(c)
     }
@@ -623,6 +747,10 @@ pub struct SuggestionResolution {
     pub segment_id: Option<String>,
     pub correction_id: Option<String>,
     pub created_at: String,
+    /// Reported on the call that created the resolution; the example is also listed under the
+    /// person and removed again when the decision is undone. Not stored with the resolution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admitted_example_id: Option<String>,
 }
 #[derive(Debug, Clone)]
 pub struct ResolveSuggestionInput {
@@ -829,6 +957,7 @@ impl SpeakerService {
             segment_id: correction.as_ref().map(|c| c.segment_id.clone()),
             correction_id: correction.as_ref().map(|c| c.id.clone()),
             created_at: now(),
+            admitted_example_id: None,
         };
         if !self
             .writes
@@ -843,6 +972,32 @@ impl SpeakerService {
             return Err(ResolveSuggestionError::Conflict(
                 "suggestion or correction changed; inspect before resolving again".into(),
             ));
+        }
+        let mut resolution = resolution;
+        if let Some(profile) = &resolution.profile_id {
+            // The user confirmed this person for this evidence, so keep it as a reversible example.
+            let (example, _) = self
+                .admit_confirmed_interval(
+                    profile,
+                    &suggestion.recording_id,
+                    &suggestion.track_id,
+                    (suggestion.start_ms, suggestion.end_ms),
+                    parakeet_domain::ExampleOrigin {
+                        verified_by: "user_identification".into(),
+                        source_kind: "suggestion_resolution".into(),
+                        source_id: resolution.id.clone(),
+                    },
+                )
+                .await;
+            if let Some(example) = example {
+                self.writes.enroll(&example).await?;
+                resolution.admitted_example_id = Some(example.id);
+            }
+        } else if resolution.action == "undo"
+            && let Some(undone) = latest
+        {
+            self.remove_admitted_examples("suggestion_resolution", &undone.id)
+                .await?;
         }
         Ok(resolution)
     }

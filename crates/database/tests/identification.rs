@@ -1,0 +1,393 @@
+use parakeet_application::{
+    LibraryWrites,
+    processing::{EmbeddingOutput, EmbeddingRequest, RunWrites, VoiceEmbeddings},
+    speakers::{
+        CorrectSegmentInput, IdentifyClusterInput, PersonChoice, ResolveSuggestionInput,
+        SpeakerQueries, SpeakerService, SuggestSpeakerInput,
+    },
+};
+use parakeet_database::*;
+use parakeet_domain::*;
+use serde_json::json;
+use std::sync::Arc;
+
+struct FixtureModels;
+#[async_trait::async_trait]
+impl parakeet_application::LocalModels for FixtureModels {
+    async fn selection(
+        &self,
+    ) -> Result<parakeet_application::ModelSelection, parakeet_application::CapabilityError> {
+        Ok(Default::default())
+    }
+    async fn list(
+        &self,
+    ) -> Result<Vec<parakeet_application::ModelInfo>, parakeet_application::CapabilityError> {
+        Ok(vec![])
+    }
+    async fn install(
+        &self,
+        _: &str,
+    ) -> Result<parakeet_application::ModelInfo, parakeet_application::CapabilityError> {
+        Err(parakeet_application::CapabilityError::message(
+            "test does not install",
+        ))
+    }
+    async fn verify(
+        &self,
+        id: &str,
+    ) -> Result<parakeet_application::ModelInfo, parakeet_application::CapabilityError> {
+        Ok(parakeet_application::ModelInfo {
+            experimental_word_timestamps: false,
+            id: id.into(),
+            category: "asr".into(),
+            revision: "test".into(),
+            installed: true,
+            verified: true,
+            bytes: Some(1),
+            license: "test".into(),
+            path: None,
+            detail: json!({}),
+        })
+    }
+    async fn select(&self, _: &str) -> Result<(), parakeet_application::CapabilityError> {
+        Ok(())
+    }
+    async fn select_embedding(&self, _: &str) -> Result<(), parakeet_application::CapabilityError> {
+        Ok(())
+    }
+    async fn remove(&self, _: &str) -> Result<(), parakeet_application::CapabilityError> {
+        Ok(())
+    }
+}
+struct FixtureEmbeddings;
+#[async_trait::async_trait]
+impl VoiceEmbeddings for FixtureEmbeddings {
+    async fn embed(
+        &self,
+        _: &EmbeddingRequest,
+    ) -> Result<EmbeddingOutput, parakeet_application::CapabilityError> {
+        Ok(EmbeddingOutput {
+            model: "test".into(),
+            revision: "1".into(),
+            vector: vec![1., 0.],
+            metrics: json!({"mock":true}),
+        })
+    }
+}
+fn segment(id: &str, start: i64, end: i64) -> TranscriptSegment {
+    TranscriptSegment {
+        id: id.into(),
+        recording_id: "r".into(),
+        run_id: "import:r".into(),
+        track_id: Some("track".into()),
+        ordinal: 0,
+        start_ms: Some(start),
+        end_ms: Some(end),
+        text: format!("words {id}"),
+        speaker_claim: None,
+        evidence: json!({}),
+    }
+}
+fn interval(speaker: &str, start: i64, end: i64) -> SpeakerInterval {
+    SpeakerInterval {
+        start_ms: start,
+        end_ms: end,
+        speaker: speaker.into(),
+        track_id: Some("track".into()),
+    }
+}
+async fn fixture() -> (tempfile::TempDir, Arc<SqliteStore>, SpeakerService) {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("test.db");
+    create_empty(&path).await.unwrap();
+    migrate(&path).await.unwrap();
+    let store = Arc::new(SqliteStore::new(open_existing(&path).await.unwrap()));
+    let bundle = ImportBundle {
+        recording: Recording {
+            id: "r".into(),
+            source_key: "original:r".into(),
+            source_kind: "meeting".into(),
+            source_title: "Meeting".into(),
+            title_override: None,
+            created_at: "2026-01-01".into(),
+            duration_ms: Some(60_000),
+            metadata: json!({}),
+        },
+        tracks: vec![AudioTrack {
+            id: "track".into(),
+            recording_id: "r".into(),
+            kind: TrackKind::System,
+            path: "/missing/source.m4a".into(),
+            start_offset_ms: Some(0),
+            sample_rate: Some(48000),
+            duration_ms: Some(60_000),
+            available: true,
+            size_bytes: None,
+            modified_unix_ms: None,
+            provenance: json!({}),
+        }],
+        segments: vec![
+            segment("s1", 0, 6_000),
+            segment("s2", 7_000, 13_000),
+            segment("s3", 14_000, 20_000),
+            segment("s4", 30_000, 36_000),
+        ],
+        original: json!({}),
+        warnings: vec![],
+    };
+    store.import(&bundle).await.unwrap();
+    let intervals = vec![
+        interval("a", 0, 6_500),
+        interval("a", 7_000, 13_500),
+        interval("b", 14_000, 20_500),
+        interval("a", 30_000, 36_000),
+        interval("b", 33_000, 37_000),
+    ];
+    let mut run = ProcessingRun {
+        id: "diarization-full".into(),
+        recording_id: "r".into(),
+        kind: "diarization".into(),
+        model: "fixture".into(),
+        model_revision: "1".into(),
+        status: "running".into(),
+        started_at: "now".into(),
+        completed_at: None,
+        configuration: json!({"track":{"id":"track"},"request":{"start_ms":0,"duration_ms":null}}),
+        result: json!({}),
+        error: None,
+    };
+    store.start(&run).await.unwrap();
+    run.status = "completed".into();
+    run.result = json!({"intervals":intervals});
+    store.finish(&run, &[]).await.unwrap();
+    let service = SpeakerService::new(
+        store.clone(),
+        store.clone(),
+        store.clone(),
+        Arc::new(FixtureEmbeddings),
+        Arc::new(FixtureModels),
+    );
+    (tmp, store, service)
+}
+fn identify(profile: PersonChoice) -> IdentifyClusterInput {
+    IdentifyClusterInput {
+        recording_id: "r".into(),
+        track_id: "track".into(),
+        run_id: "diarization-full".into(),
+        cluster: "a".into(),
+        person: profile,
+        confirmed: true,
+    }
+}
+#[tokio::test]
+async fn naming_a_cluster_corrects_clean_segments_admits_examples_and_undoes_as_one_unit() {
+    let (_tmp, store, service) = fixture().await;
+    let mut unconfirmed = identify(PersonChoice::New("Person".into()));
+    unconfirmed.confirmed = false;
+    assert!(service.identify_cluster(unconfirmed).await.is_err());
+    assert!(service.profiles().await.unwrap().is_empty());
+
+    let named = service
+        .identify_cluster(identify(PersonChoice::New("Person".into())))
+        .await
+        .unwrap();
+    let ids: Vec<_> = named
+        .segments
+        .iter()
+        .map(|s| s.segment_id.as_str())
+        .collect();
+    assert_eq!(ids, ["s1", "s2"]);
+    // s4 is shared with another voice: listed, never named.
+    assert_eq!(named.skipped.len(), 1);
+    assert_eq!(named.skipped[0].segment_id, "s4");
+    assert_eq!(named.skipped[0].reason, "ambiguous_or_overlapping");
+    assert!(store.corrections("s3").await.unwrap().is_empty());
+    for id in ["s1", "s2"] {
+        let history = store.corrections(id).await.unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(
+            history[0].profile_id.as_deref(),
+            Some(named.profile_id.as_str())
+        );
+    }
+    // Two clean turns were admitted as verified, reversible, inspectable examples.
+    let examples = service.examples(Some(&named.profile_id)).await.unwrap();
+    assert_eq!(examples.len(), 2);
+    for example in &examples {
+        let origin = example.origin.as_ref().unwrap();
+        assert_eq!(origin.verified_by, "user_identification");
+        assert_eq!(origin.source_kind, "cluster_identification");
+        assert_eq!(origin.source_id, named.id);
+    }
+    assert_eq!(service.identifications(Some("r")).await.unwrap().len(), 1);
+
+    let report = service.undo_identification(&named.id).await.unwrap();
+    assert_eq!(report.reverted_segments, 2);
+    assert_eq!(report.removed_examples, 2);
+    assert!(report.left_in_place.is_empty());
+    for id in ["s1", "s2"] {
+        let history = store.corrections(id).await.unwrap();
+        assert_eq!(history.last().unwrap().action, "undo");
+        assert!(history.last().unwrap().profile_id.is_none());
+    }
+    assert!(service.examples(None).await.unwrap().is_empty());
+    assert!(service.undo_identification(&named.id).await.is_err());
+}
+#[tokio::test]
+async fn later_edits_survive_undo_and_a_superseded_run_cannot_be_named() {
+    let (_tmp, store, service) = fixture().await;
+    let person = service.create("Person").await.unwrap();
+    let named = service
+        .identify_cluster(identify(PersonChoice::Existing(person.id.clone())))
+        .await
+        .unwrap();
+    service
+        .correct(CorrectSegmentInput {
+            segment_id: "s1".into(),
+            profile_id: None,
+            text: Some("edited".into()),
+            action: "text".into(),
+        })
+        .await
+        .unwrap();
+    let report = service.undo_identification(&named.id).await.unwrap();
+    assert_eq!(report.left_in_place, vec!["s1".to_owned()]);
+    assert_eq!(report.reverted_segments, 1);
+    assert_eq!(
+        store
+            .corrections("s1")
+            .await
+            .unwrap()
+            .last()
+            .unwrap()
+            .action,
+        "text"
+    );
+
+    // A bounded experiment never replaces the full run; naming a stale run id is refused.
+    let mut stale = identify(PersonChoice::Existing(person.id));
+    stale.run_id = "not-current".into();
+    assert!(service.identify_cluster(stale).await.is_err());
+}
+#[tokio::test]
+async fn assigning_a_clean_segment_admits_an_example_and_undo_removes_it() {
+    let (_tmp, _store, service) = fixture().await;
+    let person = service.create("Person").await.unwrap();
+    let outcome = service
+        .correct(CorrectSegmentInput {
+            segment_id: "s3".into(),
+            profile_id: Some(person.id.clone()),
+            text: None,
+            action: "assign".into(),
+        })
+        .await
+        .unwrap();
+    let example = outcome.example.expect("clean segment admits an example");
+    assert_eq!(
+        example.origin.as_ref().unwrap().source_kind,
+        "segment_correction"
+    );
+    assert_eq!(service.examples(Some(&person.id)).await.unwrap().len(), 1);
+    // An overlapped segment is assigned without admitting anything.
+    let overlapped = service
+        .correct(CorrectSegmentInput {
+            segment_id: "s4".into(),
+            profile_id: Some(person.id.clone()),
+            text: None,
+            action: "assign".into(),
+        })
+        .await
+        .unwrap();
+    assert!(overlapped.example.is_none());
+    assert!(overlapped.example_note.is_some());
+    service.undo("s3").await.unwrap();
+    assert!(service.examples(Some(&person.id)).await.unwrap().is_empty());
+    // Rejections never enroll.
+    let rejected = service
+        .correct(CorrectSegmentInput {
+            segment_id: "s1".into(),
+            profile_id: None,
+            text: None,
+            action: "reject".into(),
+        })
+        .await
+        .unwrap();
+    assert!(rejected.example.is_none());
+    assert!(service.examples(None).await.unwrap().is_empty());
+}
+#[tokio::test]
+async fn accepting_a_suggestion_admits_a_reversible_example_and_rejecting_admits_none() {
+    let (_tmp, _store, service) = fixture().await;
+    let named = service
+        .identify_cluster(identify(PersonChoice::New("Person".into())))
+        .await
+        .unwrap();
+    let before = service
+        .examples(Some(&named.profile_id))
+        .await
+        .unwrap()
+        .len();
+    let suggestion = service
+        .suggest(SuggestSpeakerInput {
+            recording_id: "r".into(),
+            track_id: "track".into(),
+            start_ms: 14_000,
+            end_ms: 20_500,
+            more_ranges: vec![],
+            policy: parakeet_domain::recognition::MatchPolicy {
+                minimum_score: 0.5,
+                minimum_margin: 0.0,
+                minimum_examples: 1,
+            },
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        suggestion.decision.suggested_profile.as_deref(),
+        Some(named.profile_id.as_str())
+    );
+    // A prediction alone enrolls nothing.
+    assert_eq!(
+        service
+            .examples(Some(&named.profile_id))
+            .await
+            .unwrap()
+            .len(),
+        before
+    );
+    let accepted = service
+        .resolve_suggestion(ResolveSuggestionInput {
+            id: suggestion.id.clone(),
+            action: "accept".into(),
+            segment_id: Some("s3".into()),
+            profile_id: None,
+        })
+        .await
+        .unwrap();
+    assert!(accepted.admitted_example_id.is_some());
+    assert_eq!(
+        service
+            .examples(Some(&named.profile_id))
+            .await
+            .unwrap()
+            .len(),
+        before + 1
+    );
+    service
+        .resolve_suggestion(ResolveSuggestionInput {
+            id: suggestion.id,
+            action: "undo".into(),
+            segment_id: None,
+            profile_id: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        service
+            .examples(Some(&named.profile_id))
+            .await
+            .unwrap()
+            .len(),
+        before
+    );
+}

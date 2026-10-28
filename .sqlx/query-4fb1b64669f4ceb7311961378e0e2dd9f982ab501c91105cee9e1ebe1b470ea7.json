@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT data FROM cluster_identifications WHERE (?1 IS NULL OR recording_id=?1) ORDER BY rowid\n",
+  "describe": {
+    "columns": [
+      {
+        "name": "data",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "4fb1b64669f4ceb7311961378e0e2dd9f982ab501c91105cee9e1ebe1b470ea7"
+}

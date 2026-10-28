@@ -380,6 +380,32 @@ enum Speakers {
     Candidates {
         meeting: String,
     },
+    /// Name a whole anonymous cluster after listening; undoable as one unit.
+    IdentifyCluster {
+        recording: String,
+        #[arg(long)]
+        track: String,
+        #[arg(long)]
+        run: String,
+        #[arg(long)]
+        cluster: String,
+        #[arg(long, conflicts_with = "new_name")]
+        profile: Option<String>,
+        #[arg(long)]
+        new_name: Option<String>,
+        #[arg(
+            long,
+            help = "Confirm that a human listened and verified this identity"
+        )]
+        confirmed: bool,
+    },
+    UndoIdentification {
+        id: String,
+    },
+    Identifications {
+        #[arg(long)]
+        recording: Option<String>,
+    },
     List,
     Create {
         name: String,
@@ -607,6 +633,8 @@ fn writes(command: &Command) -> bool {
                     | Speakers::RemoveExample { .. }
                     | Speakers::Diarize { .. }
                     | Speakers::Enroll { .. }
+                    | Speakers::IdentifyCluster { .. }
+                    | Speakers::UndoIdentification { .. }
                     | Speakers::Assign { .. }
                     | Speakers::Reject { .. }
                     | Speakers::Unknown { .. }
@@ -1319,6 +1347,42 @@ async fn execute(cli: Cli) -> anyhow::Result<Value> {
                     })
                     .await?,
             ),
+            Speakers::IdentifyCluster {
+                recording,
+                track,
+                run,
+                cluster,
+                profile,
+                new_name,
+                confirmed,
+            } => {
+                let person = match (profile, new_name) {
+                    (Some(id), None) => parakeet_application::speakers::PersonChoice::Existing(id),
+                    (None, Some(name)) => parakeet_application::speakers::PersonChoice::New(name),
+                    _ => {
+                        return Err(parakeet_domain::ValidationError(
+                            "choose exactly one of --profile or --new-name".into(),
+                        )
+                        .into());
+                    }
+                };
+                value(
+                    speakers
+                        .identify_cluster(parakeet_application::speakers::IdentifyClusterInput {
+                            recording_id: recording,
+                            track_id: track,
+                            run_id: run,
+                            cluster,
+                            person,
+                            confirmed,
+                        })
+                        .await?,
+                )
+            }
+            Speakers::UndoIdentification { id } => value(speakers.undo_identification(&id).await?),
+            Speakers::Identifications { recording } => {
+                value(speakers.identifications(recording.as_deref()).await?)
+            }
             Speakers::Enroll {
                 profile,
                 meeting,
