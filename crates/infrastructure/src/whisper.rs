@@ -44,11 +44,10 @@ pub(crate) fn transcribe(job: WhisperJob<'_>) -> Result<EngineOutput, Capability
         directory,
     } = job;
     whisper_rs::install_logging_hooks();
-    let file = directory.join(if req.model == "whisper-base.en" {
-        "ggml-base.en.bin"
-    } else {
-        "ggml-small.en.bin"
-    });
+    let file = directory.join(format!(
+        "ggml-{}.bin",
+        req.model.strip_prefix("whisper-").unwrap_or(&req.model)
+    ));
     let key = models.cache_identity(&req.model)?;
     let loaded = Instant::now();
     let mut cached = cache

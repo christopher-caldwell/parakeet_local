@@ -200,6 +200,13 @@ fn catalog(
             "ggerganov/whisper.cpp",
             vec!["ggml-small.en.bin".into()],
         )),
+        "whisper-medium.en" | "whisper-large-v3" | "whisper-large-v3-turbo" => Ok((
+            "asr",
+            WHISPER_REV,
+            "MIT",
+            "ggerganov/whisper.cpp",
+            vec![format!("ggml-{}.bin", &id["whisper-".len()..])],
+        )),
         "speakrs-community-1-cpu" => Ok((
             "diarization",
             SPEAKRS_REV,
@@ -340,6 +347,9 @@ impl LocalModels for ModelFiles {
             [
                 "whisper-base.en",
                 "whisper-small.en",
+                "whisper-medium.en",
+                "whisper-large-v3",
+                "whisper-large-v3-turbo",
                 SPEAKRS_ID,
                 "speakrs-community-1-cpu",
                 "nemotron3-fast128",

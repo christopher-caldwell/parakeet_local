@@ -6,12 +6,15 @@ Weights are deliberately installed from pinned HTTPS model revisions, hashed aga
 |---|---|---|---:|
 | whisper-base.en | whisper-rs 0.16.0 / whisper.cpp Metal | 5359861c739e955e79d9a303bcbc70fb988958b1 | 147,964,211 |
 | whisper-small.en | same runtime | same revision | 487,614,201 |
+| whisper-medium.en | same runtime | same revision | 1,533,774,781 |
+| whisper-large-v3 | same runtime | same revision | 3,095,033,483 |
+| whisper-large-v3-turbo | same runtime | same revision | 1,624,555,275 |
 | speakrs-community-1-coreml | speakrs 0.7.0 Core ML | 67f963b6a1d94fcd4678948237b3cc8bd69bf1d8 | 272,600,614 |
 | speakrs-community-1-cpu | speakrs 0.7.0 native CPU | same revision | 32,692,756 |
 | nemotron3-fast128 | selected FluidAudio source subset / Core ML CPU+GPU | 1b0b133f6f8820292010afd776d8f9fbc9fca17e | 199,096,435 |
 | nemotron3-offline | same runtime, offline preset | same revision | approximately 199 MB |
 
-Whisper converts mono 16 kHz PCM in independent 60-second chunks with no context carryover. Segment timings are model estimates, not word alignments. Explicit `--word-timestamps` additionally preserves experimental Whisper token estimates and derived anonymous word evidence; it remains off by default. Invalid timing stays untimed. See [speaker-word evaluation](speaker-word-evaluation.md). There is no overlapping chunk concatenation to deduplicate. Text, source, no-speech evidence, chunk energy, configuration and raw output are retained separately from speaker reconciliation. Unknown source origins or inconsistent capture timelines keep track-local timing in evidence rather than inventing meeting times. English-only model variants are currently offered.
+Whisper converts mono 16 kHz PCM in independent speech-aligned chunks of up to 25 seconds, cut inside silence, with no context carryover. Model comparison: [whisper-models](../benchmarks/results/2026-10-28-whisper-models.json). Segment timings are model estimates, not word alignments. Explicit `--word-timestamps` additionally preserves experimental Whisper token estimates and derived anonymous word evidence; it remains off by default. Invalid timing stays untimed. See [speaker-word evaluation](speaker-word-evaluation.md). There is no overlapping chunk concatenation to deduplicate. Text, source, no-speech evidence, chunk energy, configuration and raw output are retained separately from speaker reconciliation. Unknown source origins or inconsistent capture timelines keep track-local timing in evidence rather than inventing meeting times. English-only model variants are currently offered.
 
 Speakrs provides Community-1-style segmentation, WeSpeaker embeddings and clustering. Both backends produced identical diarization scores on the three development clips; Core ML was substantially faster. Its false speech on the short music-heavy `tucrg` clip made a Rust-only runtime an unsuitable default by itself.
 

@@ -143,6 +143,9 @@ pub fn model_name(id: &str) -> &str {
     match id {
         "whisper-base.en" => "Whisper Base · English",
         "whisper-small.en" => "Whisper Small · English",
+        "whisper-medium.en" => "Whisper Medium · English",
+        "whisper-large-v3" => "Whisper Large v3",
+        "whisper-large-v3-turbo" => "Whisper Large v3 Turbo",
         "speakrs-community-1-coreml" => "Community-1 · Core ML",
         "speakrs-community-1-cpu" => "Community-1 · CPU",
         "nemotron3-fast128" => "Nemotron · Fast",

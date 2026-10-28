@@ -54,6 +54,15 @@ target/release/parakeet --data-root .local/long-asr-root benchmark run .local/lo
 
 Single utterances never reach chunking; these multi-minute joins do. [Result](results/2026-10-28-long-clip-chunking.json): parity with the old fixed windows, not a gain.
 
+## Meeting-like tracks and model comparison
+
+```sh
+# AMI headset audio (CC BY 4.0): https://huggingface.co/datasets/edinburghcstr/ami, ihm/test-00000-of-00004.parquet
+python3 benchmarks/prepare_ami.py .local/ami/test-00000.parquet .local/ami
+```
+
+Run a copied suite once per `models` entry (`whisper-small.en`, `-medium.en`, `-large-v3-turbo`, `-large-v3`). [Result](results/2026-10-28-whisper-models.json).
+
 ## Speaker-attributed word diagnostics
 
 `benchmark score-speakers REFERENCE.json PREDICTION.json` computes anonymous-stream cpWER through the shared application service without database initialization. [Input/protocol and limitations](../docs/speaker-word-evaluation.md) are explicit. For external scorer verification, deliberately install `meeteval==0.4.3` in an isolated Python environment and run `python benchmarks/check_speaker_wer.py --output .local/speaker-wer-oracle.json` using that interpreter. The fixed seed generates 250 cases; no speech/network inference is involved.

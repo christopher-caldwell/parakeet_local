@@ -122,5 +122,26 @@
     "sha256": {
       "ggml-small.en.bin": "c6138d6d58ecc8322097e0f987c32f1be8bb0a18532a3f88f734d1bbf9c41e5d"
     }
+  },
+  "whisper-medium.en": {
+    "bytes": 1533774781,
+    "revision": "5359861c739e955e79d9a303bcbc70fb988958b1",
+    "sha256": {
+      "ggml-medium.en.bin": "cc37e93478338ec7700281a7ac30a10128929eb8f427dda2e865faa8f6da4356"
+    }
+  },
+  "whisper-large-v3": {
+    "bytes": 3095033483,
+    "revision": "5359861c739e955e79d9a303bcbc70fb988958b1",
+    "sha256": {
+      "ggml-large-v3.bin": "64d182b440b98d5203c4f9bd541544d84c605196c4f7b845dfa11fb23594d1e2"
+    }
+  },
+  "whisper-large-v3-turbo": {
+    "bytes": 1624555275,
+    "revision": "5359861c739e955e79d9a303bcbc70fb988958b1",
+    "sha256": {
+      "ggml-large-v3-turbo.bin": "1fc70f774d38eb169993ac391eea357ef47c88757ef72ee5943879b7e8e2bc69"
+    }
   }
 }

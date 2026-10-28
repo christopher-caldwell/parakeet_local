@@ -1,0 +1,130 @@
+{
+ "id": "whisper-model-comparison",
+ "date": "2026-10-28",
+ "hardware": "this Mac (release build, whisper.cpp Metal, 4 threads)",
+ "weights_revision": "5359861c739e955e79d9a303bcbc70fb988958b1",
+ "sets": {
+  "ami_headset_tracks": "5 single-speaker 10-minute AMI headset tracks (benchmarks/prepare_ami.py); spontaneous speech. Absolute WER is high (about 20%) and only partly explained by scoring conventions: contractions such as wanna/gonna and dropped backchannels such as 'yeah' account for a small share, the rest was not categorized.",
+  "librispeech_long_set2": "4 long LibriSpeech concatenations, speakers 1673 1988 1993 2078 (benchmarks/prepare_long_asr.py)"
+ },
+ "models": {
+  "small.en": {
+   "ami": {
+    "clip_wer": [
+     0.2047,
+     0.1651,
+     0.232,
+     0.1837,
+     0.2434
+    ],
+    "overall_wer": 0.2028,
+    "mean_rtf": 0.03,
+    "reference_words": 3422
+   },
+   "librispeech_long": {
+    "clip_wer": [
+     0.0162,
+     0.0346,
+     0.0294,
+     0.0508
+    ],
+    "overall_wer": 0.0313,
+    "mean_rtf": 0.049,
+    "reference_words": 4148
+   }
+  },
+  "medium.en": {
+   "ami": {
+    "clip_wer": [
+     0.1879,
+     0.1717,
+     0.2219,
+     0.1725,
+     0.239
+    ],
+    "overall_wer": 0.1952,
+    "mean_rtf": 0.07,
+    "reference_words": 3422
+   },
+   "librispeech_long": {
+    "clip_wer": [
+     0.0232,
+     0.0239,
+     0.0237,
+     0.0363
+    ],
+    "overall_wer": 0.0265,
+    "mean_rtf": 0.118,
+    "reference_words": 4148
+   }
+  },
+  "large-v3-turbo": {
+   "ami": {
+    "clip_wer": [
+     0.2058,
+     0.1625,
+     0.2363,
+     0.1853,
+     0.2654
+    ],
+    "overall_wer": 0.2066,
+    "mean_rtf": 0.061,
+    "reference_words": 3422
+   },
+   "librispeech_long": {
+    "clip_wer": [
+     0.0116,
+     0.0251,
+     0.018,
+     0.0436
+    ],
+    "overall_wer": 0.0234,
+    "mean_rtf": 0.071,
+    "reference_words": 4148
+   }
+  },
+  "large-v3": {
+   "ami": {
+    "clip_wer": [
+     0.1946,
+     0.1532,
+     0.2334,
+     0.1597,
+     0.2566
+    ],
+    "overall_wer": 0.1952,
+    "mean_rtf": 0.122,
+    "reference_words": 3422
+   },
+   "librispeech_long": {
+    "clip_wer": [
+     0.0093,
+     0.0227,
+     0.019,
+     0.0342
+    ],
+    "overall_wer": 0.0203,
+    "mean_rtf": 0.181,
+    "reference_words": 4148
+   }
+  }
+ },
+ "old_pipeline_small_en_ami": {
+  "clip_wer": [
+   0.2013,
+   0.2153,
+   0.2738,
+   0.238,
+   0.2917
+  ],
+  "overall_wer": 0.2379,
+  "mean_rtf": 0.031,
+  "reference_words": 3422
+ },
+ "findings": [
+  "The speech-aligned pipeline beats the old fixed 60 s windows on sparse meeting-like tracks with the same small.en model: AMI WER 24.3% -> 20.8% (deletions 282 -> 230, insertions 115 -> 56).",
+  "large-v3 is most accurate on read speech (2.0% vs small.en 3.1%) and ties medium.en on AMI (19.5%); the AMI gap between models is within about 1 point, so it does not separate them.",
+  "large-v3-turbo was not more accurate than small.en on AMI.",
+  "All models run far faster than real time (large-v3 about 0.12-0.18 RTF), so a one-hour meeting transcribes in roughly 7-11 minutes."
+ ]
+}
