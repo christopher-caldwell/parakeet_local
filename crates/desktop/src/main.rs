@@ -853,11 +853,51 @@ impl Render for Workbench {
                 content = content.child(self.storage_view(cx));
             }
             Area::Jobs => {
-                content=content.child(section("Background jobs","Transcription and speaker work that has not finished. Your original audio is never touched."))
-                    .child(button("refresh-jobs","Refresh pending jobs").self_start().on_click(cx.listener(|this,_,_,cx|{let service=this.recovery.clone();this.task("Reading pending jobs",async move{Ok(Update::Jobs(service.pending().await?))},cx); })))
-                    .child(button("recover-jobs","Recover abandoned processing jobs").self_start().on_click(cx.listener(|this,_,_,cx|{let service=this.recovery.clone();this.task("Recovering abandoned jobs",async move{let report=service.recover().await?;Ok(Update::Recovered(report,service.pending().await?))},cx); })))
-                    .child(caption(if self.pending_jobs.is_empty(){"No unfinished processing jobs. Failed or interrupted runs can be retried from their recording’s Processing tab.".into()}else{format!("{} unfinished jobs. Open a recording’s Processing tab to retry a settled failure.",self.pending_jobs.len())}));
-                content=content.child(section("Meeting transcripts", "Resume pending or failed final passes. Recover abandoned source jobs above before resuming an interrupted pass."));
+                content = content.child(section(
+                    "Background jobs",
+                    "Transcription and speaker work that has not finished. Your original audio is never touched.",
+                ));
+                content = content.child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .items_center()
+                        .gap_2()
+                        .child(button("refresh-jobs", "Refresh").on_click(cx.listener(
+                            |this, _, _, cx| {
+                                let service = this.recovery.clone();
+                                this.task(
+                                    "Reading pending jobs",
+                                    async move { Ok(Update::Jobs(service.pending().await?)) },
+                                    cx,
+                                );
+                            },
+                        )))
+                        .child(button("recover-jobs", "Recover abandoned jobs").on_click(
+                            cx.listener(|this, _, _, cx| {
+                                let service = this.recovery.clone();
+                                this.task(
+                                    "Recovering abandoned jobs",
+                                    async move {
+                                        let report = service.recover().await?;
+                                        Ok(Update::Recovered(report, service.pending().await?))
+                                    },
+                                    cx,
+                                );
+                            }),
+                        )),
+                );
+                content = content.child(caption(if self.pending_jobs.is_empty() {
+                    "Nothing is running or waiting. A failed or interrupted run can be retried from its recording's Processing tab.".into()
+                } else {
+                    format!("{} unfinished jobs. Open a recording's Processing tab to retry a settled failure.", self.pending_jobs.len())
+                }));
+                if !self.meeting_plans.is_empty() {
+                    content = content.child(group(
+                        "Meeting transcripts",
+                        "Resume pending or failed final passes. Recover abandoned jobs first if one was interrupted.",
+                    ));
+                }
                 for plan in &self.meeting_plans {
                     let id = plan.recording_id.clone();
                     content = content.child(

@@ -448,7 +448,7 @@ impl Workbench {
     /// until the user adopts them.
     pub(super) fn calibration_view(&self, cx: &mut Context<Self>) -> Div {
         let mut view = div().flex().flex_col().gap_2().child(
-            quiet(
+            button(
                 "train-calibrate",
                 "Check how well my verified voices are recognized",
             )

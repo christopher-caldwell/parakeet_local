@@ -106,7 +106,7 @@ impl Workbench {
                 })
                 .child(div().flex_1())
                 .child(
-                    quiet("refresh-storage", "Measure again")
+                    button("refresh-storage", "Measure again")
                         .disabled(self.storage_busy)
                         .on_click(cx.listener(|this, _, _, cx| this.preview_storage(None, cx))),
                 ),

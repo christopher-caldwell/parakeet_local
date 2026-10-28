@@ -120,6 +120,34 @@ pub fn panel() -> Div {
         .flex_col()
         .gap_3()
 }
+/// A titled block with an action at its right edge, aligned to the title.
+pub fn group_action(
+    title: impl Into<SharedString>,
+    hint: impl Into<SharedString>,
+    action: impl IntoElement,
+) -> Div {
+    div()
+        .mt_4()
+        .flex()
+        .items_start()
+        .gap_3()
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(
+                    div()
+                        .text_size(px(16.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(title.into()),
+                )
+                .child(caption(hint)),
+        )
+        .child(action)
+}
 /// A titled block inside a screen: a clear title with one line saying what it is for.
 pub fn group(title: impl Into<SharedString>, hint: impl Into<SharedString>) -> Div {
     div()
@@ -178,6 +206,7 @@ pub fn tile(
                 .flex()
                 .flex_col()
                 .items_start()
+                .gap_0p5()
                 .child(div().text_size(px(13.)).child(title))
                 .when_some(subtitle, |d, text| d.child(caption(text))),
         )
@@ -192,12 +221,12 @@ fn switch(on: bool) -> Div {
         .flex()
         .items_center()
         .when(on, |d| d.justify_end())
-        .bg(rgb(if on { ACCENT } else { BORDER }))
+        .bg(rgb(if on { SUCCESS } else { BORDER }))
         .child(
             div()
                 .size(px(16.))
                 .rounded_full()
-                .bg(rgb(if on { 0x15223a } else { MUTED })),
+                .bg(rgb(if on { 0x10241a } else { MUTED })),
         )
 }
 /// A whole-row on/off setting: what it does on the left, the switch on the right.
@@ -217,6 +246,7 @@ pub fn toggle_row(
         .justify_between()
         .gap_4()
         .bg(rgb(PANEL))
+        .border_color(gpui::transparent_black())
         .aria_selected(on)
         .hover(|s| s.bg(rgb(ELEVATED)))
         .child(

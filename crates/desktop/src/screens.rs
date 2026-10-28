@@ -283,7 +283,7 @@ impl Workbench {
             "Records your microphone and the other people's audio as separate tracks, which makes the transcript more accurate.",
         ));
         let mut card = panel()
-            .child(pill(
+            .child(div().flex().child(pill(
                 capture_state_label(state).to_owned(),
                 match state {
                     "idle" | "completed" => SUCCESS,
@@ -293,7 +293,7 @@ impl Workbench {
                     }
                     _ => MUTED,
                 },
-            ))
+            )))
             .child(
                 div()
                     .flex()
@@ -338,7 +338,11 @@ impl Workbench {
                 None => "Choose a microphone below to start recording.".into(),
             }));
         if recording && state == "completed" {
-            card = card.child(pill("Audio saved · finishing transcription", WARNING));
+            card = card.child(
+                div()
+                    .flex()
+                    .child(pill("Audio saved · finishing transcription", WARNING)),
+            );
         }
         if let Some(message) = health["message"].as_str() {
             card = card.child(div().text_color(rgb(WARNING)).child(message.to_owned()));
@@ -409,20 +413,12 @@ impl Workbench {
             }
         }
         view = view.child(card);
-        view = view.child(
-            div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .child(div().flex_1().child(group(
-                    "Microphone",
-                    "Pick the one you speak into. A saved microphone that is unplugged is never replaced silently.",
-                )))
-                .child(
-                    quiet("refresh-audio-devices", "Refresh")
-                        .on_click(cx.listener(|this, _, _, cx| this.navigate(Area::Capture, cx))),
-                ),
-        );
+        view = view.child(group_action(
+            "Microphone",
+            "Pick the one you speak into. A saved microphone that is unplugged is never replaced silently.",
+            button("refresh-audio-devices", "Refresh")
+                .on_click(cx.listener(|this, _, _, cx| this.navigate(Area::Capture, cx))),
+        ));
         let devices = self.devices["devices"]
             .as_array()
             .cloned()
@@ -569,10 +565,10 @@ impl Workbench {
             "Hold a shortcut, speak, then let go. Your words are transcribed on this Mac and pasted where you were typing.",
         ));
         let mut card = panel()
-            .child(pill(
+            .child(div().flex().child(pill(
                 if on { "Dictation is on" } else { "Dictation is off" },
                 if on { SUCCESS } else { MUTED },
-            ))
+            )))
             .child(
                 div()
                     .flex()
@@ -604,7 +600,7 @@ impl Workbench {
                     .child(caption(
                         "Needs macOS permission for the microphone, Accessibility (to paste) and Input Monitoring (to hear shortcuts).",
                     ))
-                    .child(quiet("dictation-permissions", "Open permissions").on_click(
+                    .child(button("dictation-permissions", "Open permissions").on_click(
                         cx.listener(|this, _, _, cx| this.navigate(Area::Privacy, cx)),
                     )),
             );
@@ -747,26 +743,18 @@ impl Workbench {
                     )
                 }),
         );
-        view = view.child(
-            div()
-                .flex()
-                .items_end()
-                .gap_2()
-                .child(div().flex_1().child(group(
-                    "Recent dictations",
-                    "The raw words are always kept, so nothing is lost if pasting fails.",
-                )))
-                .child(quiet("refresh-dictations", "Refresh").on_click(cx.listener(
-                    |this, _, _, cx| {
-                        let service = this.dictation_history.clone();
-                        this.task(
-                            "Reading retained dictations",
-                            async move { Ok(Update::Dictations(service.list().await?)) },
-                            cx,
-                        );
-                    },
-                ))),
-        );
+        view = view.child(group_action(
+            "Recent dictations",
+            "The raw words are always kept, so nothing is lost if pasting fails.",
+            button("refresh-dictations", "Refresh").on_click(cx.listener(|this, _, _, cx| {
+                let service = this.dictation_history.clone();
+                this.task(
+                    "Reading retained dictations",
+                    async move { Ok(Update::Dictations(service.list().await?)) },
+                    cx,
+                );
+            })),
+        ));
         if self.dictations.is_empty() {
             view = view.child(caption("Nothing dictated yet."));
         }
@@ -809,7 +797,7 @@ impl Workbench {
             "If dictation was interrupted while it held your clipboard, this puts your clipboard back.",
         ))
         .child(
-            quiet("recover-clipboard", "Restore my clipboard")
+            button("recover-clipboard", "Restore my clipboard")
                 .self_start()
                 .on_click(cx.listener(|this, _, _, cx| {
                     let service = this.insertion_recovery.clone();

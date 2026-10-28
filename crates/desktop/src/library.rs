@@ -452,10 +452,10 @@ impl Workbench {
         let Some(detail) = &self.detail else {
             let loading = self.requested_recording.is_some() && self.pending > 0;
             return reader.items_center().justify_center().gap_3().p_8()
-                .child(div().size(px(58.)).rounded_xl().bg(rgb(PANEL)).text_color(rgb(ACCENT)).flex().items_center().justify_center().child(icon("wave").size(px(30.))))
+                .child(div().size(px(58.)).rounded_xl().bg(rgb(PANEL)).text_color(rgb(ACCENT)).flex().items_center().justify_center().child(icon("wave").size(px(30.)).text_color(rgb(MUTED))))
                 .child(div().text_size(px(21.)).font_weight(FontWeight::SEMIBOLD).child(if loading{"Opening recording…"}else{"A place for every conversation"}))
                 .child(div().max_w(px(340.)).text_center().text_color(rgb(MUTED)).child(if loading{"Loading the saved transcript and source details."}else{"Select a recording to read its transcript, listen to the original audio, or review its speakers."}))
-                .when(!loading,|view|view.child(primary("empty-import","Import audio…").on_click(cx.listener(|this,_,_,cx|this.choose_audio(cx)))))
+                .when(!loading,|view|view.child(primary("empty-import","Import audio…").self_center().on_click(cx.listener(|this,_,_,cx|this.choose_audio(cx)))))
                 .child(caption("⌘O  Import audio     ⌘F  Find words"));
         };
         let mut heading = div()
@@ -786,12 +786,14 @@ impl Workbench {
                         "Try another search. Your saved transcript is unchanged."
                     }))
                     .when(detail.segments.is_empty(), |row| {
-                        row.child(button("open-audio-tab", "Audio & sources").on_click(
-                            cx.listener(|this, _, _, cx| {
-                                this.recording_tab = RecordingTab::Audio;
-                                cx.notify();
-                            }),
-                        ))
+                        row.child(
+                            button("open-audio-tab", "Audio & sources")
+                                .self_center()
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.recording_tab = RecordingTab::Audio;
+                                    cx.notify();
+                                })),
+                        )
                     }),
             );
         }
