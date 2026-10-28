@@ -163,6 +163,8 @@ struct Workbench {
     show_import_path: bool,
     show_status_details: bool,
     show_ai_routes: bool,
+    /// Grid columns for card screens, from the window width.
+    columns: usize,
     last_error: Option<String>,
     confirm_action: Option<shell::ConfirmAction>,
     show_location_tools: bool,
@@ -632,6 +634,11 @@ impl Workbench {
 impl Render for Workbench {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let began = Instant::now();
+        self.columns = if window.viewport_size().width >= px(1150.) {
+            2
+        } else {
+            1
+        };
         let sidebar = self.sidebar(cx);
         let mut content = div()
             .id("area-content")
@@ -665,78 +672,114 @@ impl Render for Workbench {
                     ),
                 );
                 if self.speaker_mode == SpeakerMode::Profiles {
-                    content=content.child(div().flex().flex_col().gap_2().child(caption("PEOPLE")).child(caption("A person is created when you name a voice in a recording, or here. Computer guesses are never saved as names on their own.")))
-     .child(div().flex().gap_2().child(field(&self.person_name).w(px(260.))).child(button("add-person","Create person").on_click(cx.listener(|this,_,_,cx|{let name=this.person_name.read(cx).value().to_string();let service=this.speakers.clone();this.task("Creating speaker profile",async move{service.create(&name).await?;Ok(Update::Profiles(service.profiles().await?))},cx);}))));
-                    content = content.child(
-                        button("refresh-people", "Refresh")
-                            .self_start()
-                            .on_click(cx.listener(|this, _, _, cx| this.refresh_profiles(cx))),
-                    );
-                    content = content.child(self.calibration_view(cx));
-                    let mut people = div().flex().flex_wrap().gap_2();
-                    for p in &self.profiles {
-                        let id = p.id.clone();
-                        let name = p.name.clone();
-                        people = people.child(
-                            choice(
+                    content = content.child(group(
+                        "People",
+                        "A person is created when you name a voice in a recording, or here. Computer guesses are never saved as names on their own.",
+                    ));
+                    let tiles = self
+                        .profiles
+                        .iter()
+                        .map(|p| {
+                            let id = p.id.clone();
+                            let name = p.name.clone();
+                            tile(
                                 p.id.clone(),
                                 p.name.clone(),
+                                None,
                                 self.selected_profile.as_ref() == Some(&p.id),
                             )
-                            .on_click(cx.listener(
-                                move |this, _, window, cx| {
-                                    this.selected_profile = Some(id.clone());
-                                    this.examples.clear();
-                                    this.person_name.update(cx, |input, cx| {
-                                        input.set_value(name.clone(), window, cx)
-                                    });
-                                    this.load_examples(id.clone(), cx);
-                                    cx.notify();
-                                },
-                            )),
-                        );
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.selected_profile = Some(id.clone());
+                                this.examples.clear();
+                                this.person_name.update(cx, |input, cx| {
+                                    input.set_value(name.clone(), window, cx)
+                                });
+                                this.load_examples(id.clone(), cx);
+                                cx.notify();
+                            }))
+                            .into_any_element()
+                        })
+                        .collect();
+                    content = content.child(grid(self.columns * 2, tiles));
+                    if self.profiles.is_empty() {
+                        content = content.child(caption("Nobody named yet."));
                     }
-                    content = content.child(people);
                     content = content.child(
-                        div()
-                            .flex()
-                            .gap_2()
+                        panel()
+                            .child(caption(if self.selected_profile.is_some() {
+                                "Change the selected person's name, or add someone new."
+                            } else {
+                                "Add someone new."
+                            }))
+                            .child(field(&self.person_name).w(px(280.)))
                             .child(
-                                button("rename-person", "Rename selected person")
-                                    .disabled(self.selected_profile.is_none())
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        if let Some(id) = this.selected_profile.clone() {
+                                div()
+                                    .flex()
+                                    .flex_wrap()
+                                    .gap_2()
+                                    .child(primary("add-person", "Add as new person").on_click(
+                                        cx.listener(|this, _, _, cx| {
                                             let name =
                                                 this.person_name.read(cx).value().to_string();
                                             let service = this.speakers.clone();
                                             this.task(
-                                                "Renaming person",
+                                                "Creating speaker profile",
                                                 async move {
-                                                    service
-                                                        .rename(RenameSpeakerInput {
-                                                            id: id.clone(),
-                                                            name: name.clone(),
-                                                        })
-                                                        .await?;
+                                                    service.create(&name).await?;
                                                     Ok(Update::Profiles(service.profiles().await?))
                                                 },
                                                 cx,
                                             );
-                                        }
-                                    })),
-                            )
-                            .child(
-                                danger("delete-person", "Delete person…")
-                                    .disabled(self.selected_profile.is_none())
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        if let Some(id) = this.selected_profile.clone() {
-                                            this.confirm_action =
-                                                Some(shell::ConfirmAction::DeleteProfile(id));
-                                            cx.notify();
-                                        }
-                                    })),
+                                        }),
+                                    ))
+                                    .child(
+                                        button("rename-person", "Rename selected")
+                                            .disabled(self.selected_profile.is_none())
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                if let Some(id) = this.selected_profile.clone() {
+                                                    let name = this
+                                                        .person_name
+                                                        .read(cx)
+                                                        .value()
+                                                        .to_string();
+                                                    let service = this.speakers.clone();
+                                                    this.task(
+                                                        "Renaming person",
+                                                        async move {
+                                                            service
+                                                                .rename(RenameSpeakerInput {
+                                                                    id: id.clone(),
+                                                                    name: name.clone(),
+                                                                })
+                                                                .await?;
+                                                            Ok(Update::Profiles(
+                                                                service.profiles().await?,
+                                                            ))
+                                                        },
+                                                        cx,
+                                                    );
+                                                }
+                                            })),
+                                    )
+                                    .child(
+                                        danger("delete-person", "Delete selected…")
+                                            .disabled(self.selected_profile.is_none())
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                if let Some(id) = this.selected_profile.clone() {
+                                                    this.confirm_action = Some(
+                                                        shell::ConfirmAction::DeleteProfile(id),
+                                                    );
+                                                    cx.notify();
+                                                }
+                                            })),
+                                    ),
                             ),
                     );
+                    content = content.child(group(
+                        "Recognition check",
+                        "Tests whether the app can tell your named people apart, using voices you have confirmed.",
+                    ));
+                    content = content.child(self.calibration_view(cx));
                     if self.selected_profile.is_some() {
                         content = content.child(caption(format!(
                             "{} verified voice {}",
@@ -818,11 +861,8 @@ impl Render for Workbench {
                 for plan in &self.meeting_plans {
                     let id = plan.recording_id.clone();
                     content = content.child(
-                        div()
+                        panel()
                             .p_3()
-                            .bg(rgb(PANEL))
-                            .flex()
-                            .flex_col()
                             .gap_2()
                             .child(format!(
                                 "{} · {} · {}/{} sources",
@@ -892,38 +932,7 @@ impl Render for Workbench {
                 content = content.child(self.dictation_view(cx));
             }
             Area::Privacy => {
-                content=content.child(section("Privacy & permissions","Transcription and speaker processing run locally and never leave this Mac. Grant the macOS permissions each feature needs below."))
-                    .child(div().p_4().rounded_lg().border_1().border_color(rgb(BORDER)).bg(rgb(PANEL)).child("Raw speech is always kept. Nothing is sent anywhere unless you set up and authorize an AI route under Advanced below."))
-                    .child(caption("macOS permissions are requested only when you press a button here; nothing prompts in the background."))
-                    .child(div().flex().flex_wrap().gap_2().children([
-                        ("microphone", "Microphone"),
-                        ("screen_recording", "System audio (Screen Recording)"),
-                        ("accessibility", "Insert text (Accessibility)"),
-                        ("input_monitoring", "Shortcuts (Input Monitoring)"),
-                    ].into_iter().enumerate().map(|(index, (kind, label))| {
-                        quiet(("request-permission", index), format!("Request {label}")).on_click(cx.listener(move |this, _, _, cx| {
-                            let service = this.audio_inspection.clone();
-                            this.task("Requesting macOS permission", async move {
-                                let result = service.request_permission(kind).await?;
-                                Ok(Update::Message(format!("{kind}: {}", if result["granted"] == true { "granted" } else { "not granted yet — approve it in System Settings if prompted" })))
-                            }, cx);
-                        }))
-                    })));
-                content = content.child(
-                    quiet(
-                        "toggle-ai-routes",
-                        if self.show_ai_routes {
-                            "Hide advanced: AI cleanup of dictated text"
-                        } else {
-                            "Advanced: AI cleanup of dictated text (off)"
-                        },
-                    )
-                    .self_start()
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.show_ai_routes = !this.show_ai_routes;
-                        cx.notify();
-                    })),
-                );
+                content = content.child(self.privacy_view(cx));
                 if self.show_ai_routes {
                     for (index, p) in self.prompts.iter().enumerate() {
                         let profile = p.clone();
@@ -1767,6 +1776,7 @@ fn main() -> anyhow::Result<()> {
                             show_import_path: false,
                             show_status_details: false,
                             show_ai_routes: false,
+                            columns: 1,
                             last_error: None,
                             confirm_action: None,
                             show_location_tools: false,

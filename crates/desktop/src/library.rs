@@ -535,7 +535,7 @@ impl Workbench {
                 .flex_wrap()
                 .items_center()
                 .gap_2()
-                .child(pill(recording_kind(&detail.recording.source_kind), ACCENT))
+                .child(pill(recording_kind(&detail.recording.source_kind), MUTED))
                 .child(caption(date_label(&detail.recording.created_at)))
                 .when(detail.recording.duration_ms.is_some(), |row| {
                     row.child(caption(time_label(detail.recording.duration_ms)))
@@ -597,12 +597,16 @@ impl Workbench {
     fn naming_banner(&self, waiting: usize, cx: &mut Context<Self>) -> Div {
         div()
             .flex_shrink_0()
+            .self_start()
+            .max_w(px(640.))
             .mx_5()
             .mt_3()
             .px_4()
             .py_3()
             .rounded_lg()
-            .bg(rgb(SELECTED))
+            .bg(rgba((WARNING << 8) | 0x1f))
+            .border_1()
+            .border_color(rgba((WARNING << 8) | 0x55))
             .flex()
             .items_center()
             .gap_3()
@@ -840,7 +844,7 @@ impl Workbench {
                     suggested_name(self, detail, segment),
                 ) {
                     (Some(claim), _) => (claim.to_owned(), false, MUTED),
-                    (None, Some(name)) => (name, false, ACCENT),
+                    (None, Some(name)) => (name, false, WARNING),
                     (None, None) => ("Unknown speaker".into(), false, WARNING),
                 },
             },
@@ -917,7 +921,7 @@ impl Workbench {
                         row.child(pill("Imported · unverified", MUTED))
                     })
                     .when(suggested, |row| {
-                        row.child(pill("Suggested · not confirmed", ACCENT))
+                        row.child(pill("Suggested · not confirmed", WARNING))
                     })
                     .when_some(source_label, |row, (text, color)| {
                         row.child(pill(text, color))

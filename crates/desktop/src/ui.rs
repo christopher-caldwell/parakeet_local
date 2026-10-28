@@ -18,6 +18,9 @@ fn button_base(id: impl Into<ElementId>, label: impl Into<SharedString>) -> Butt
     let label = label.into();
     Button::new(id)
         .flex_shrink_0()
+        // Buttons size to their label; they never stretch across a column. Rows that need a
+        // vertically centred button say `.self_center()`.
+        .self_start()
         .accessibility_label(label.clone())
         .px_3()
         .py_1p5()
@@ -104,6 +107,165 @@ pub fn section(title: impl Into<SharedString>, description: impl Into<SharedStri
                 .child(title.into()),
         )
         .child(caption(description))
+}
+/// A bordered surface that groups related controls.
+pub fn panel() -> Div {
+    div()
+        .p_4()
+        .rounded_lg()
+        .bg(rgb(PANEL))
+        .border_1()
+        .border_color(rgb(BORDER))
+        .flex()
+        .flex_col()
+        .gap_3()
+}
+/// A titled block inside a screen: a clear title with one line saying what it is for.
+pub fn group(title: impl Into<SharedString>, hint: impl Into<SharedString>) -> Div {
+    div()
+        .mt_4()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .child(
+            div()
+                .text_size(px(16.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .child(title.into()),
+        )
+        .child(caption(hint))
+}
+fn radio(selected: bool) -> Div {
+    div()
+        .size(px(16.))
+        .flex_shrink_0()
+        .rounded_full()
+        .border_1()
+        .border_color(rgb(if selected { ACCENT } else { MUTED }))
+        .flex()
+        .items_center()
+        .justify_center()
+        .when(selected, |d| {
+            d.child(div().size(px(8.)).rounded_full().bg(rgb(ACCENT)))
+        })
+}
+/// One choice among several, drawn as a bordered tile with a radio mark so it reads as a control.
+pub fn tile(
+    id: impl Into<ElementId>,
+    title: impl Into<SharedString>,
+    subtitle: Option<String>,
+    selected: bool,
+) -> Button {
+    let title = title.into();
+    button_base(id, "")
+        .accessibility_label(title.clone())
+        .w_full()
+        .min_h(px(48.))
+        .px_3()
+        .py_2()
+        .rounded_lg()
+        .justify_start()
+        .gap_3()
+        .border_color(rgb(if selected { ACCENT } else { BORDER }))
+        .bg(rgb(if selected { SELECTED } else { PANEL }))
+        .aria_selected(selected)
+        .hover(move |s| s.bg(rgb(if selected { SELECTED } else { ELEVATED })))
+        .child(radio(selected))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .items_start()
+                .child(div().text_size(px(13.)).child(title))
+                .when_some(subtitle, |d, text| d.child(caption(text))),
+        )
+}
+fn switch(on: bool) -> Div {
+    div()
+        .w(px(34.))
+        .h(px(20.))
+        .flex_shrink_0()
+        .rounded_full()
+        .p(px(2.))
+        .flex()
+        .items_center()
+        .when(on, |d| d.justify_end())
+        .bg(rgb(if on { ACCENT } else { BORDER }))
+        .child(
+            div()
+                .size(px(16.))
+                .rounded_full()
+                .bg(rgb(if on { 0x15223a } else { MUTED })),
+        )
+}
+/// A whole-row on/off setting: what it does on the left, the switch on the right.
+pub fn toggle_row(
+    id: impl Into<ElementId>,
+    title: impl Into<SharedString>,
+    hint: impl Into<SharedString>,
+    on: bool,
+) -> Button {
+    let title = title.into();
+    button_base(id, "")
+        .accessibility_label(title.clone())
+        .w_full()
+        .px_3()
+        .py_3()
+        .rounded_lg()
+        .justify_between()
+        .gap_4()
+        .bg(rgb(PANEL))
+        .aria_selected(on)
+        .hover(|s| s.bg(rgb(ELEVATED)))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .items_start()
+                .gap_1()
+                .child(
+                    div()
+                        .text_size(px(14.))
+                        .font_weight(FontWeight::MEDIUM)
+                        .child(title),
+                )
+                .child(caption(hint)),
+        )
+        .child(switch(on))
+}
+/// Lays `items` out in rows of `columns` equal-width cells.
+pub fn grid(columns: usize, items: Vec<AnyElement>) -> Div {
+    let columns = columns.max(1);
+    let mut rows = div().flex().flex_col().gap_3();
+    let mut items = items.into_iter().peekable();
+    while items.peek().is_some() {
+        let mut row = div().flex().gap_3();
+        for _ in 0..columns {
+            row = row.child(match items.next() {
+                Some(item) => div().flex_1().min_w_0().flex().flex_col().child(item),
+                None => div().flex_1().min_w_0(),
+            });
+        }
+        rows = rows.child(row);
+    }
+    rows
+}
+/// A one-line fact: the value large, its label small.
+pub fn stat(value: impl Into<SharedString>, label: impl Into<SharedString>) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .child(
+            div()
+                .text_size(px(26.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .child(value.into()),
+        )
+        .child(caption(label))
 }
 pub fn icon(name: &'static str) -> Svg {
     svg().path(name).size(px(16.)).flex_shrink_0()

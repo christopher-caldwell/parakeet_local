@@ -2,22 +2,6 @@
 //! status, and diagnostics behind the status bar's Details toggle.
 use super::*;
 
-/// A titled block of a settings screen.
-fn heading(title: &str, hint: &str) -> Div {
-    div()
-        .mt_3()
-        .flex()
-        .flex_col()
-        .gap_1()
-        .child(
-            div()
-                .text_size(px(15.))
-                .font_weight(FontWeight::SEMIBOLD)
-                .child(title.to_owned()),
-        )
-        .child(caption(hint.to_owned()))
-}
-
 fn model_blurb(id: &str) -> &'static str {
     match id {
         "parakeet-tdt-0.6b-v2" => {
@@ -63,33 +47,41 @@ impl Workbench {
     pub(super) fn models_view(&self, cx: &mut Context<Self>) -> Div {
         let mut view = div().flex().flex_col().gap_3().child(section(
             "Local models",
-            "Everything runs on this Mac. A model is downloaded once, then works offline. The ones marked In use are what the app uses.",
+            "Everything runs on this Mac. A model is downloaded once, then works offline.",
         ));
         if let Some(progress) = self.models.download_progress() {
-            view = view.child(div().p_3().rounded_lg().bg(rgb(SELECTED)).child(format!(
-                        "Downloading {} · file {}/{} · {:.0} of {} MB",
-                        ui::model_name(&progress.model),
-                        progress.file_index,
-                        progress.total_files,
-                        progress.downloaded_bytes as f64 / 1_000_000.,
-                        progress
-                            .total_bytes
-                            .map(|n| format!("{:.0}", n as f64 / 1_000_000.))
-                            .unwrap_or_else(|| "?".into())
-                    )));
+            view = view.child(panel().child(format!(
+                    "Downloading {} · file {}/{} · {:.0} of {} MB",
+                    ui::model_name(&progress.model),
+                    progress.file_index,
+                    progress.total_files,
+                    progress.downloaded_bytes as f64 / 1_000_000.,
+                    progress
+                        .total_bytes
+                        .map(|n| format!("{:.0}", n as f64 / 1_000_000.))
+                        .unwrap_or_else(|| "?".into())
+                )));
         }
         for (category, title, hint) in [
-            ("asr", "Transcription", "Turns speech into text."),
+            (
+                "asr",
+                "Transcription",
+                "Turns speech into text. The one marked In use transcribes everything.",
+            ),
             (
                 "diarization",
                 "Speakers",
-                "Finds the separate voices in a recording, and compares them with the people you have named.",
+                "Finds the separate voices in a recording and compares them with people you have named.",
             ),
         ] {
-            view = view.child(heading(title, hint));
-            for m in self.model_list.iter().filter(|m| m.category == category) {
-                view = view.child(self.model_card(m, cx));
-            }
+            view = view.child(group(title, hint));
+            let cards = self
+                .model_list
+                .iter()
+                .filter(|m| m.category == category)
+                .map(|m| self.model_card(m, cx).into_any_element())
+                .collect();
+            view = view.child(grid(self.columns, cards));
         }
         view
     }
@@ -117,20 +109,17 @@ impl Workbench {
                 cx,
             );
         };
-        let verify = {
-            let verify_id = verify_id.clone();
-            move |this: &mut Self, cx: &mut Context<Self>| {
-                let service = this.models.clone();
-                let id = verify_id.clone();
-                this.task(
-                    "Verifying model files",
-                    async move {
-                        service.verify(&id).await?;
-                        Ok(Update::Models(service.list().await?))
-                    },
-                    cx,
-                );
-            }
+        let verify = move |this: &mut Self, cx: &mut Context<Self>| {
+            let service = this.models.clone();
+            let id = verify_id.clone();
+            this.task(
+                "Verifying model files",
+                async move {
+                    service.verify(&id).await?;
+                    Ok(Update::Models(service.list().await?))
+                },
+                cx,
+            );
         };
         let select = move |this: &mut Self, cx: &mut Context<Self>| {
             let service = this.models.clone();
@@ -144,26 +133,15 @@ impl Workbench {
                 cx,
             );
         };
-        let mut status = div().flex().flex_wrap().items_center().gap_2();
-        if m.id == "parakeet-tdt-0.6b-v2" {
-            status = status.child(pill("Recommended", ACCENT));
-        }
-        status = status.child(pill(
-            if m.verified {
-                "Ready offline"
-            } else if m.installed {
-                "Needs a file check"
-            } else {
-                "Not downloaded"
-            },
-            if m.verified { SUCCESS } else { MUTED },
-        ));
-        if in_use {
-            status = status.child(pill("In use", SUCCESS));
-        }
-        if for_voices {
-            status = status.child(pill("In use for voice recognition", SUCCESS));
-        }
+        let (status, color) = if in_use {
+            ("In use", SUCCESS)
+        } else if m.verified {
+            ("Ready", SUCCESS)
+        } else if m.installed {
+            ("Needs a file check", WARNING)
+        } else {
+            ("Not downloaded", MUTED)
+        };
         let mut actions = div().flex().flex_wrap().items_center().gap_2();
         if !m.installed {
             actions = actions.child(
@@ -227,40 +205,60 @@ impl Workbench {
                     })),
             );
         }
-        div()
-            .p_4()
-            .bg(rgb(PANEL))
-            .rounded_lg()
-            .border_1()
-            .border_color(rgb(if in_use || for_voices {
-                0x3f5d88
-            } else {
-                BORDER
-            }))
-            .flex()
-            .flex_col()
+        let mut card = panel()
+            .size_full()
             .gap_2()
+            .when(in_use || for_voices, |c| {
+                c.border_color(rgba((SUCCESS << 8) | 0x80))
+            })
             .child(
                 div()
-                    .text_size(px(15.))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(ui::model_name(&m.id).to_owned()),
+                    .flex()
+                    .items_start()
+                    .gap_3()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .child(
+                                div()
+                                    .text_size(px(16.))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(ui::model_name(&m.id).to_owned()),
+                            )
+                            .child(caption(
+                                m.bytes
+                                    .map(|b| format!("{:.0} MB download", b as f64 / 1_000_000.))
+                                    .unwrap_or_default(),
+                            )),
+                    )
+                    .child(pill(status, color)),
             )
-            .child(caption(format!(
-                "{} · {}",
-                model_blurb(&m.id),
-                m.bytes
-                    .map(|b| format!("{:.0} MB", b as f64 / 1_000_000.))
-                    .unwrap_or_default()
-            )))
-            .child(status)
-            .when(self.show_status_details, |card| {
-                card.child(caption(format!(
-                    "{} · revision {} · {}",
-                    m.id, m.revision, m.license
-                )))
-            })
-            .child(actions)
+            .child(
+                div()
+                    .text_size(px(13.))
+                    .text_color(rgb(MUTED))
+                    .child(model_blurb(&m.id)),
+            );
+        if m.id == "parakeet-tdt-0.6b-v2" || for_voices {
+            let mut tags = div().flex().flex_wrap().gap_2();
+            if m.id == "parakeet-tdt-0.6b-v2" {
+                tags = tags.child(pill("Recommended", MUTED));
+            }
+            if for_voices {
+                tags = tags.child(pill("Used for voice recognition", SUCCESS));
+            }
+            card = card.child(tags);
+        }
+        if self.show_status_details {
+            card = card.child(caption(format!(
+                "{} · revision {} · {}",
+                m.id, m.revision, m.license
+            )));
+        }
+        card.child(div().flex_1()).child(actions)
     }
 
     pub(super) fn capture_view(&self, cx: &mut Context<Self>) -> Div {
@@ -284,21 +282,16 @@ impl Workbench {
             "Record a meeting",
             "Records your microphone and the other people's audio as separate tracks, which makes the transcript more accurate.",
         ));
-        let mut panel = div()
-            .p_4()
-            .rounded_lg()
-            .bg(rgb(PANEL))
-            .border_1()
-            .border_color(rgb(BORDER))
-            .flex()
-            .flex_col()
-            .gap_3()
+        let mut card = panel()
             .child(pill(
                 capture_state_label(state).to_owned(),
                 match state {
-                    "source_failed" | "source_interrupted" | "waiting_or_stalled" => WARNING,
+                    "idle" | "completed" => SUCCESS,
                     "recording" => DANGER,
-                    _ => ACCENT,
+                    "source_failed" | "source_interrupted" | "waiting_or_stalled" | "starting" => {
+                        WARNING
+                    }
+                    _ => MUTED,
                 },
             ))
             .child(
@@ -345,10 +338,10 @@ impl Workbench {
                 None => "Choose a microphone below to start recording.".into(),
             }));
         if recording && state == "completed" {
-            panel = panel.child(pill("Audio saved · finishing transcription", ACCENT));
+            card = card.child(pill("Audio saved · finishing transcription", WARNING));
         }
         if let Some(message) = health["message"].as_str() {
-            panel = panel.child(div().text_color(rgb(WARNING)).child(message.to_owned()));
+            card = card.child(div().text_color(rgb(WARNING)).child(message.to_owned()));
         }
         for (source, name) in [("microphone", "Microphone"), ("system", "Meeting audio")] {
             let h = &health[source];
@@ -385,24 +378,24 @@ impl Workbench {
                     .as_f64()
                     .is_some_and(|peak| peak < parakeet_domain::SILENT_SOURCE_PEAK);
             if active && wanted || self.show_status_details {
-                panel = panel.child(caption(format!("{name}: {text}")));
+                card = card.child(caption(format!("{name}: {text}")));
             }
             if silent {
-                panel = panel.child(
+                card = card.child(
                     div()
                         .text_color(rgb(WARNING))
                         .child(format!("{name} is silent: buffers arrive but there is no speech-level sound. Check the selected input.")),
                 );
             }
             if self.show_status_details {
-                panel = panel.child(caption(format!(
+                card = card.child(caption(format!(
                     "{frames} frames · {rate} Hz · peak {:.3}",
                     h["peak_amplitude"].as_f64().unwrap_or(0.)
                 )));
             }
         }
         if self.show_status_details {
-            panel = panel
+            card = card
                 .child(caption(format!("Capture state: {state}")))
                 .child(caption(format!(
                     "Selected input UID: {}",
@@ -412,16 +405,16 @@ impl Workbench {
                         .unwrap_or("none")
                 )));
             if let Some(uid) = health["effective_microphone_uid"].as_str() {
-                panel = panel.child(caption(format!("Effective microphone UID: {uid}")));
+                card = card.child(caption(format!("Effective microphone UID: {uid}")));
             }
         }
-        view = view.child(panel);
+        view = view.child(card);
         view = view.child(
             div()
                 .flex()
                 .items_center()
                 .gap_2()
-                .child(div().flex_1().child(heading(
+                .child(div().flex_1().child(group(
                     "Microphone",
                     "Pick the one you speak into. A saved microphone that is unplugged is never replaced silently.",
                 )))
@@ -441,126 +434,126 @@ impl Workbench {
                 "No microphones found. Connect one and press Refresh. You can still record meeting audio alone."
             }));
         }
-        let mut list = div().flex().flex_wrap().gap_2();
-        for (index, device) in devices.iter().enumerate() {
-            let uid = device["uid"].as_str().unwrap_or_default().to_owned();
-            let selected = self.audio_preferences.microphone_uid.as_ref() == Some(&uid);
-            let label = format!(
-                "{}{}",
-                device["name"].as_str().unwrap_or("Unknown input"),
-                if device["is_default"] == true {
-                    " (Mac default)"
-                } else {
-                    ""
-                }
-            );
-            list = list.child(
-                choice(("device", index), label, selected).on_click(cx.listener(
-                    move |this, _, _, cx| {
-                        this.audio_preferences.microphone_uid = Some(uid.clone());
+        let tiles = devices
+            .iter()
+            .enumerate()
+            .map(|(index, device)| {
+                let uid = device["uid"].as_str().unwrap_or_default().to_owned();
+                let selected = self.audio_preferences.microphone_uid.as_ref() == Some(&uid);
+                tile(
+                    ("device", index),
+                    device["name"]
+                        .as_str()
+                        .unwrap_or("Unknown input")
+                        .to_owned(),
+                    (device["is_default"] == true).then(|| "Mac default".to_owned()),
+                    selected,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.audio_preferences.microphone_uid = Some(uid.clone());
+                    let preferences = this.audio_preferences.clone();
+                    let service = this.audio_settings.clone();
+                    this.task(
+                        "Saving explicit microphone",
+                        async move {
+                            service.save(&preferences).await?;
+                            Ok(Update::Message("Selected microphone saved".into()))
+                        },
+                        cx,
+                    );
+                }))
+                .into_any_element()
+            })
+            .collect();
+        view = view.child(grid(self.columns, tiles));
+        view = view.child(group(
+            "After you stop",
+            "The audio is always saved first. Switched-on steps then run by themselves.",
+        ));
+        let busy = recording;
+        let transcribe = self.audio_preferences.transcribe_meetings_after_stop;
+        let analyze = self.audio_preferences.analyze_meetings_after_stop;
+        let suggest = self.audio_preferences.suggest_speakers_after_stop;
+        view.child(
+            panel()
+                .p_1()
+                .gap_0()
+                .child(
+                    toggle_row(
+                        "auto-final-transcription",
+                        "Transcribe the meeting",
+                        "Uses the transcription model marked In use. If it fails, you can resume it later.",
+                        transcribe,
+                    )
+                    .disabled(busy)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.audio_preferences.transcribe_meetings_after_stop =
+                            !this.audio_preferences.transcribe_meetings_after_stop;
+                        if !this.audio_preferences.transcribe_meetings_after_stop {
+                            this.audio_preferences.analyze_meetings_after_stop = false;
+                        }
                         let preferences = this.audio_preferences.clone();
                         let service = this.audio_settings.clone();
                         this.task(
-                            "Saving explicit microphone",
+                            "Saving meeting transcription preference",
                             async move {
                                 service.save(&preferences).await?;
-                                Ok(Update::Message("Selected microphone saved".into()))
+                                Ok(Update::Message("Meeting transcription preference saved".into()))
                             },
                             cx,
                         );
-                    },
-                )),
-            );
-        }
-        view = view.child(list);
-        view = view.child(heading(
-            "After you stop",
-            "Highlighted options happen automatically. The audio is always saved first.",
-        ));
-        let busy = recording;
-        view = view
-            .child(
-                choice(
-                    "auto-final-transcription",
-                    "Transcribe the meeting",
-                    self.audio_preferences.transcribe_meetings_after_stop,
+                    })),
                 )
-                .self_start()
-                .disabled(busy)
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.audio_preferences.transcribe_meetings_after_stop =
-                        !this.audio_preferences.transcribe_meetings_after_stop;
-                    if !this.audio_preferences.transcribe_meetings_after_stop {
-                        this.audio_preferences.analyze_meetings_after_stop = false;
-                    }
-                    let preferences = this.audio_preferences.clone();
-                    let service = this.audio_settings.clone();
-                    this.task(
-                        "Saving meeting transcription preference",
-                        async move {
-                            service.save(&preferences).await?;
-                            Ok(Update::Message("Meeting transcription preference saved".into()))
-                        },
-                        cx,
-                    );
-                })),
-            )
-            .child(caption("Uses the transcription model marked In use. If it fails, you can resume it later."))
-            .child(
-                choice(
-                    "auto-speaker-analysis",
-                    "Detect the speakers",
-                    self.audio_preferences.analyze_meetings_after_stop,
+                .child(
+                    toggle_row(
+                        "auto-speaker-analysis",
+                        "Detect the speakers",
+                        "Finds the separate voices so you can name them in the recording's Name voices tab. Also turns on transcription.",
+                        analyze,
+                    )
+                    .disabled(busy)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.audio_preferences.analyze_meetings_after_stop =
+                            !this.audio_preferences.analyze_meetings_after_stop;
+                        if this.audio_preferences.analyze_meetings_after_stop {
+                            this.audio_preferences.transcribe_meetings_after_stop = true;
+                        }
+                        let preferences = this.audio_preferences.clone();
+                        let service = this.audio_settings.clone();
+                        this.task(
+                            "Saving speaker analysis preference",
+                            async move {
+                                service.save(&preferences).await?;
+                                Ok(Update::Message("Speaker analysis preference saved".into()))
+                            },
+                            cx,
+                        );
+                    })),
                 )
-                .self_start()
-                .disabled(busy)
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.audio_preferences.analyze_meetings_after_stop =
-                        !this.audio_preferences.analyze_meetings_after_stop;
-                    if this.audio_preferences.analyze_meetings_after_stop {
-                        this.audio_preferences.transcribe_meetings_after_stop = true;
-                    }
-                    let preferences = this.audio_preferences.clone();
-                    let service = this.audio_settings.clone();
-                    this.task(
-                        "Saving speaker analysis preference",
-                        async move {
-                            service.save(&preferences).await?;
-                            Ok(Update::Message("Speaker analysis preference saved".into()))
-                        },
-                        cx,
-                    );
-                })),
-            )
-            .child(caption("Finds the separate voices so you can name them in the recording's Name voices tab. Also turns on transcription."))
-            .child(
-                choice(
-                    "auto-speaker-suggest",
-                    "Suggest names for voices",
-                    self.audio_preferences.suggest_speakers_after_stop,
-                )
-                .self_start()
-                .disabled(
-                    busy || self.audio_preferences.matching_policy.is_none()
-                        || !self.audio_preferences.analyze_meetings_after_stop,
-                )
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.audio_preferences.suggest_speakers_after_stop =
-                        !this.audio_preferences.suggest_speakers_after_stop;
-                    let preferences = this.audio_preferences.clone();
-                    let service = this.audio_settings.clone();
-                    this.task(
-                        "Saving suggestion preference",
-                        async move {
-                            service.save(&preferences).await?;
-                            Ok(Update::Message("Suggestion preference saved".into()))
-                        },
-                        cx,
-                    );
-                })),
-            )
-            .child(caption("Needs speaker detection and a recognition check (People → Check how well my verified voices are recognized). Suggestions are only shown; they never name anyone."));
-        view
+                .child(
+                    toggle_row(
+                        "auto-speaker-suggest",
+                        "Suggest names for voices",
+                        "Needs speaker detection and a recognition check (People → Check how well my verified voices are recognized). Suggestions are only shown; they never name anyone.",
+                        suggest,
+                    )
+                    .disabled(busy || self.audio_preferences.matching_policy.is_none() || !analyze)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.audio_preferences.suggest_speakers_after_stop =
+                            !this.audio_preferences.suggest_speakers_after_stop;
+                        let preferences = this.audio_preferences.clone();
+                        let service = this.audio_settings.clone();
+                        this.task(
+                            "Saving suggestion preference",
+                            async move {
+                                service.save(&preferences).await?;
+                                Ok(Update::Message("Suggestion preference saved".into()))
+                            },
+                            cx,
+                        );
+                    })),
+                ),
+        )
     }
 
     pub(super) fn dictation_view(&self, cx: &mut Context<Self>) -> Div {
@@ -575,15 +568,7 @@ impl Workbench {
             "Dictation",
             "Hold a shortcut, speak, then let go. Your words are transcribed on this Mac and pasted where you were typing.",
         ));
-        let mut panel = div()
-            .p_4()
-            .rounded_lg()
-            .bg(rgb(PANEL))
-            .border_1()
-            .border_color(rgb(BORDER))
-            .flex()
-            .flex_col()
-            .gap_3()
+        let mut card = panel()
             .child(pill(
                 if on { "Dictation is on" } else { "Dictation is off" },
                 if on { SUCCESS } else { MUTED },
@@ -624,15 +609,15 @@ impl Workbench {
                     )),
             );
         if let Some(message) = live["message"].as_str() {
-            panel = panel.child(div().text_color(rgb(WARNING)).child(message.to_owned()));
+            card = card.child(div().text_color(rgb(WARNING)).child(message.to_owned()));
         }
         if self.show_status_details {
-            panel = panel.child(caption(format!(
+            card = card.child(caption(format!(
                 "Dictation state: {}",
                 live["state"].as_str().unwrap_or("idle")
             )));
         }
-        view = view.child(panel);
+        view = view.child(card);
         if let Some(raw) = live["receipt"]["raw"].as_str().filter(|s| !s.is_empty()) {
             let text = raw.to_owned();
             view = view.child(
@@ -654,24 +639,44 @@ impl Workbench {
                     ),
             );
         }
-        view = view.child(heading(
+        view = view.child(group(
             "Shortcuts",
             "Hold any active shortcut to dictate. Several can be active at once.",
         ));
+        let mut shortcuts = panel().gap_0().p_1();
         if self.shortcuts.is_empty() {
-            view = view.child(caption(
+            shortcuts = shortcuts.child(div().p_3().child(caption(
                 "No shortcut yet. Press Record a shortcut, then press the keys you want.",
-            ));
+            )));
         }
+        let last = self.shortcuts.len().saturating_sub(1);
         for (index, binding) in self.shortcuts.iter().enumerate() {
             let toggle = binding.id.clone();
             let remove = binding.id.clone();
-            view = view.child(
+            shortcuts = shortcuts.child(
                 div()
+                    .px_3()
+                    .py_2()
                     .flex()
                     .items_center()
                     .gap_2()
-                    .child(div().flex_1().child(shortcut_label(binding)))
+                    .when(index < last, |row| {
+                        row.border_b_1().border_color(rgb(BORDER))
+                    })
+                    .child(
+                        div().flex_1().child(
+                            div()
+                                .self_start()
+                                .px_2()
+                                .py_1()
+                                .rounded_md()
+                                .border_1()
+                                .border_color(rgb(BORDER))
+                                .bg(rgb(ELEVATED))
+                                .text_size(px(13.))
+                                .child(shortcut_label(binding)),
+                        ),
+                    )
                     .child(pill(
                         if binding.enabled { "Active" } else { "Off" },
                         if binding.enabled { SUCCESS } else { MUTED },
@@ -708,6 +713,7 @@ impl Workbench {
                     ),
             );
         }
+        view = view.child(shortcuts);
         view = view.child(
             div()
                 .flex()
@@ -743,13 +749,12 @@ impl Workbench {
         );
         view = view.child(
             div()
-                .mt_3()
                 .flex()
-                .items_center()
+                .items_end()
                 .gap_2()
-                .child(div().flex_1().child(heading(
+                .child(div().flex_1().child(group(
                     "Recent dictations",
-                    "The raw words are always kept, so nothing you say is lost if pasting fails.",
+                    "The raw words are always kept, so nothing is lost if pasting fails.",
                 )))
                 .child(quiet("refresh-dictations", "Refresh").on_click(cx.listener(
                     |this, _, _, cx| {
@@ -768,12 +773,8 @@ impl Workbench {
         for (index, receipt) in self.dictations.iter().take(10).enumerate() {
             let raw = receipt.raw.clone();
             view = view.child(
-                div()
+                panel()
                     .p_3()
-                    .rounded_lg()
-                    .bg(rgb(PANEL))
-                    .flex()
-                    .flex_col()
                     .gap_1()
                     .child(caption(format!(
                         "{} · {}",
@@ -803,7 +804,7 @@ impl Workbench {
                     ),
             );
         }
-        view.child(heading(
+        view.child(group(
             "Troubleshooting",
             "If dictation was interrupted while it held your clipboard, this puts your clipboard back.",
         ))
@@ -824,6 +825,114 @@ impl Workbench {
                         cx,
                     );
                 })),
+        )
+    }
+
+    pub(super) fn privacy_view(&self, cx: &mut Context<Self>) -> Div {
+        let mut view = div().flex().flex_col().gap_3().child(section(
+            "Privacy & permissions",
+            "What stays on this Mac, and what macOS lets the app do.",
+        ));
+        let mut facts = panel().gap_2();
+        for fact in [
+            "Transcription and speaker detection run on this Mac. Nothing is uploaded.",
+            "Your raw speech is always kept, even if cleanup or pasting fails.",
+            "Nothing is sent anywhere unless you set up and authorize an AI route under Advanced.",
+        ] {
+            facts = facts.child(
+                div()
+                    .flex()
+                    .items_start()
+                    .gap_2()
+                    .child(icon("check").text_color(rgb(SUCCESS)))
+                    .child(div().flex_1().child(fact)),
+            );
+        }
+        view = view.child(facts);
+        view = view.child(group(
+            "macOS permissions",
+            "Each one is requested only when you press Grant. Nothing prompts in the background.",
+        ));
+        let permissions = [
+            (
+                "microphone",
+                "Microphone",
+                "Record your voice in meetings and for dictation.",
+            ),
+            (
+                "screen_recording",
+                "System audio",
+                "Record the other people in a meeting. macOS calls this Screen Recording.",
+            ),
+            (
+                "accessibility",
+                "Pasting text",
+                "Paste dictated words where you were typing. macOS calls this Accessibility.",
+            ),
+            (
+                "input_monitoring",
+                "Shortcuts",
+                "Hear your dictation shortcut. macOS calls this Input Monitoring.",
+            ),
+        ];
+        let mut rows = panel().gap_0().p_1();
+        let last = permissions.len() - 1;
+        for (index, (kind, title, purpose)) in permissions.into_iter().enumerate() {
+            rows = rows.child(
+                div()
+                    .px_3()
+                    .py_3()
+                    .flex()
+                    .items_center()
+                    .gap_4()
+                    .when(index < last, |row| row.border_b_1().border_color(rgb(BORDER)))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .child(div().text_size(px(14.)).font_weight(FontWeight::MEDIUM).child(title))
+                            .child(caption(purpose)),
+                    )
+                    .child(button(("request-permission", index), "Grant").self_center().on_click(
+                        cx.listener(move |this, _, _, cx| {
+                            let service = this.audio_inspection.clone();
+                            this.task(
+                                "Requesting macOS permission",
+                                async move {
+                                    let result = service.request_permission(kind).await?;
+                                    Ok(Update::Message(format!(
+                                        "{title}: {}",
+                                        if result["granted"] == true {
+                                            "granted"
+                                        } else {
+                                            "not granted yet — approve it in System Settings if prompted"
+                                        }
+                                    )))
+                                },
+                                cx,
+                            );
+                        }),
+                    )),
+            );
+        }
+        view = view.child(rows);
+        view.child(
+            quiet(
+                "toggle-ai-routes",
+                if self.show_ai_routes {
+                    "Hide advanced: AI cleanup of dictated text"
+                } else {
+                    "Advanced: AI cleanup of dictated text (off)"
+                },
+            )
+            .self_start()
+            .mt_3()
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.show_ai_routes = !this.show_ai_routes;
+                cx.notify();
+            })),
         )
     }
 }

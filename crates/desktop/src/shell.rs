@@ -206,7 +206,7 @@ impl Workbench {
         let color = if self.last_error.is_some() {
             DANGER
         } else if working {
-            ACCENT
+            WARNING
         } else {
             SUCCESS
         };
@@ -256,7 +256,7 @@ impl Workbench {
                             .child(message),
                     )
                     .when(working, |row| {
-                        row.child(pill(format!("{} active", self.pending), ACCENT))
+                        row.child(pill(format!("{} active", self.pending), WARNING))
                     })
                     .child(
                         quiet(
@@ -304,9 +304,13 @@ impl Workbench {
         div()
             .flex_shrink_0()
             .bg(rgb(0x34262c))
-            .border_b_1()
+            .border_1()
             .border_color(rgb(0x67434a))
-            .px_5()
+            .rounded_lg()
+            .mx_5()
+            .mt_3()
+            .max_w(px(900.))
+            .px_4()
             .py_3()
             .flex()
             .items_center()
@@ -327,17 +331,21 @@ impl Workbench {
                     .child(caption(summary)),
             )
             .child(
-                quiet("error-details", "Details").on_click(cx.listener(|this, _, _, cx| {
-                    this.show_status_details = true;
-                    cx.notify();
-                })),
+                quiet("error-details", "Details")
+                    .self_center()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.show_status_details = true;
+                        cx.notify();
+                    })),
             )
             .child(
-                quiet("dismiss-error", "Dismiss").on_click(cx.listener(|this, _, _, cx| {
-                    this.last_error = None;
-                    this.show_status_details = false;
-                    cx.notify();
-                })),
+                quiet("dismiss-error", "Dismiss")
+                    .self_center()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.last_error = None;
+                        this.show_status_details = false;
+                        cx.notify();
+                    })),
             )
     }
     pub(super) fn confirmation(&self, cx: &mut Context<Self>) -> Div {

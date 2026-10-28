@@ -81,14 +81,154 @@ impl Workbench {
     pub(super) fn storage_view(&self, cx: &mut Context<Self>) -> Div {
         let mut view = div().flex().flex_col().gap_3().child(section(
             "Storage",
-            "Inspect how much space the library uses.",
+            "How much space Parakeet Local uses on this Mac.",
         ));
-        view = view.child(
-            button("refresh-storage", "Refresh saved-policy preview")
-                .self_start()
-                .disabled(self.storage_busy)
-                .on_click(cx.listener(|this, _, _, cx| this.preview_storage(None, cx))),
+        let Some(preview) = &self.storage_preview else {
+            return view.child(caption(if self.storage_busy {
+                "Measuring…"
+            } else {
+                "Nothing measured yet."
+            }));
+        };
+        let usage = &preview.usage;
+        let mut summary = panel().child(
+            div()
+                .flex()
+                .items_start()
+                .gap_6()
+                .flex_wrap()
+                .child(stat(
+                    size_label(usage.owned_totals.logical_bytes),
+                    "used by your library",
+                ))
+                .when_some(usage.volume_available_bytes, |row, n| {
+                    row.child(stat(size_label(n), "free on this Mac"))
+                })
+                .child(div().flex_1())
+                .child(
+                    quiet("refresh-storage", "Measure again")
+                        .disabled(self.storage_busy)
+                        .on_click(cx.listener(|this, _, _, cx| this.preview_storage(None, cx))),
+                ),
         );
+        summary = summary.child(caption(usage.root.clone()));
+        if !usage.complete {
+            summary = summary.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(pill("Incomplete", WARNING))
+                    .child(caption(
+                        "Some files could not be measured, so these totals are a little low.",
+                    ))
+                    .when(!usage.warnings.is_empty(), |row| {
+                        row.child(
+                            quiet(
+                                "storage-path-warnings",
+                                if self.storage_show_warnings {
+                                    "Hide which"
+                                } else {
+                                    "Show which"
+                                },
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.storage_show_warnings = !this.storage_show_warnings;
+                                cx.notify();
+                            })),
+                        )
+                    }),
+            );
+            if self.storage_show_warnings {
+                for warning in usage.warnings.iter().take(5) {
+                    summary = summary.child(caption(warning.clone()));
+                }
+            }
+        }
+        view = view.child(summary);
+        let mut areas: Vec<_> = usage
+            .areas
+            .iter()
+            .filter(|(_, s)| s.logical_bytes > 0)
+            .collect();
+        areas.sort_by_key(|(_, s)| std::cmp::Reverse(s.logical_bytes));
+        let largest = areas
+            .first()
+            .map(|(_, s)| s.logical_bytes)
+            .unwrap_or(1)
+            .max(1);
+        let mut rows = panel();
+        for (index, (area, size)) in areas.iter().enumerate() {
+            rows = rows.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .when(index > 0, |row| {
+                        row.pt_3().border_t_1().border_color(rgb(BORDER))
+                    })
+                    .child(
+                        div()
+                            .flex()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .child(area_label(**area)),
+                            )
+                            .child(div().child(size_label(size.logical_bytes))),
+                    )
+                    .child(
+                        div()
+                            .h(px(6.))
+                            .w_full()
+                            .rounded_full()
+                            .bg(rgb(ELEVATED))
+                            .child(
+                                div()
+                                    .h_full()
+                                    .rounded_full()
+                                    .bg(rgb(0x6b7488))
+                                    .w(relative(size.logical_bytes as f32 / largest as f32)),
+                            ),
+                    )
+                    .child(caption(format!("{} files", size.files))),
+            );
+        }
+        view = view.child(group(
+            "What takes the space",
+            "Models are the largest part. Original recordings are kept for 7 days, then replaced by a lossless copy.",
+        ));
+        view = view.child(rows);
+        if usage.referenced_external_file_bytes > 0 || usage.unresolved_audio_references > 0 {
+            view = view.child(caption(format!(
+                "Audio stored outside the library folder: {}{}.",
+                size_label(usage.referenced_external_file_bytes),
+                if usage.unresolved_audio_references > 0 {
+                    format!(
+                        " · {} referenced recordings are missing",
+                        usage.unresolved_audio_references
+                    )
+                } else {
+                    String::new()
+                }
+            )));
+        }
+        if self.show_status_details {
+            view = view.child(self.storage_cleanup_preview(preview, cx));
+        }
+        view
+    }
+    /// The processing-file retention preview. Nothing here deletes anything.
+    fn storage_cleanup_preview(
+        &self,
+        preview: &Arc<parakeet_application::storage::RetentionPreview>,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let mut view = div().flex().flex_col().gap_3().child(group(
+            "Processing-file retention (advanced)",
+            "Preview which finished processing files could be cleaned up. This never deletes anything.",
+        ));
         if let Some(policy) = &self.storage_policy {
             view = view.child(caption(format!(
                 "Saved: {} · revision {}",
@@ -100,7 +240,7 @@ impl Workbench {
             div()
                 .flex()
                 .gap_2()
-                .items_center()
+                .items_end()
                 .flex_wrap()
                 .child(
                     button("preview-keep-all", "Preview keep all")
@@ -137,14 +277,17 @@ impl Workbench {
                         })),
                 ),
         );
-        let Some(preview) = &self.storage_preview else {
-            return view.child(caption(
-                "Refresh to measure storage. A saved policy never removes files.",
-            ));
-        };
-        view=view.child(section(if preview.hypothetical{"Hypothetical retention preview"}else{"Saved-policy preview"},policy_label(&preview.effective_policy)))
-            .child(format!("{} potential completed files · {} file size · {} allocated blocks",preview.candidate_totals.files,size_label(preview.candidate_totals.logical_bytes),size_label(preview.candidate_totals.allocated_bytes)))
-            .child(caption("Original audio, models, speaker references, corrections, and active or recoverable work stay protected. This preview does not authorize deletion."));
+        view = view.child(caption(format!(
+            "{}: {} potential completed files · {} file size · {} allocated blocks",
+            if preview.hypothetical {
+                "Hypothetical preview"
+            } else {
+                "Saved-policy preview"
+            },
+            preview.candidate_totals.files,
+            size_label(preview.candidate_totals.logical_bytes),
+            size_label(preview.candidate_totals.allocated_bytes)
+        )));
         if preview.effective_policy != preview.saved_policy.policy {
             let service = self.storage.clone();
             let policy = preview.effective_policy.clone();
@@ -172,61 +315,6 @@ impl Workbench {
                     })),
             );
         }
-        let usage = &preview.usage;
-        view=view.child(div().p_4().rounded_lg().bg(rgb(PANEL)).flex().flex_col().gap_2()
-            .child(format!("{} in {} unique files · {} allocated blocks",size_label(usage.owned_totals.logical_bytes),usage.owned_totals.files,size_label(usage.owned_totals.allocated_bytes)))
-            .when_some(usage.volume_available_bytes,|row,n|row.child(caption(format!("{} available on this volume",size_label(n)))))
-            .child(caption(usage.root.clone()))
-            .child(caption("File sizes and allocated blocks are different measurements. Shared APFS extents and actual freed space are not measured.")));
-        for (area, size) in &usage.areas {
-            view = view.child(
-                div()
-                    .flex()
-                    .gap_3()
-                    .justify_between()
-                    .child(area_label(*area))
-                    .child(caption(format!(
-                        "{} · {} unique files",
-                        size_label(size.logical_bytes),
-                        size.files
-                    ))),
-            );
-        }
-        view=view.child(caption(format!("Referenced audio outside this root: {} · {} missing or unresolved references. External bytes are not added to the root total.",size_label(usage.referenced_external_file_bytes),usage.unresolved_audio_references)));
-        if usage.database_outside_root_bytes > 0 {
-            view = view.child(caption(format!(
-                "Selected database outside this root: {}",
-                size_label(usage.database_outside_root_bytes)
-            )));
-        }
-        if !usage.complete {
-            view = view.child(pill(
-                "Some paths could not be measured; totals are incomplete",
-                WARNING,
-            ));
-        }
-        if !usage.warnings.is_empty() {
-            view = view.child(
-                button(
-                    "storage-path-warnings",
-                    if self.storage_show_warnings {
-                        "Hide path warnings"
-                    } else {
-                        "Show path warnings"
-                    },
-                )
-                .self_start()
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.storage_show_warnings = !this.storage_show_warnings;
-                    cx.notify();
-                })),
-            );
-            if self.storage_show_warnings {
-                for warning in usage.warnings.iter().take(5) {
-                    view = view.child(caption(warning.clone()).text_color(rgb(WARNING)));
-                }
-            }
-        }
         for (reason, size) in &preview.protected {
             view = view.child(caption(format!(
                 "Protected · {} · {} files · {}",
@@ -242,15 +330,9 @@ impl Workbench {
                 size_label(candidate.logical_bytes)
             )));
         }
-        if preview.candidates.len() > 40 {
-            view = view.child(caption(format!(
-                "Showing 40 of {} paths. Copy the full preview to inspect every path.",
-                preview.candidates.len()
-            )));
-        }
         let preview = preview.clone();
         view.child(
-            button("copy-storage-preview", "Copy preview JSON")
+            quiet("copy-storage-preview", "Copy preview JSON")
                 .self_start()
                 .on_click(cx.listener(move |this, _, _, cx| {
                     let preview = preview.clone();
