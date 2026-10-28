@@ -5,6 +5,7 @@ mod library;
 #[cfg(feature = "performance")]
 mod performance;
 mod reader;
+mod screens;
 mod shell;
 mod storage;
 mod train;
@@ -161,6 +162,7 @@ struct Workbench {
     show_media_import: bool,
     show_import_path: bool,
     show_status_details: bool,
+    show_ai_routes: bool,
     last_error: Option<String>,
     confirm_action: Option<shell::ConfirmAction>,
     show_location_tools: bool,
@@ -810,7 +812,7 @@ impl Render for Workbench {
                 content = content.child(self.storage_view(cx));
             }
             Area::Jobs => {
-                content=content.child(section("Background jobs","Review unfinished processing. Recovery preserves active work and original audio."))
+                content=content.child(section("Background jobs","Transcription and speaker work that has not finished. Your original audio is never touched."))
                     .child(button("refresh-jobs","Refresh pending jobs").self_start().on_click(cx.listener(|this,_,_,cx|{let service=this.recovery.clone();this.task("Reading pending jobs",async move{Ok(Update::Jobs(service.pending().await?))},cx); })))
                     .child(button("recover-jobs","Recover abandoned processing jobs").self_start().on_click(cx.listener(|this,_,_,cx|{let service=this.recovery.clone();this.task("Recovering abandoned jobs",async move{let report=service.recover().await?;Ok(Update::Recovered(report,service.pending().await?))},cx); })))
                     .child(caption(if self.pending_jobs.is_empty(){"No unfinished processing jobs. Failed or interrupted runs can be retried from their recording’s Processing tab.".into()}else{format!("{} unfinished jobs. Open a recording’s Processing tab to retry a settled failure.",self.pending_jobs.len())}));
@@ -853,527 +855,47 @@ impl Render for Workbench {
                         .find(|r| r.id == run.recording_id)
                         .map(|r| r.title())
                         .unwrap_or(run.recording_id.as_str());
-                    content = content.child(div().p_3().bg(rgb(PANEL)).child(format!(
-                        "{} · {} · {} · started {} · {} · run {}",
-                        recording,
-                        run.kind,
-                        run.model,
-                        run.started_at,
-                        if run.configuration["ownership_protocol"]
-                            == parakeet_application::jobs::OWNERSHIP_PROTOCOL
-                        {
-                            "ownership-aware"
-                        } else {
-                            "older run: ownership unknown"
-                        },
-                        run.id
-                    )));
-                }
-            }
-            Area::Models => {
-                content = content.child(section("Local models","Choose separate models for transcription, speaker detection, and verified voice examples. Downloads are always explicit."));
-                if let Some(progress) = self.models.download_progress() {
-                    content = content.child(format!(
-                        "Downloading {} · file {}/{} · {:.1} / {} MB",
-                        progress.model,
-                        progress.file_index,
-                        progress.total_files,
-                        progress.downloaded_bytes as f64 / 1_000_000.,
-                        progress
-                            .total_bytes
-                            .map(|n| format!("{:.1}", n as f64 / 1_000_000.))
-                            .unwrap_or_else(|| "unknown".into())
-                    ));
-                }
-                for m in &self.model_list {
-                    let id = m.id.clone();
-                    let verify_id = m.id.clone();
-                    let select_id = m.id.clone();
-                    let embedding_id = m.id.clone();
-                    let remove_id = m.id.clone();
                     content = content.child(
                         div()
                             .p_3()
+                            .rounded_lg()
                             .bg(rgb(PANEL))
                             .flex()
                             .flex_col()
-                            .gap_2()
-                            .rounded_lg()
-                            .border_1()
-                            .border_color(rgb(BORDER))
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_wrap()
-                                    .items_center()
-                                    .gap_2()
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .text_size(px(15.))
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .child(ui::model_name(&m.id).to_owned()),
-                                    )
-                                    .child(pill(
-                                        if m.verified {
-                                            "Ready offline"
-                                        } else if m.installed {
-                                            "Needs verification"
-                                        } else {
-                                            "Not downloaded"
-                                        },
-                                        if m.verified { SUCCESS } else { MUTED },
-                                    )),
-                            )
-                            .child(caption(format!(
-                                "{} · {} · {}",
-                                m.id,
-                                m.category,
-                                m.bytes
-                                    .map(|b| format!("{:.0} MB", b as f64 / 1_000_000.))
-                                    .unwrap_or("Size not specified".into())
-                            )))
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_wrap()
-                                    .gap_2()
-                                    .when(m.detail["selected"] == true, |row| {
-                                        row.child(pill("Selected for processing", ACCENT))
-                                    })
-                                    .when(m.detail["selected_for_embeddings"] == true, |row| {
-                                        row.child(pill("Selected for voice examples", SUCCESS))
-                                    }),
-                            )
-                            .when(self.show_status_details, |row| {
-                                row.child(caption(format!(
-                                    "Revision {} · {}",
-                                    m.revision, m.license
+                            .gap_1()
+                            .child(format!(
+                                "{} · {} · started {}",
+                                recording, run.kind, run.started_at
+                            ))
+                            .when(self.show_status_details, |card| {
+                                card.child(caption(format!(
+                                    "{} · {} · run {}",
+                                    run.model,
+                                    if run.configuration["ownership_protocol"]
+                                        == parakeet_application::jobs::OWNERSHIP_PROTOCOL
+                                    {
+                                        "ownership-aware"
+                                    } else {
+                                        "older run: ownership unknown"
+                                    },
+                                    run.id
                                 )))
-                            })
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_wrap()
-                                    .gap_2()
-                                    .child(
-                                        primary(format!("select-{}", m.id), "Use model")
-                                            .disabled(
-                                                !m.verified
-                                                    || m.detail["selected"] == true
-                                                    || self.pending > 0,
-                                            )
-                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                let service = this.models.clone();
-                                                let id = select_id.clone();
-                                                this.task(
-                                                    "Selecting model",
-                                                    async move {
-                                                        service.select(&id).await?;
-                                                        Ok(Update::Models(service.list().await?))
-                                                    },
-                                                    cx,
-                                                );
-                                            })),
-                                    )
-                                    .when(m.detail["provides_voice_embeddings"] == true, |row| {
-                                        row.child(
-                                            button(
-                                                format!("embedding-{}", m.id),
-                                                "Use for voice examples",
-                                            )
-                                            .disabled(
-                                                !m.verified
-                                                    || m.detail["selected_for_embeddings"] == true
-                                                    || self.pending > 0,
-                                            )
-                                            .on_click(
-                                                cx.listener(move |this, _, _, cx| {
-                                                    let service = this.models.clone();
-                                                    let id = embedding_id.clone();
-                                                    this.task(
-                                                        "Selecting embedding model",
-                                                        async move {
-                                                            service.select_embedding(&id).await?;
-                                                            Ok(Update::Models(
-                                                                service.list().await?,
-                                                            ))
-                                                        },
-                                                        cx,
-                                                    );
-                                                }),
-                                            ),
-                                        )
-                                    })
-                                    .child(
-                                        danger(format!("remove-model-{}", m.id), "Remove…")
-                                            .disabled(!m.installed || self.pending > 0)
-                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                this.confirm_action =
-                                                    Some(shell::ConfirmAction::RemoveModel(
-                                                        remove_id.clone(),
-                                                    ));
-                                                cx.notify();
-                                            })),
-                                    )
-                                    .child(
-                                        button(format!("install-{}", m.id), "Download")
-                                            .disabled(m.installed || self.pending > 0)
-                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                let service = this.models.clone();
-                                                let id = id.clone();
-                                                this.task(
-                                                    "Downloading local model",
-                                                    async move {
-                                                        service.install(&id).await?;
-                                                        Ok(Update::Models(service.list().await?))
-                                                    },
-                                                    cx,
-                                                );
-                                            })),
-                                    )
-                                    .child(
-                                        button(format!("verify-{}", m.id), "Verify files")
-                                            .disabled(!m.installed || self.pending > 0)
-                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                let service = this.models.clone();
-                                                let id = verify_id.clone();
-                                                this.task(
-                                                    "Verifying model files",
-                                                    async move {
-                                                        service.verify(&id).await?;
-                                                        Ok(Update::Models(service.list().await?))
-                                                    },
-                                                    cx,
-                                                );
-                                            })),
-                                    ),
-                            ),
+                            }),
                     );
                 }
+            }
+            Area::Models => {
+                content = content.child(self.models_view(cx));
             }
             Area::Capture => {
-                content=content.child(section("Record a meeting","Choose your microphone and audio sources. Separate source recordings are saved for accurate review."));
-                let health = self.capture.status();
-                content = content.child(
-                    button("refresh-audio-devices", "Refresh inputs")
-                        .self_start()
-                        .on_click(cx.listener(|this, _, _, cx| this.navigate(Area::Capture, cx))),
-                );
-                content = content.child(choice("auto-final-transcription", if self.audio_preferences.transcribe_meetings_after_stop {"After Stop: transcribe locally (on)"} else {"After Stop: save audio only"},self.audio_preferences.transcribe_meetings_after_stop)
-                    .disabled(self.capture_stop.is_some()).on_click(cx.listener(|this,_,_,cx|{
-                        this.audio_preferences.transcribe_meetings_after_stop = !this.audio_preferences.transcribe_meetings_after_stop;
-                        if !this.audio_preferences.transcribe_meetings_after_stop { this.audio_preferences.analyze_meetings_after_stop=false; }
-                        let preferences=this.audio_preferences.clone();let service=this.audio_settings.clone();
-                        this.task("Saving meeting transcription preference",async move{service.save(&preferences).await?;Ok(Update::Message("Meeting transcription preference saved".into()))},cx);
-                    }))).child(caption("Uses the selected installed local ASR model. Audio is saved first; failed final transcription can be resumed."));
-                content=content.child(choice("auto-speaker-analysis",if self.audio_preferences.analyze_meetings_after_stop {"After Stop: prepare anonymous speakers (on)"}else{"After Stop: speaker analysis off"},self.audio_preferences.analyze_meetings_after_stop)
-                    .disabled(self.capture_stop.is_some()).on_click(cx.listener(|this,_,_,cx|{
-                        this.audio_preferences.analyze_meetings_after_stop = !this.audio_preferences.analyze_meetings_after_stop;
-                        if this.audio_preferences.analyze_meetings_after_stop {this.audio_preferences.transcribe_meetings_after_stop=true;}
-                        let preferences=this.audio_preferences.clone();let service=this.audio_settings.clone();
-                        this.task("Saving speaker analysis preference",async move{service.save(&preferences).await?;Ok(Update::Message("Speaker analysis preference saved".into()))},cx);
-                    }))).child(caption("Pins installed ASR and diarization models before capture. Prepares playable unknown voices; no identity comparison or enrollment."));
-                content=content.child(choice("auto-speaker-suggest",if self.audio_preferences.suggest_speakers_after_stop {"After Stop: suggest names (on)"}else{"After Stop: name suggestions off"},self.audio_preferences.suggest_speakers_after_stop)
-                    .disabled(self.capture_stop.is_some()||self.audio_preferences.matching_policy.is_none()||!self.audio_preferences.analyze_meetings_after_stop).on_click(cx.listener(|this,_,_,cx|{
-                        this.audio_preferences.suggest_speakers_after_stop = !this.audio_preferences.suggest_speakers_after_stop;
-                        let preferences=this.audio_preferences.clone();let service=this.audio_settings.clone();
-                        this.task("Saving suggestion preference",async move{service.save(&preferences).await?;Ok(Update::Message("Suggestion preference saved".into()))},cx);
-                    }))).child(caption("Needs speaker analysis and calibrated criteria (Speakers → Identify voices). Suggestions are shown for you to confirm; they never name anyone on their own."));
-                if self.devices["devices"]
-                    .as_array()
-                    .is_none_or(|devices| devices.is_empty())
-                {
-                    content = content.child(caption(if self.pending > 0 { "Checking available audio inputs…" } else { "No microphone inputs are available. Connect an input and refresh. System audio can be recorded separately." }));
-                }
-                if let Some(devices) = self.devices["devices"].as_array() {
-                    for (index, device) in devices.iter().enumerate() {
-                        let uid = device["uid"].as_str().unwrap_or_default().to_owned();
-                        let label = format!(
-                            "{}{}{}",
-                            if self.audio_preferences.microphone_uid.as_ref() == Some(&uid) {
-                                "● "
-                            } else {
-                                ""
-                            },
-                            device["name"].as_str().unwrap_or("Unknown input"),
-                            if device["is_default"] == true {
-                                " (macOS default)"
-                            } else {
-                                ""
-                            }
-                        );
-                        content = content.child(button(("device", index), label).on_click(
-                            cx.listener(move |this, _, _, cx| {
-                                this.audio_preferences.microphone_uid = Some(uid.clone());
-                                let preferences = this.audio_preferences.clone();
-                                let service = this.audio_settings.clone();
-                                this.task(
-                                    "Saving explicit microphone",
-                                    async move {
-                                        service.save(&preferences).await?;
-                                        Ok(Update::Message("Selected microphone saved".into()))
-                                    },
-                                    cx,
-                                );
-                            }),
-                        ));
-                    }
-                }
-                content = content
-                    .child(caption(format!("Selected microphone: {}",self.audio_preferences.microphone_uid.as_ref().and_then(|uid|self.devices["devices"].as_array().and_then(|devices|devices.iter().find(|d|d["uid"].as_str()==Some(uid.as_str())))).and_then(|d|d["name"].as_str()).unwrap_or("Choose an input above; a saved unavailable device will not be substituted silently"))))
-                    .when(self.show_status_details,|view|view.child(caption(format!("Selected input UID: {}",self.audio_preferences.microphone_uid.as_deref().unwrap_or("None")))))
-                    .child(
-                        div()
-                            .flex()
-                            .gap_2()
-                            .flex_wrap()
-                            .child(primary("record-both", "Microphone + system").disabled(self.capture_stop.is_some() || self.audio_preferences.microphone_uid.is_none()).on_click(
-                                cx.listener(|this, _, _, cx| this.start_capture(true, true, cx)),
-                            ))
-                            .child(button("record-system", "System audio only").disabled(self.capture_stop.is_some()).on_click(
-                                cx.listener(|this, _, _, cx| this.start_capture(false, true, cx)),
-                            ))
-                            .child(button("record-mic", "Microphone only").disabled(self.capture_stop.is_some() || self.audio_preferences.microphone_uid.is_none()).on_click(
-                                cx.listener(|this, _, _, cx| this.start_capture(true, false, cx)),
-                            ))
-                            .child(
-                                danger("stop-recording", "Stop & save").disabled(self.capture_stop.is_none() || health["state"] == "completed").on_click(cx.listener(
-                                    |this, _, _, cx| {
-                                        if let Some(stop) = &this.capture_stop {
-                                            stop.store(true, Ordering::SeqCst);
-                                            this.status = "Stopping and finalizing sources".into();
-                                            cx.notify();
-                                        }
-                                    },
-                                )),
-                            ),
-                    )
-                    .child(format!(
-                        "Capture state: {}",
-                        self.capture.status()["state"].as_str().unwrap_or("unknown")
-                    ));
-                if self.capture_stop.is_some() && health["state"] == "completed" {
-                    content = content.child(pill("Audio saved · finishing transcription", ACCENT));
-                }
-                if let Some(message) = health["message"].as_str() {
-                    content = content.child(format!("Capture warning: {message}"));
-                }
-                if let Some(uid) = health["effective_microphone_uid"].as_str() {
-                    content = content.child(format!("Actual effective microphone UID: {uid}"));
-                }
-                for source in ["microphone", "system"] {
-                    let h = &health[source];
-                    if !h.is_null() {
-                        content = content.child(format!(
-                            "{source}: {} · {} frames · {} Hz · peak {:.3}",
-                            if !matches!(
-                                health["state"].as_str(),
-                                Some(
-                                    "starting"
-                                        | "recording"
-                                        | "waiting_or_stalled"
-                                        | "source_failed"
-                                        | "source_interrupted"
-                                )
-                            ) {
-                                "not capturing"
-                            } else if (source == "microphone"
-                                && health["requested_microphone_uid"].is_null())
-                                || (source == "system" && health["requested_system_audio"] != true)
-                            {
-                                "not requested"
-                            } else if h["is_receiving"] == true {
-                                "receiving audio"
-                            } else if h["first_buffer_ready"] == true {
-                                "stalled — inspect source"
-                            } else {
-                                "waiting for first buffer"
-                            },
-                            h["written_frames"],
-                            h["sample_rate"],
-                            h["peak_amplitude"].as_f64().unwrap_or(0.)
-                        ));
-                        let frames = h["written_frames"].as_f64().unwrap_or(0.);
-                        let rate = h["sample_rate"].as_f64().unwrap_or(0.);
-                        if rate > 0.
-                            && frames / rate >= 10.
-                            && h["session_peak_amplitude"]
-                                .as_f64()
-                                .is_some_and(|peak| peak < parakeet_domain::SILENT_SOURCE_PEAK)
-                        {
-                            content = content.child(format!(
-                                "{source}: SILENT — receiving buffers but no speech-level signal; check the selected input"
-                            ));
-                        }
-                    }
-                }
+                content = content.child(self.capture_view(cx));
             }
             Area::Dictation => {
-                content=content.child(section("Dictation","Hold any active shortcut to speak. Releasing it transcribes locally for the application where you started."))
-                    .child(quiet("recover-clipboard","Recover interrupted clipboard paste").self_start().on_click(cx.listener(|this,_,_,cx|{
-                    let service=this.insertion_recovery.clone();this.task("Recovering only Parakeet-owned clipboard transactions",async move{let report=service.recover().await?;Ok(Update::Message(format!("Restored {} interrupted paste(s); {} older snapshots discarded after clipboard changed",report.restored,report.discarded)))},cx);
-                })));
-                let live = self
-                    .dictation_state
-                    .lock()
-                    .ok()
-                    .map(|v| v.clone())
-                    .unwrap_or_default();
-                if let Some(message) = live["message"].as_str() {
-                    content = content.child(format!("Dictation error: {message}"));
-                }
-                if let Some(raw) = live["receipt"]["raw"].as_str().filter(|s| !s.is_empty()) {
-                    let text = raw.to_owned();
-                    content = content.child(format!("Latest raw speech: {raw}")).child(
-                        button("copy-live-dictation", "Copy latest raw text").on_click(
-                            cx.listener(move |_, _, _, cx| {
-                                cx.write_to_clipboard(ClipboardItem::new_string(text.clone()))
-                            }),
-                        ),
-                    );
-                }
-                content = content.child(
-                    button("refresh-dictations", "Refresh retained dictations")
-                        .self_start()
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            let service = this.dictation_history.clone();
-                            this.task(
-                                "Reading retained dictations",
-                                async move { Ok(Update::Dictations(service.list().await?)) },
-                                cx,
-                            );
-                        })),
-                );
-                for (index, receipt) in self.dictations.iter().take(10).enumerate() {
-                    let raw = receipt.raw.clone();
-                    content = content.child(
-                        div()
-                            .p_2()
-                            .bg(rgb(SIDEBAR))
-                            .child(format!(
-                                "{} · {} · {}",
-                                receipt.created_at, receipt.target.bundle_id, receipt.status
-                            ))
-                            .child(receipt.raw.clone())
-                            .when_some(receipt.insertion.clone(), |row, report| {
-                                row.child(format!(
-                                    "Insertion: {} · {} · clipboard {}",
-                                    report.method,
-                                    report.verification,
-                                    report.clipboard_status.as_deref().unwrap_or("untouched")
-                                ))
-                            })
-                            .when_some(receipt.failure.clone(), |row, error| row.child(error))
-                            .child(button(("copy-retained", index), "Copy raw text").on_click(
-                                cx.listener(move |_, _, _, cx| {
-                                    cx.write_to_clipboard(ClipboardItem::new_string(raw.clone()))
-                                }),
-                            )),
-                    );
-                }
-                content=content.child(div().text_xl().child("Simultaneous hold shortcuts")).child("Bindings persist across keyboards. Native event delivery requires Input Monitoring permission.");
-                content = content
-                    .child(format!(
-                        "Dictation state: {}",
-                        self.dictation_state
-                            .lock()
-                            .ok()
-                            .and_then(|v| v["state"].as_str().map(str::to_owned))
-                            .unwrap_or_else(|| "idle".into())
-                    ))
-                    .child(
-                        div()
-                            .flex()
-                            .gap_2()
-                            .child(
-                                primary("start-listening", "Enable dictation")
-                                    .disabled(self.dictation_stop.is_some())
-                                    .on_click(
-                                        cx.listener(|this, _, _, cx| this.start_dictation(cx)),
-                                    ),
-                            )
-                            .child(
-                                button("stop-listening", "Disable dictation")
-                                    .disabled(self.dictation_stop.is_none())
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        if let Some(stop) = this.dictation_stop.take() {
-                                            stop.store(true, Ordering::SeqCst);
-                                        }
-                                        cx.notify();
-                                    })),
-                            ),
-                    );
-                content = content.child(button("record-shortcut", "Record a shortcut").on_click(
-                    cx.listener(|this, _, _, cx| {
-                        this.recording_shortcut = true;
-                        this.status = "Press the shortcut; Escape cancels".into();
-                        cx.notify();
-                    }),
-                ));
-                for (index, binding) in self.shortcuts.iter().enumerate() {
-                    let toggle = binding.id.clone();
-                    let remove = binding.id.clone();
-                    content = content.child(
-                        div()
-                            .flex()
-                            .gap_2()
-                            .child(format!(
-                                "{} {:?} · {}",
-                                binding.key,
-                                binding.modifiers,
-                                if binding.enabled {
-                                    "active"
-                                } else {
-                                    "disabled"
-                                }
-                            ))
-                            .child(
-                                button(("toggle-binding", index), "Enable / disable").on_click(
-                                    cx.listener(move |this, _, _, cx| {
-                                        let mut bindings = this.shortcuts.clone();
-                                        if let Some(b) =
-                                            bindings.iter_mut().find(|b| b.id == toggle)
-                                        {
-                                            b.enabled = !b.enabled;
-                                        }
-                                        this.persist_shortcuts(bindings, cx);
-                                    }),
-                                ),
-                            )
-                            .child(button(("remove-binding", index), "Remove").on_click(
-                                cx.listener(move |this, _, _, cx| {
-                                    let bindings = this
-                                        .shortcuts
-                                        .iter()
-                                        .filter(|b| b.id != remove)
-                                        .cloned()
-                                        .collect();
-                                    this.persist_shortcuts(bindings, cx);
-                                }),
-                            )),
-                    );
-                }
-                content =
-                    content.child(div().flex().gap_2().child(field(&self.shortcut_key)).child(
-                        button("add-shortcut", "Add shortcut").on_click(cx.listener(
-                            |this, _, _, cx| {
-                                let key = this.shortcut_key.read(cx).value().to_string();
-                                let mut bindings = this.shortcuts.clone();
-                                bindings.push(gestures::Shortcut {
-                                    id: new_id(),
-                                    key,
-                                    modifiers: vec![],
-                                    enabled: true,
-                                });
-                                this.persist_shortcuts(bindings, cx);
-                            },
-                        )),
-                    ));
+                content = content.child(self.dictation_view(cx));
             }
             Area::Privacy => {
-                content=content.child(section("Privacy & application prompts","Transcription and speaker processing run locally. AI enhancement stays disabled until you authorize an exact route."))
-                    .child(div().p_4().rounded_lg().border_1().border_color(rgb(BORDER)).bg(rgb(PANEL)).child("Raw speech is always retained. A CLI may use a remote provider: authorize it only after reviewing the route and prompt."))
+                content=content.child(section("Privacy & permissions","Transcription and speaker processing run locally and never leave this Mac. Grant the macOS permissions each feature needs below."))
+                    .child(div().p_4().rounded_lg().border_1().border_color(rgb(BORDER)).bg(rgb(PANEL)).child("Raw speech is always kept. Nothing is sent anywhere unless you set up and authorize an AI route under Advanced below."))
                     .child(caption("macOS permissions are requested only when you press a button here; nothing prompts in the background."))
                     .child(div().flex().flex_wrap().gap_2().children([
                         ("microphone", "Microphone"),
@@ -1389,67 +911,90 @@ impl Render for Workbench {
                             }, cx);
                         }))
                     })));
-                for (index, p) in self.prompts.iter().enumerate() {
-                    let profile = p.clone();
-                    let revoke = p.clone();
-                    content = content.child(
-                        div()
-                            .flex()
-                            .gap_2()
-                            .child(
-                                button(
-                                    ("edit-prompt", index),
-                                    format!(
-                                        "Edit {} · {} · authorized {}",
-                                        p.application_name, p.route, p.authorized
-                                    ),
-                                )
-                                .on_click(cx.listener(
-                                    move |this, _, window, cx| {
-                                        this.profile_prompt.update(cx, |state, cx| {
-                                            state.set_value(profile.prompt.clone(), window, cx)
-                                        });
-                                        this.prompt_id = Some(profile.id.clone());
-                                        this.prompt_route = profile.route.clone();
-                                        for (entity, value) in [
-                                            (&this.profile_bundle, profile.bundle_id.clone()),
-                                            (&this.profile_name, profile.application_name.clone()),
-                                            (&this.profile_executable, profile.executable.clone()),
-                                            (
-                                                &this.profile_arguments,
-                                                serde_json::to_string(&profile.arguments)
-                                                    .unwrap_or_default(),
-                                            ),
-                                        ] {
-                                            entity
-                                                .update(cx, |s, cx| s.set_value(value, window, cx));
-                                        }
-                                        cx.notify();
-                                    },
-                                )),
-                            )
-                            .child(button(("revoke-prompt", index), "Revoke").on_click(
-                                cx.listener(move |this, _, _, cx| {
-                                    let mut p = revoke.clone();
-                                    p.authorized = false;
-                                    p.enabled = false;
-                                    let service = this.settings.clone();
-                                    this.task(
-                                        "Revoking AI route",
-                                        async move {
-                                            service.save_prompt(&p).await?;
-                                            Ok(Update::Settings(
-                                                service.shortcuts().await?,
-                                                service.prompts().await?,
-                                            ))
+                content = content.child(
+                    quiet(
+                        "toggle-ai-routes",
+                        if self.show_ai_routes {
+                            "Hide advanced: AI cleanup of dictated text"
+                        } else {
+                            "Advanced: AI cleanup of dictated text (off)"
+                        },
+                    )
+                    .self_start()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.show_ai_routes = !this.show_ai_routes;
+                        cx.notify();
+                    })),
+                );
+                if self.show_ai_routes {
+                    for (index, p) in self.prompts.iter().enumerate() {
+                        let profile = p.clone();
+                        let revoke = p.clone();
+                        content = content.child(
+                            div()
+                                .flex()
+                                .gap_2()
+                                .child(
+                                    button(
+                                        ("edit-prompt", index),
+                                        format!(
+                                            "Edit {} · {} · authorized {}",
+                                            p.application_name, p.route, p.authorized
+                                        ),
+                                    )
+                                    .on_click(cx.listener(
+                                        move |this, _, window, cx| {
+                                            this.profile_prompt.update(cx, |state, cx| {
+                                                state.set_value(profile.prompt.clone(), window, cx)
+                                            });
+                                            this.prompt_id = Some(profile.id.clone());
+                                            this.prompt_route = profile.route.clone();
+                                            for (entity, value) in [
+                                                (&this.profile_bundle, profile.bundle_id.clone()),
+                                                (
+                                                    &this.profile_name,
+                                                    profile.application_name.clone(),
+                                                ),
+                                                (
+                                                    &this.profile_executable,
+                                                    profile.executable.clone(),
+                                                ),
+                                                (
+                                                    &this.profile_arguments,
+                                                    serde_json::to_string(&profile.arguments)
+                                                        .unwrap_or_default(),
+                                                ),
+                                            ] {
+                                                entity.update(cx, |s, cx| {
+                                                    s.set_value(value, window, cx)
+                                                });
+                                            }
+                                            cx.notify();
                                         },
-                                        cx,
-                                    );
-                                }),
-                            )),
-                    );
-                }
-                content=content.child(button("new-prompt","New application profile").on_click(cx.listener(|this,_,window,cx|{
+                                    )),
+                                )
+                                .child(button(("revoke-prompt", index), "Revoke").on_click(
+                                    cx.listener(move |this, _, _, cx| {
+                                        let mut p = revoke.clone();
+                                        p.authorized = false;
+                                        p.enabled = false;
+                                        let service = this.settings.clone();
+                                        this.task(
+                                            "Revoking AI route",
+                                            async move {
+                                                service.save_prompt(&p).await?;
+                                                Ok(Update::Settings(
+                                                    service.shortcuts().await?,
+                                                    service.prompts().await?,
+                                                ))
+                                            },
+                                            cx,
+                                        );
+                                    }),
+                                )),
+                        );
+                    }
+                    content=content.child(button("new-prompt","New application profile").on_click(cx.listener(|this,_,window,cx|{
                     this.profile_prompt.update(cx,|state,cx|state.set_value("",window,cx));
                     this.prompt_id=None;this.prompt_route="remote".into();
                     for entity in [&this.profile_bundle,&this.profile_name,&this.profile_executable] { entity.update(cx,|s,cx|s.set_value("",window,cx)); }
@@ -1465,6 +1010,7 @@ impl Render for Workbench {
                 .child(div().flex().gap_2()
                     .child(button("save-prompt-draft","Save disabled draft").on_click(cx.listener(|this,_,_,cx|this.save_prompt(false,cx))))
                     .child(button("authorize-prompt","Authorize this route & save").on_click(cx.listener(|this,_,_,cx|this.save_prompt(true,cx)))));
+                }
             }
         }
         if self.area != Area::Library {
@@ -2222,6 +1768,7 @@ fn main() -> anyhow::Result<()> {
                             show_media_import: false,
                             show_import_path: false,
                             show_status_details: false,
+                            show_ai_routes: false,
                             last_error: None,
                             confirm_action: None,
                             show_location_tools: false,

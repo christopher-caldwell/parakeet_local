@@ -4,7 +4,7 @@ use parakeet_application::analysis::AnalyzeMeetingInput;
 impl Workbench {
     pub(super) fn analysis_panel(&self, detail: &reader::Document, cx: &mut Context<Self>) -> Div {
         let mut panel=div().p_4().rounded_lg().bg(rgb(PANEL)).flex().flex_col().gap_3()
-            .child(section("Meeting & speakers", "Transcribe sources, diarize and prepare playable voice examples. Names stay unconfirmed until you identify them."));
+            .child(section("Speakers", "Detect the separate voices in this meeting. Names stay unconfirmed until you name them in the Name voices tab."));
         match &detail.analysis {
             Ok(Some(plan)) => {
                 panel = panel
@@ -45,12 +45,32 @@ impl Workbench {
                 );
             }
         }
-        panel=panel.child(div().flex().flex_wrap().gap_2()
-            .child(button("analyze-meeting","Analyze / resume meeting").disabled(self.pending>0).on_click(cx.listener(|this,_,_,cx|this.analyze_meeting(false,false,cx))))
-            .child(quiet("analysis-new-anonymous","New anonymous analysis").disabled(self.pending>0).on_click(cx.listener(|this,_,_,cx|this.analyze_meeting(true,false,cx)))))
-            .child(caption("Optional identity comparison: enter all three thresholds. Similarity is not a probability; personal thresholds have not been calibrated."))
-            .child(div().flex().flex_wrap().gap_2().child(field(&self.match_score).w(px(200.))).child(field(&self.match_margin).w(px(160.))).child(field(&self.match_examples).w(px(190.))))
-            .child(quiet("analysis-new-matching","New analysis with entered policy").disabled(self.pending>0).on_click(cx.listener(|this,_,_,cx|this.analyze_meeting(true,true,cx))));
+        panel = panel.child(
+            div()
+                .flex()
+                .flex_wrap()
+                .gap_2()
+                .child(
+                    primary("analyze-meeting", "Detect speakers")
+                        .disabled(self.pending > 0)
+                        .on_click(
+                            cx.listener(|this, _, _, cx| this.analyze_meeting(false, false, cx)),
+                        ),
+                )
+                .child(
+                    quiet("analysis-new-anonymous", "Start over")
+                        .disabled(self.pending > 0)
+                        .on_click(
+                            cx.listener(|this, _, _, cx| this.analyze_meeting(true, false, cx)),
+                        ),
+                ),
+        );
+        if self.show_status_details {
+            panel=panel
+                .child(caption("Advanced: compare voices with named people while detecting. Enter all three thresholds; similarity is not a probability and these have not been calibrated for you."))
+                .child(div().flex().flex_wrap().gap_2().child(field(&self.match_score).w(px(200.))).child(field(&self.match_margin).w(px(160.))).child(field(&self.match_examples).w(px(190.))))
+                .child(quiet("analysis-new-matching","New analysis with entered policy").disabled(self.pending>0).on_click(cx.listener(|this,_,_,cx|this.analyze_meeting(true,true,cx))));
+        }
         panel
     }
     pub(super) fn analyze_meeting(

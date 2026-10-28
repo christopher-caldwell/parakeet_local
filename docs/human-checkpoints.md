@@ -20,7 +20,7 @@ No new recording is needed. In the desktop app: open a meeting that has been ana
 
 Saving names every line that voice speaks alone, leaves overlapping lines untouched, and keeps up to three clean turns as voice examples. **Undo** (listed under "Named in this recording") reverts the naming and removes exactly those examples. Repeat for the same person in other meetings so each person has examples from more than one recording and, ideally, both sources.
 
-When two or more people have examples from at least three recordings, open **People** and press **Check how well my verified voices are recognized**. It tunes criteria on some recordings and scores them once on the rest. Read the numbers and, if they are acceptable, press **Use these criteria**, then enable **After Stop: suggest names**. Suggestions are always shown as unconfirmed.
+When two or more people have examples from at least three recordings, open **People** and press **Check how well my verified voices are recognized**. It tunes criteria on some recordings and scores them once on the rest. Read the numbers and, if they are acceptable, press **Use these criteria**, then turn on **Suggest names for voices** (Record a meeting → After you stop). Suggestions are always shown as unconfirmed.
 
 Earlier checkpoint: three short clips (one example per person) were enrolled; their names and receipts stay in the private library and `.local/`, outside Git.
 
