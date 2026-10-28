@@ -206,6 +206,37 @@ pub(crate) fn transcribe(job: WhisperJob<'_>) -> Result<EngineOutput, Capability
         }),
     })
 }
+/// Why `text` is Whisper noise rather than speech: a bracketed sound annotation such as
+/// `[BLANK_AUDIO]` or `(air whooshing)`, or a caption sign-off it learned from video subtitles.
+/// Ordinary phrases like "thank you" are speech and are never matched.
+fn non_speech_text(text: &str) -> Option<&'static str> {
+    let text = text.trim();
+    let wrapped = |open: char, close: char| {
+        text.starts_with(open) && text.ends_with(close) && !text[1..].contains(open)
+    };
+    if wrapped('[', ']')
+        || wrapped('(', ')')
+        || (text.len() > 1 && text.starts_with('*') && text.ends_with('*'))
+    {
+        return Some("sound_annotation");
+    }
+    let plain: String = text
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { ' ' })
+        .collect();
+    let plain = plain.split_whitespace().collect::<Vec<_>>().join(" ");
+    const SIGN_OFFS: [&str; 5] = [
+        "thank you for watching",
+        "thanks for watching",
+        "please subscribe",
+        "thank you for watching and see you next time",
+        "subtitles by the amara org community",
+    ];
+    SIGN_OFFS
+        .contains(&plain.as_str())
+        .then_some("caption_sign_off")
+}
 #[allow(clippy::too_many_arguments)]
 fn transcribe_chunk(
     context: &whisper_rs::WhisperContext,
@@ -284,6 +315,12 @@ fn transcribe_chunk(
             ));
             evidence["raw_token_timing"] = json!(raw_tokens);
         }
+        if let Some(reason) = non_speech_text(&text) {
+            // Kept as evidence, never published as something the speaker said.
+            evidence["suppressed"] = json!(reason);
+            raw.push(json!({"text": "", "suppressed_text": text, "evidence": evidence}));
+            continue;
+        }
         raw.push(json!({"text": text, "evidence": evidence}));
         // Low-energy recognition stays inspectable; it is never silently turned into a named speaker.
         segments.push(TranscriptSegment {
@@ -300,4 +337,33 @@ fn transcribe_chunk(
         });
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod non_speech_tests {
+    use super::non_speech_text;
+    #[test]
+    fn annotations_and_sign_offs_are_suppressed() {
+        for text in [
+            " [BLANK_AUDIO]",
+            "(air whooshing)",
+            " *sigh*",
+            " Thank you for watching.",
+            "Thanks for watching!",
+        ] {
+            assert!(non_speech_text(text).is_some(), "{text}");
+        }
+    }
+    #[test]
+    fn real_speech_is_kept() {
+        for text in [
+            " Thank you.",
+            " Thanks, that was helpful.",
+            " I said (quietly) hello",
+            " Yeah.",
+            " Thank you for watching the kids.",
+        ] {
+            assert!(non_speech_text(text).is_none(), "{text}");
+        }
+    }
 }

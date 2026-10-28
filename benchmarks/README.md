@@ -63,6 +63,14 @@ python3 benchmarks/prepare_ami.py .local/ami/test-00000.parquet .local/ami
 
 Run a copied suite once per `models` entry (`whisper-small.en`, `-medium.en`, `-large-v3-turbo`, `-large-v3`). [Result](results/2026-10-28-whisper-models.json).
 
+## Muted or idle microphone
+
+```sh
+python3 benchmarks/prepare_muted.py .local/muted
+```
+
+Any word printed for these tracks is false. [Result](results/2026-10-28-muted-mic.json): small.en prints none; large-v3 still prints a few words on breathing-like noise.
+
 ## Speaker-attributed word diagnostics
 
 `benchmark score-speakers REFERENCE.json PREDICTION.json` computes anonymous-stream cpWER through the shared application service without database initialization. [Input/protocol and limitations](../docs/speaker-word-evaluation.md) are explicit. For external scorer verification, deliberately install `meeteval==0.4.3` in an isolated Python environment and run `python benchmarks/check_speaker_wer.py --output .local/speaker-wer-oracle.json` using that interpreter. The fixed seed generates 250 cases; no speech/network inference is involved.
