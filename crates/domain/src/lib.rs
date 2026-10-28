@@ -369,6 +369,8 @@ pub struct AudioPreferences {
     #[serde(default)]
     pub analyze_meetings_after_stop: bool,
 }
+/// Peak amplitude (about -50 dBFS) below which a source that delivered audio is treated as silent.
+pub const SILENT_SOURCE_PEAK: f64 = 0.003;
 fn transcribe_by_default() -> bool {
     true
 }

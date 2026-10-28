@@ -828,7 +828,9 @@ impl Workbench {
                             .child(label.clone()),
                     )
                     .when(confirmed, |row| row.child(pill("Confirmed", SUCCESS)))
-                    .when(imported, |row| row.child(pill("Imported · unverified", MUTED)))
+                    .when(imported, |row| {
+                        row.child(pill("Imported · unverified", MUTED))
+                    })
                     .child(caption(source))
                     .child(
                         quiet(
@@ -1096,6 +1098,10 @@ impl Workbench {
                             .flex_col()
                             .gap_1()
                             .child(track_name(&track.kind))
+                            .when(track.provenance["silent_source"] == true, |column| {
+                                column
+                                    .child(pill("Silent source — no speech-level signal", WARNING))
+                            })
                             .child(caption(format!(
                                 "{} · {} · {}",
                                 time_label(track.duration_ms),

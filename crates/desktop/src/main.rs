@@ -1264,6 +1264,18 @@ impl Render for Workbench {
                             h["sample_rate"],
                             h["peak_amplitude"].as_f64().unwrap_or(0.)
                         ));
+                        let frames = h["written_frames"].as_f64().unwrap_or(0.);
+                        let rate = h["sample_rate"].as_f64().unwrap_or(0.);
+                        if rate > 0.
+                            && frames / rate >= 10.
+                            && h["session_peak_amplitude"]
+                                .as_f64()
+                                .is_some_and(|peak| peak < parakeet_domain::SILENT_SOURCE_PEAK)
+                        {
+                            content = content.child(format!(
+                                "{source}: SILENT — receiving buffers but no speech-level signal; check the selected input"
+                            ));
+                        }
                     }
                 }
             }

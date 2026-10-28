@@ -170,6 +170,17 @@ fn parse_folder(folder: &Path) -> Result<ImportBundle, CapabilityError> {
         );
         if native {
             track.provenance["ownership"] = json!("application_owned");
+            let report = &metadata["sourceAlignment"][key];
+            if report["writtenFrameCount"].as_i64().unwrap_or(0) > 0
+                && report["peakAmplitude"]
+                    .as_f64()
+                    .is_some_and(|peak| peak < SILENT_SOURCE_PEAK)
+            {
+                track.provenance["silent_source"] = json!(true);
+                warnings.push(format!(
+                    "{source_id}: {key} source delivered audio but never reached a speech level; check the input device"
+                ));
+            }
         }
         if !track.available {
             warnings.push(format!("{source_id}: missing {key} source audio"));
@@ -573,6 +584,31 @@ mod tests {
             "imported_microphone"
         );
         assert_eq!(b.segments[0].evidence["origin"], "imported_unverified");
+    }
+    #[test]
+    fn captured_source_that_never_reaches_speech_level_is_marked_silent() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("manifest.json"),r#"{"schema":"com.parakeet.local.capture","schemaVersion":1,"meeting":{"id":"s","title":"T","createdAt":"2026-01-01"}}"#).unwrap();
+        std::fs::write(tmp.path().join("meeting-recording-metadata.json"),r#"{"requestedMicrophoneUID":"mic","requestedSystemAudio":true,"sourceAlignment":{"microphone":{"writtenFrameCount":480000,"peakAmplitude":0.0,"startOffsetMs":0},"system":{"writtenFrameCount":480000,"peakAmplitude":0.4,"startOffsetMs":0}}}"#).unwrap();
+        std::fs::write(tmp.path().join("transcript.json"), "{}").unwrap();
+        let b = parse_folder(tmp.path()).unwrap();
+        let mic = b
+            .tracks
+            .iter()
+            .find(|t| t.kind == TrackKind::Microphone)
+            .unwrap();
+        let sys = b
+            .tracks
+            .iter()
+            .find(|t| t.kind == TrackKind::System)
+            .unwrap();
+        assert_eq!(mic.provenance["silent_source"], true);
+        assert!(sys.provenance["silent_source"].is_null());
+        assert!(
+            b.warnings
+                .iter()
+                .any(|w| w.contains("microphone source delivered audio"))
+        );
     }
     #[test]
     fn malformed_manifest_is_reported() {

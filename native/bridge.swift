@@ -61,7 +61,7 @@ func insert(_ options: [String: Any]) throws -> [String:Any] {
 final class TrackWriter {
     let source: String; let path: URL; let origin: Double
     private let queue: DispatchQueue; private let lock = NSLock(); private var pending = 0
-    private var healthyFrames: Int64 = 0; private var lastCallback: Double = 0; private var latestPeak:Float = 0; private var healthRate:Double = 0
+    private var healthyFrames: Int64 = 0; private var lastCallback: Double = 0; private var latestPeak:Float = 0; private var sessionPeak:Float = 0; private var healthRate:Double = 0
     private var file: AVAudioFile?; private var first: Double?; private var rate: Double = 0
     private var written: Int64 = 0; private var timeline: Int64 = 0; private var dropped = 0; private var gaps: [[String: Any]] = []; private var errors: [String] = []; private var failed=false; private var peak: Float = 0
     init(source: String, directory: URL, origin: Double) { self.source = source; self.path = directory.appendingPathComponent(source + "-raw.caf"); self.origin = origin; self.queue = DispatchQueue(label: "parakeet.writer." + source) }
@@ -93,12 +93,12 @@ final class TrackWriter {
                     if sample.isFinite{bufferPeak=max(bufferPeak,abs(sample))}
                 }}
                 peak=max(peak,bufferPeak)
-                try file.write(from: buffer); written += Int64(buffer.frameLength); timeline += Int64(buffer.frameLength); lock.lock(); healthyFrames=written; lastCallback=monotonic();latestPeak=bufferPeak;healthRate=rate; lock.unlock()
+                try file.write(from: buffer); written += Int64(buffer.frameLength); timeline += Int64(buffer.frameLength); lock.lock(); healthyFrames=written; lastCallback=monotonic();latestPeak=bufferPeak;sessionPeak=max(sessionPeak,bufferPeak);healthRate=rate; lock.unlock()
             } catch { failed=true;errors.append(error.localizedDescription);emit(["event":"source_failed","source":source,"message":error.localizedDescription]) }
         }
     }
     func markFailure(_ reason:String){queue.async{[self] in failed=true;errors.append(reason);emit(["event":"source_failed","source":source,"message":reason])}}
-    func health() -> [String: Any] { lock.lock(); defer { lock.unlock() }; return ["peak_amplitude":latestPeak,"sample_rate":healthRate,"written_frames": healthyFrames, "seconds_since_buffer": lastCallback > 0 ? monotonic()-lastCallback : NSNull(), "first_buffer_ready": healthyFrames > 0, "is_receiving": healthyFrames > 0 && monotonic()-lastCallback < 3] }
+    func health() -> [String: Any] { lock.lock(); defer { lock.unlock() }; return ["peak_amplitude":latestPeak,"session_peak_amplitude":sessionPeak,"sample_rate":healthRate,"written_frames": healthyFrames, "seconds_since_buffer": lastCallback > 0 ? monotonic()-lastCallback : NSNull(), "first_buffer_ready": healthyFrames > 0, "is_receiving": healthyFrames > 0 && monotonic()-lastCallback < 3] }
     func report() -> [String: Any] {
         queue.sync { file = nil }; lock.lock(); let stalled=healthyFrames>0 && monotonic()-lastCallback>3; lock.unlock(); if stalled{errors.append("Source stalled before finalization")}
         lock.lock(); let drops = dropped; lock.unlock()
