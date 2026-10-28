@@ -380,6 +380,19 @@ pub struct AudioPreferences {
     pub transcribe_meetings_after_stop: bool,
     #[serde(default)]
     pub analyze_meetings_after_stop: bool,
+    /// Offer name suggestions after Stop using the saved calibrated criteria. Suggestions are
+    /// never confirmed names. Off until the user enables it.
+    #[serde(default)]
+    pub suggest_speakers_after_stop: bool,
+    #[serde(default)]
+    pub matching_policy: Option<SavedMatchingPolicy>,
+}
+/// Criteria the user adopted from a calibration report, kept with the evidence behind them.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SavedMatchingPolicy {
+    pub policy: recognition::MatchPolicy,
+    pub saved_at: String,
+    pub provenance: calibration::CalibrationReport,
 }
 /// Peak amplitude (about -50 dBFS) below which a source that delivered audio is treated as silent.
 pub const SILENT_SOURCE_PEAK: f64 = 0.003;
@@ -393,6 +406,8 @@ impl Default for AudioPreferences {
             system_audio: false,
             transcribe_meetings_after_stop: true,
             analyze_meetings_after_stop: false,
+            suggest_speakers_after_stop: false,
+            matching_policy: None,
         }
     }
 }
@@ -410,9 +425,34 @@ impl AudioPreferences {
                 "speaker analysis after Stop requires local transcription".into(),
             ));
         }
+        if self.suggest_speakers_after_stop
+            && (!self.analyze_meetings_after_stop || self.matching_policy.is_none())
+        {
+            return Err(ValidationError(
+                "speaker suggestions after Stop need speaker analysis and a saved calibrated policy"
+                    .into(),
+            ));
+        }
+        if let Some(saved) = &self.matching_policy {
+            saved.policy.validate()?;
+        }
         Ok(())
     }
 }
+impl AudioPreferences {
+    /// The criteria to apply after Stop, only when the user opted in.
+    pub fn after_stop_policy(&self) -> Option<recognition::MatchPolicy> {
+        self.suggest_speakers_after_stop
+            .then(|| {
+                self.matching_policy
+                    .as_ref()
+                    .map(|saved| saved.policy.clone())
+            })
+            .flatten()
+    }
+}
+
+pub mod calibration;
 
 pub mod reconciliation;
 

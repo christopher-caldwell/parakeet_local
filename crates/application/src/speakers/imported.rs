@@ -56,7 +56,7 @@ impl SpeakerService {
             if is_anonymous_label(claim) {
                 continue;
             }
-            let Some(track) = detail
+            let Some(_) = detail
                 .tracks
                 .iter()
                 .find(|t| &t.id == track_id && t.available)

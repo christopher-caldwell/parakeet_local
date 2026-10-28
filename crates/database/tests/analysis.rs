@@ -530,6 +530,7 @@ async fn after_stop_intent_preflights_and_completes_shared_workflow() {
                 transcribe_after_stop: true,
                 skip_unavailable_model: false,
                 analyze_speakers: true,
+                matching_policy: None,
             },
             Arc::new(AtomicBool::new(false)),
         )
@@ -574,6 +575,7 @@ async fn after_stop_analysis_failure_can_resume_through_finalization() {
                 transcribe_after_stop: true,
                 skip_unavailable_model: false,
                 analyze_speakers: true,
+                matching_policy: None,
             },
             Arc::new(AtomicBool::new(false)),
         )
@@ -666,7 +668,8 @@ async fn wrong_model_role_refuses_capture_and_pending_analysis_protects_processi
                     },
                     transcribe_after_stop: true,
                     skip_unavailable_model: false,
-                    analyze_speakers: true
+                    analyze_speakers: true,
+                    matching_policy: None
                 },
                 Arc::new(AtomicBool::new(false))
             )
@@ -690,7 +693,8 @@ async fn wrong_model_role_refuses_capture_and_pending_analysis_protects_processi
                     },
                     transcribe_after_stop: true,
                     skip_unavailable_model: false,
-                    analyze_speakers: true
+                    analyze_speakers: true,
+                    matching_policy: None
                 },
                 Arc::new(AtomicBool::new(false))
             )

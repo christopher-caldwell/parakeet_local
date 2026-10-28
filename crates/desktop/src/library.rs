@@ -786,13 +786,20 @@ impl Workbench {
                             .unwrap_or("unknown"),
                     ),
                 ),
-                _ => match imported_claim(segment) {
-                    Some(claim) => (claim.to_owned(), false, MUTED),
-                    None => ("Unknown speaker".into(), false, WARNING),
+                _ => match (
+                    imported_claim(segment),
+                    suggested_name(self, detail, segment),
+                ) {
+                    (Some(claim), _) => (claim.to_owned(), false, MUTED),
+                    (None, Some(name)) => (name, false, ACCENT),
+                    (None, None) => ("Unknown speaker".into(), false, WARNING),
                 },
             },
         };
         let imported = correction.speaker.is_none() && imported_claim(segment).is_some();
+        let suggested = correction.speaker.is_none()
+            && !imported
+            && suggested_name(self, detail, segment).is_some();
         let source = segment
             .track_id
             .as_ref()
@@ -1399,4 +1406,36 @@ fn imported_claim(segment: &TranscriptSegment) -> Option<&str> {
     (segment.evidence["origin"] == "imported_unverified")
         .then_some(segment.speaker_claim.as_deref())
         .flatten()
+}
+
+/// A name the saved comparisons propose for this segment's speech. It is a prediction, shown
+/// apart from confirmed names, and only while no decision on that comparison is active.
+fn suggested_name(
+    view: &Workbench,
+    detail: &reader::Document,
+    segment: &TranscriptSegment,
+) -> Option<String> {
+    let track_id = segment.track_id.as_ref()?;
+    let offset = detail
+        .tracks
+        .iter()
+        .find(|t| &t.id == track_id)?
+        .meeting_offset_ms()?;
+    let (start, end) = (segment.start_ms? - offset, segment.end_ms? - offset);
+    view.suggestions
+        .iter()
+        .filter(|s| {
+            &s.track_id == track_id
+                && s.resolutions.last().is_none_or(|r| r.action == "undo")
+                && std::iter::once((s.start_ms, s.end_ms))
+                    .chain(s.more_ranges.iter().copied())
+                    .any(|(from, to)| start >= from && end <= to)
+        })
+        .find_map(|s| {
+            let id = s.decision.suggested_profile.as_ref()?;
+            view.profiles
+                .iter()
+                .find(|p| &p.id == id)
+                .map(|p| p.name.clone())
+        })
 }

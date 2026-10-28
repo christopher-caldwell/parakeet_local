@@ -183,6 +183,11 @@ enum Capture {
         transcribe_after_stop: Option<bool>,
         #[arg(long)]
         analyze_after_stop: Option<bool>,
+        #[arg(
+            long,
+            help = "Offer name suggestions after Stop using the adopted calibrated policy"
+        )]
+        suggest_after_stop: Option<bool>,
     },
     Devices,
     Permissions,
@@ -379,6 +384,11 @@ enum Speakers {
     },
     Candidates {
         meeting: String,
+    },
+    /// Propose matching criteria from verified examples; `--adopt` saves a proposed policy.
+    Calibrate {
+        #[arg(long)]
+        adopt: bool,
     },
     /// Clips worth listening to for each imported label; labels stay unverified claims.
     ImportedCandidates {
@@ -587,10 +597,13 @@ fn writes(command: &Command) -> bool {
             Capture::Settings {
                 transcribe_after_stop,
                 analyze_after_stop,
+                suggest_after_stop,
             },
     } = command
     {
-        return transcribe_after_stop.is_some() || analyze_after_stop.is_some();
+        return transcribe_after_stop.is_some()
+            || analyze_after_stop.is_some()
+            || suggest_after_stop.is_some();
     }
     if let Command::Dictation {
         command:
@@ -638,6 +651,7 @@ fn writes(command: &Command) -> bool {
                     | Speakers::Diarize { .. }
                     | Speakers::Enroll { .. }
                     | Speakers::IdentifyCluster { .. }
+                    | Speakers::Calibrate { adopt: true }
                     | Speakers::UndoIdentification { .. }
                     | Speakers::Assign { .. }
                     | Speakers::Reject { .. }
@@ -1236,6 +1250,7 @@ async fn execute(cli: Cli) -> anyhow::Result<Value> {
                 Capture::Settings {
                     transcribe_after_stop,
                     analyze_after_stop,
+                    suggest_after_stop,
                 },
         } => {
             let service = AudioSettingsService::new(store.clone(), store.clone());
@@ -1252,7 +1267,16 @@ async fn execute(cli: Cli) -> anyhow::Result<Value> {
                     preferences.analyze_meetings_after_stop = false;
                 }
             }
-            if transcribe_after_stop.is_some() || analyze_after_stop.is_some() {
+            if let Some(enabled) = suggest_after_stop {
+                preferences.suggest_speakers_after_stop = enabled;
+            }
+            if !preferences.analyze_meetings_after_stop {
+                preferences.suggest_speakers_after_stop = false;
+            }
+            if transcribe_after_stop.is_some()
+                || analyze_after_stop.is_some()
+                || suggest_after_stop.is_some()
+            {
                 service.save(&preferences).await?;
             }
             value(preferences)
@@ -1274,25 +1298,36 @@ async fn execute(cli: Cli) -> anyhow::Result<Value> {
                     transcribe,
                     analyze_speakers,
                 },
-        } => value(
-            meeting
-                .record(
-                    parakeet_application::meeting::RecordMeetingInput {
-                        capture: parakeet_application::capture::CaptureRecordingInput {
-                            microphone_uid,
-                            system_audio: system,
-                            title,
-                            maximum_seconds: seconds,
-                            final_transcription: None,
+        } => {
+            let matching_policy = if analyze_speakers {
+                AudioSettingsService::new(store.clone(), store.clone())
+                    .get()
+                    .await?
+                    .after_stop_policy()
+            } else {
+                None
+            };
+            value(
+                meeting
+                    .record(
+                        parakeet_application::meeting::RecordMeetingInput {
+                            capture: parakeet_application::capture::CaptureRecordingInput {
+                                microphone_uid,
+                                system_audio: system,
+                                title,
+                                maximum_seconds: seconds,
+                                final_transcription: None,
+                            },
+                            transcribe_after_stop: transcribe,
+                            skip_unavailable_model: false,
+                            analyze_speakers,
+                            matching_policy,
                         },
-                        transcribe_after_stop: transcribe,
-                        skip_unavailable_model: false,
-                        analyze_speakers,
-                    },
-                    Arc::new(std::sync::atomic::AtomicBool::new(false)),
-                )
-                .await?,
-        ),
+                        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                    )
+                    .await?,
+            )
+        }
         Command::Transcribe(args) => value(processing.run(args.request()).await?),
         Command::Speakers { command } => match command {
             Speakers::Clusters {
@@ -1382,6 +1417,31 @@ async fn execute(cli: Cli) -> anyhow::Result<Value> {
                         })
                         .await?,
                 )
+            }
+            Speakers::Calibrate { adopt } => {
+                let report = speakers.calibrate().await?;
+                if adopt {
+                    let Some(policy) = report
+                        .policy
+                        .clone()
+                        .filter(|_| report.status == "proposed")
+                    else {
+                        return Err(parakeet_domain::ValidationError(format!(
+                            "no policy to adopt: {}",
+                            report.reason
+                        ))
+                        .into());
+                    };
+                    let service = AudioSettingsService::new(store.clone(), store.clone());
+                    let mut preferences = service.get().await?;
+                    preferences.matching_policy = Some(parakeet_domain::SavedMatchingPolicy {
+                        policy,
+                        saved_at: parakeet_application::now(),
+                        provenance: report.clone(),
+                    });
+                    service.save(&preferences).await?;
+                }
+                value(report)
             }
             Speakers::ImportedCandidates { meeting } => {
                 value(speakers.imported_label_candidates(&meeting).await?)

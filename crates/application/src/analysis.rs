@@ -19,6 +19,9 @@ pub struct AnalysisRecipe {
     pub asr: AnalysisModel,
     pub diarization: AnalysisModel,
     pub embedding: Option<AnalysisModel>,
+    /// Calibrated criteria for after-Stop name suggestions; suggestions are never confirmations.
+    #[serde(default)]
+    pub matching_policy: Option<MatchPolicy>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AnalysisSource {
@@ -168,12 +171,23 @@ impl MeetingAnalysisService {
     ) -> Result<MeetingAnalysis, AnalyzeMeetingError> {
         self.analyze_pinned(input, None).await
     }
-    pub(crate) async fn prepare_recipe(&self) -> Result<AnalysisRecipe, AnalyzeMeetingError> {
+    pub(crate) async fn prepare_recipe(
+        &self,
+        matching_policy: Option<MatchPolicy>,
+    ) -> Result<AnalysisRecipe, AnalyzeMeetingError> {
+        if let Some(policy) = &matching_policy {
+            policy.validate()?;
+        }
         let selected = self.models.selection().await?;
         Ok(AnalysisRecipe {
             asr: self.pin(&selected.asr, "asr").await?,
             diarization: self.pin(&selected.diarization, "diarization").await?,
-            embedding: None,
+            embedding: if matching_policy.is_some() {
+                Some(self.pin(&selected.embedding, "embedding").await?)
+            } else {
+                None
+            },
+            matching_policy,
         })
     }
     pub(crate) async fn analyze_pinned(
@@ -276,12 +290,14 @@ impl MeetingAnalysisService {
                     } else {
                         None
                     },
+                    matching_policy: input.matching_policy.clone(),
                 }
             };
             let AnalysisRecipe {
                 asr,
                 diarization,
                 embedding,
+                matching_policy,
             } = recipe;
             let mut sources = vec![];
             for track in d.tracks.iter().filter(|t| t.kind != TrackKind::Playback) {
@@ -337,7 +353,7 @@ impl MeetingAnalysisService {
                 asr,
                 diarization,
                 embedding,
-                matching_policy: input.matching_policy,
+                matching_policy,
                 sources,
                 publication_group,
                 candidates: vec![],

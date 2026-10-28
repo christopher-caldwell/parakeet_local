@@ -78,6 +78,7 @@ impl Workbench {
             view = view.child(caption("All prepared voices are handled for this session."));
         }
         view = view.child(self.imported_clip_view(cx));
+        view = view.child(self.calibration_view(cx));
         for (index, done) in self.train_done.iter().enumerate() {
             let id = done.id.clone();
             let name = self
@@ -203,6 +204,76 @@ impl Workbench {
                         ),
                 );
             }
+        }
+        view
+    }
+    /// Evaluates verified examples across recordings and proposes criteria; nothing changes
+    /// until the user adopts them.
+    fn calibration_view(&self, cx: &mut Context<Self>) -> Div {
+        let mut view = div().flex().flex_col().gap_2().child(
+            quiet(
+                "train-calibrate",
+                "Check how well my verified voices are recognized",
+            )
+            .self_start()
+            .disabled(self.pending > 0)
+            .on_click(cx.listener(|this, _, _, cx| {
+                let service = this.speakers.clone();
+                this.task(
+                    "Evaluating verified voices across recordings",
+                    async move { Ok(Update::Calibration(service.calibrate().await?)) },
+                    cx,
+                );
+            })),
+        );
+        let Some(report) = &self.calibration else {
+            return view;
+        };
+        view = view.child(caption(format!(
+            "{} examples · {} people · {} tuning / {} held-out recordings · {}",
+            report.examples,
+            report.profiles,
+            report.tuning_recordings,
+            report.held_out_recordings,
+            report.reason
+        )));
+        if let Some(policy) = report.policy.clone() {
+            let held = &report.held_out;
+            view = view
+                .child(caption(format!(
+                    "Proposed: similarity ≥ {:.2}, separation ≥ {:.2}, ≥ {} examples. Held-out: {} of {} known voices recognized, {} false accepts in {} trials.",
+                    policy.minimum_score,
+                    policy.minimum_margin,
+                    policy.minimum_examples,
+                    held.correct_accepts,
+                    held.known_trials,
+                    held.false_accepts(),
+                    held.trials
+                )))
+                .child(
+                    button("train-adopt", "Use these criteria for suggestions")
+                        .self_start()
+                        .disabled(self.pending > 0)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            let Some(report) = this.calibration.clone() else { return };
+                            let Some(policy) = report.policy.clone() else { return };
+                            let mut preferences = this.audio_preferences.clone();
+                            preferences.matching_policy = Some(SavedMatchingPolicy {
+                                policy,
+                                saved_at: now(),
+                                provenance: report,
+                            });
+                            let service = this.audio_settings.clone();
+                            this.task(
+                                "Saving calibrated criteria",
+                                async move {
+                                    service.save(&preferences).await?;
+                                    Ok(Update::PolicyAdopted(preferences))
+                                },
+                                cx,
+                            );
+                        })),
+                );
         }
         view
     }

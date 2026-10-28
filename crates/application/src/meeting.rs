@@ -180,6 +180,8 @@ pub struct RecordMeetingInput {
     /// an explicit request keeps failing before capture.
     pub skip_unavailable_model: bool,
     pub analyze_speakers: bool,
+    /// Saved calibrated criteria for after-Stop suggestions, when the user enabled them.
+    pub matching_policy: Option<parakeet_domain::recognition::MatchPolicy>,
 }
 #[derive(Debug, Clone)]
 pub struct FinalizeMeetingInput {
@@ -254,6 +256,7 @@ impl MeetingService {
             transcribe_after_stop,
             skip_unavailable_model: input_skip,
             analyze_speakers,
+            matching_policy,
         } = input;
         request
             .validate()
@@ -280,7 +283,7 @@ impl MeetingService {
                     )
                 })?;
                 let recipe = service
-                    .prepare_recipe()
+                    .prepare_recipe(matching_policy)
                     .await
                     .map_err(|source| RecordMeetingError::AnalysisPreparation(Box::new(source)))?;
                 if recipe.asr.id != plan.model || recipe.asr.revision != plan.model_revision {

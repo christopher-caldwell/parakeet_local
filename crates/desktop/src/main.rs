@@ -68,6 +68,8 @@ enum Update {
     ),
     IdentificationUndone(UndoIdentificationReport),
     ImportedClips(String, Vec<ImportedLabelCandidates>),
+    Calibration(parakeet_domain::calibration::CalibrationReport),
+    PolicyAdopted(AudioPreferences),
     RefreshSelected,
     SegmentSaved(String),
     Models(Vec<ModelInfo>),
@@ -191,6 +193,7 @@ struct Workbench {
     examples: Vec<VoiceExampleSummary>,
     candidates: Vec<EnrollmentCandidate>,
     imported_clips: Vec<ImportedLabelCandidates>,
+    calibration: Option<parakeet_domain::calibration::CalibrationReport>,
     train_person: Option<String>,
     train_skipped: Vec<String>,
     train_done: Vec<ClusterIdentification>,
@@ -340,6 +343,8 @@ impl Workbench {
                             Update::ImportedClips(recording, clips) => {
                                 if this.requested_recording.as_deref() == Some(recording.as_str()) { this.imported_clips = clips; }
                             }
+                            Update::Calibration(report) => { this.calibration = Some(report); }
+                            Update::PolicyAdopted(preferences) => { this.audio_preferences = preferences; this.status = "Calibrated criteria saved; suggestions stay opt-in and are never confirmed names".into(); }
                             Update::IdentificationUndone(report) => {
                                 if let Some(done) = this.train_done.iter_mut().find(|i| i.id == report.identification.id) { *done = report.identification.clone(); }
                                 this.status = format!("Reverted {} lines and removed {} examples", report.reverted_segments, report.removed_examples);
@@ -406,6 +411,8 @@ impl Workbench {
                                             search.update(cx,|input,cx|input.set_value("",window,cx));
                                         });
                                         this.requested_recording = Some(d.recording.id.clone());
+                                        {let service=this.speakers.clone();let rid=d.recording.id.clone();
+                                        this.task("Reading saved name suggestions",async move{Ok(Update::Suggestions(rid.clone(),service.suggestions(Some(&rid)).await?))},cx);}
                                         this.selected_track = d
                                             .tracks
                                             .iter()
@@ -1196,6 +1203,12 @@ impl Render for Workbench {
                         let preferences=this.audio_preferences.clone();let service=this.audio_settings.clone();
                         this.task("Saving speaker analysis preference",async move{service.save(&preferences).await?;Ok(Update::Message("Speaker analysis preference saved".into()))},cx);
                     }))).child(caption("Pins installed ASR and diarization models before capture. Prepares playable unknown voices; no identity comparison or enrollment."));
+                content=content.child(choice("auto-speaker-suggest",if self.audio_preferences.suggest_speakers_after_stop {"After Stop: suggest names (on)"}else{"After Stop: name suggestions off"},self.audio_preferences.suggest_speakers_after_stop)
+                    .disabled(self.capture_stop.is_some()||self.audio_preferences.matching_policy.is_none()||!self.audio_preferences.analyze_meetings_after_stop).on_click(cx.listener(|this,_,_,cx|{
+                        this.audio_preferences.suggest_speakers_after_stop = !this.audio_preferences.suggest_speakers_after_stop;
+                        let preferences=this.audio_preferences.clone();let service=this.audio_settings.clone();
+                        this.task("Saving suggestion preference",async move{service.save(&preferences).await?;Ok(Update::Message("Suggestion preference saved".into()))},cx);
+                    }))).child(caption("Needs speaker analysis and calibrated criteria (Speakers → Identify voices). Suggestions are shown for you to confirm; they never name anyone on their own."));
                 if self.devices["devices"]
                     .as_array()
                     .is_none_or(|devices| devices.is_empty())
@@ -1853,6 +1866,7 @@ impl Workbench {
         };
         let transcribe = self.audio_preferences.transcribe_meetings_after_stop;
         let analyze_speakers = self.audio_preferences.analyze_meetings_after_stop;
+        let matching_policy = self.audio_preferences.after_stop_policy();
         let stop = Arc::new(AtomicBool::new(false));
         self.capture_stop = Some(stop.clone());
         let meeting = self.meeting.clone();
@@ -1867,6 +1881,7 @@ impl Workbench {
                             transcribe_after_stop: transcribe,
                             skip_unavailable_model: true,
                             analyze_speakers,
+                            matching_policy,
                         },
                         stop,
                     )
@@ -2327,6 +2342,7 @@ fn main() -> anyhow::Result<()> {
                             examples: vec![],
                             candidates: vec![],
                             imported_clips: vec![],
+                            calibration: None,
                             train_person: None,
                             train_skipped: vec![],
                             train_done: vec![],

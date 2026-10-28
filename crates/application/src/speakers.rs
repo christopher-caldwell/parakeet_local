@@ -189,6 +189,15 @@ impl SpeakerService {
             .map(VoiceExampleSummary::from)
             .collect())
     }
+    /// Proposes matching criteria from verified examples (tuning recordings only) and scores
+    /// them once on held-out recordings. Never changes any setting by itself.
+    pub async fn calibrate(
+        &self,
+    ) -> Result<parakeet_domain::calibration::CalibrationReport, ListVoiceExamplesError> {
+        Ok(parakeet_domain::calibration::calibrate(
+            &self.queries.examples(None).await?,
+        ))
+    }
     pub async fn create(&self, name: &str) -> Result<SpeakerProfile, CreateSpeakerError> {
         Recording::validate_title(name)?;
         let p = SpeakerProfile {

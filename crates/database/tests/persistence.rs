@@ -1187,6 +1187,7 @@ async fn meeting_capture_saves_a_durable_plan_and_finalization_is_idempotent() {
                 transcribe_after_stop: true,
                 skip_unavailable_model: false,
                 analyze_speakers: false,
+                matching_policy: None,
             },
             Arc::new(AtomicBool::new(false)),
         )
@@ -2864,6 +2865,7 @@ async fn meeting_without_a_verified_asr_model_records_audio_and_reports_the_skip
                 transcribe_after_stop: true,
                 skip_unavailable_model: true,
                 analyze_speakers: false,
+                matching_policy: None,
             },
             Arc::new(AtomicBool::new(false)),
         )

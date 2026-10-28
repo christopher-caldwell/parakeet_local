@@ -14,7 +14,7 @@ pub fn cosine(a: &[f32], b: &[f32]) -> Option<f64> {
         Some((dot / (an * bn).sqrt()).clamp(-1., 1.))
     }
 }
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MatchPolicy {
     pub minimum_score: f64,
     pub minimum_margin: f64,
