@@ -18,14 +18,15 @@ The app bundle is `target/Parakeet Local.app`. Use the launcher above to select 
 
 ## Build and initialize a separate library
 
-`just` lists every task (format, lint, test, build, release, run, dev, cli, sql, clean); each one calls the scripts in `scripts/`.
+`just` lists every task (format, lint, test, build, release, native, run, dev, cli, sql, clean); each one calls the scripts in `scripts/`.
 
 Requirements: Apple Silicon, macOS 14+, Rust 1.99.1, macOS command-line developer tools, CMake, FFmpeg/FFprobe, and yt-dlp for requested YouTube operations. The current build works with Swift 5.8.1 and the macOS 13.3 SDK. `scripts/cargo` avoids an older Homebrew compiler taking precedence over the pinned rustup compiler.
 
 ```sh
 just build     # app bundle (just release for the optimized one)
 just verify    # format check, clippy and tests
-just run       # launch on .local/app (just dev builds first)
+just run       # launch the built bundle on .local/app
+just dev       # fast loop: rebuild and restart on Rust changes (bare binary; helpers cached)
 
 # Explicit provisioning, using an independent storage directory:
 target/debug/parakeet --data-root /path/to/new-library db create

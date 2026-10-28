@@ -1,6 +1,10 @@
 #!/bin/sh
 set -eu
 mkdir -p target/native
+# Skip the compile when the helper is newer than its sources and this script.
+if [ -x target/native/parakeet-bridge ] && [ -z "$(find native/bridge.swift native/clipboard.swift "$0" -newer target/native/parakeet-bridge)" ]; then
+  exit 0
+fi
 parakeet_output="target/native/.parakeet-bridge-build-$$"
 parakeet_log="$parakeet_output.log"
 trap 'rm -f "$parakeet_output" "$parakeet_log"' EXIT HUP INT TERM

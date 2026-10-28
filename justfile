@@ -47,8 +47,15 @@ performance:
 run:
     scripts/run-desktop {{data}}
 
-# Build the debug app, then launch it
-dev: build run
+# Compile the Swift helpers (audio bridge, model runtime); skipped when their sources are unchanged
+native:
+    scripts/build-native
+    scripts/build-model-runtime
+
+# Fast dev loop: rebuild and restart the app whenever Rust code changes. Runs the bare binary
+# (helpers come from target/native), so macOS microphone/dictation permissions need `just build run`.
+dev: native
+    root=$(cd "{{data}}" && pwd) && PARAKEET_DATA_ROOT="$root" scripts/cargo watch --quiet --clear -w crates -w Cargo.toml -x 'run --quiet -p parakeet-desktop'
 
 # Run the command-line tool, e.g. `just cli models list`
 cli *args:
