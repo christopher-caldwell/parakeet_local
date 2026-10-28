@@ -110,6 +110,7 @@ struct Workbench {
     recovery: Arc<parakeet_application::jobs::ProcessingRecoveryService>,
     pending_jobs: Vec<ProcessingRun>,
     storage: Arc<parakeet_application::storage::StorageService>,
+    archive: Arc<parakeet_application::audio_archive::AudioArchiveService>,
     storage_preview: Option<Arc<parakeet_application::storage::RetentionPreview>>,
     storage_policy: Option<parakeet_application::storage::RetentionPolicySnapshot>,
     storage_days: Entity<InputState>,
@@ -2026,6 +2027,16 @@ fn main() -> anyhow::Result<()> {
         library: store.clone(),
         locations: store.clone(),
     });
+    let archive = Arc::new(
+        parakeet_application::audio_archive::AudioArchiveService::new(
+            store.clone(),
+            store.clone(),
+            store.clone(),
+            guarded_audio.clone(),
+            Arc::new(parakeet_infrastructure::audio::LocalAudioIdentity),
+            Arc::new(parakeet_infrastructure::archive::FfmpegArchiver),
+        ),
+    );
     let library = Arc::new(LibraryService::new(
         store.clone(),
         guarded_audio.clone(),
@@ -2271,6 +2282,7 @@ fn main() -> anyhow::Result<()> {
                             recovery,
                             pending_jobs: vec![],
                             storage,
+                            archive,
                             storage_preview: None,
                             storage_policy: None,
                             storage_days,
@@ -2375,6 +2387,7 @@ fn main() -> anyhow::Result<()> {
                         });
                         view.update(cx, |this, cx| {
                             this.start_heartbeat(cx);
+                            this.archive_old_captures(cx);
                             #[cfg(feature = "performance")]
                             this.start_performance_observer(window, cx);
                             this.subscribe_search(cx);

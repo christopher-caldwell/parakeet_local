@@ -94,6 +94,11 @@ enum Command {
 }
 #[derive(Subcommand)]
 enum Storage {
+    /// Replace raw captures older than seven days with verified lossless copies.
+    ArchiveAudio {
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Read-only file accounting, including referenced audio outside this root.
     Usage,
     /// Read the saved preview policy; defaults to keep all.
@@ -606,7 +611,7 @@ fn writes(command: &Command) -> bool {
     matches!(
         command,
         Command::Storage {
-            command: Storage::SetPolicy { .. }
+            command: Storage::SetPolicy { .. } | Storage::ArchiveAudio { dry_run: false }
         } | Command::Jobs {
             command: Jobs::Recover | Jobs::Retry { .. } | Jobs::Cancel { .. }
         } | Command::Meetings {
@@ -877,6 +882,14 @@ async fn execute(cli: Cli) -> anyhow::Result<Value> {
         library: store.clone(),
         locations: store.clone(),
     });
+    let archive = parakeet_application::audio_archive::AudioArchiveService::new(
+        store.clone(),
+        store.clone(),
+        store.clone(),
+        guarded_audio.clone(),
+        Arc::new(parakeet_infrastructure::audio::LocalAudioIdentity),
+        Arc::new(parakeet_infrastructure::archive::FfmpegArchiver),
+    );
     let library = LibraryService::new(store.clone(), guarded_audio.clone(), source.clone());
     let engine = Arc::new(LocalSpeech::new(models.clone(), model_runtime_executable()));
     let ownership =
@@ -948,6 +961,12 @@ async fn execute(cli: Cli) -> anyhow::Result<Value> {
     );
     let result = match cli.command {
         Command::Storage { command } => match command {
+            Storage::ArchiveAudio { dry_run } => {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)?
+                    .as_millis() as u64;
+                value(archive.archive_due(now, dry_run).await?)
+            }
             Storage::Usage => value(storage.usage().await?),
             Storage::Policy => value(storage.policy().await?),
             Storage::Preview {
@@ -1670,6 +1689,7 @@ fn kind(error: &anyhow::Error) -> &'static str {
     for cause in error.chain() {
         macro_rules! classify {($($type:ty),*)=>{$(if let Some(error)=cause.downcast_ref::<$type>(){let kind=error.kind();if kind!="nested"{return kind;}})*};}
         classify!(
+            parakeet_application::audio_archive::ArchiveAudioError,
             parakeet_application::storage::InspectStorageError,
             parakeet_application::storage::ReadRetentionPolicyError,
             parakeet_application::storage::SaveRetentionPolicyError,

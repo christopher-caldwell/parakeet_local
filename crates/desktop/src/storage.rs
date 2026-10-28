@@ -267,3 +267,36 @@ impl Workbench {
         )
     }
 }
+
+impl Workbench {
+    /// Raw captures stay untouched for a week, then become verified lossless copies. Runs once at
+    /// startup; anything that fails verification is left exactly as it was.
+    pub(super) fn archive_old_captures(&mut self, cx: &mut Context<Self>) {
+        let service = self.archive.clone();
+        self.task(
+            "Compressing raw recordings older than a week",
+            async move {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)?
+                    .as_millis() as u64;
+                let report = service.archive_due(now, false).await?;
+                Ok(Update::Message(if report.archived.is_empty() && report.failed.is_empty() {
+                    "Ready".into()
+                } else {
+                    let saved: u64 = report
+                        .archived
+                        .iter()
+                        .map(|a| a.bytes_before.saturating_sub(a.bytes_after))
+                        .sum();
+                    format!(
+                        "Compressed {} raw recordings older than a week ({} saved, no quality lost); {} left unchanged",
+                        report.archived.len(),
+                        size_label(saved),
+                        report.failed.len()
+                    )
+                }))
+            },
+            cx,
+        );
+    }
+}

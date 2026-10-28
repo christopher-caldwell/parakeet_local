@@ -1,6 +1,8 @@
 //! Conservative retention decisions. Observations are not permission to delete.
 use crate::ValidationError;
 use serde::{Deserialize, Serialize};
+/// Raw capture audio stays untouched this long, then becomes a verified lossless copy.
+pub const RAW_AUDIO_RETENTION_DAYS: u64 = 7;
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RetentionPolicy {
     pub completed_scratch_after_days: Option<u16>,

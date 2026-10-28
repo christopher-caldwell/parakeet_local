@@ -1,3 +1,4 @@
+pub mod archive;
 pub mod artifacts;
 pub mod audio;
 pub mod jobs;

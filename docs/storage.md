@@ -14,6 +14,16 @@ parakeet --data-root <existing-root> storage set-policy --keep-all --expected-re
 
 `usage`, `policy` and `preview` are read-only. An age/keep-all argument overrides only that preview. `set-policy` saves a preview threshold and requires the observed revision; another writer winning returns conflict/exit 5. Invalid ages return exit 2. The threshold accepts 1–3650 elapsed 24-hour days after a run's completion, independent of source recording date and file mtime. A preview-policy save grants no cleanup permission. There is no automatic removal. Preview JSON exposes `automatic_cleanup: false` and `execution_available: false`: an observational preview cannot be executed directly.
 
+## Raw recordings: seven days, then lossless
+
+Captured audio (`*-raw.caf`, application-owned) is kept exactly as recorded for **seven days**, so a wrong transcript or speaker label can be redone from the original. After that it is replaced by a **lossless FLAC copy** (24-bit). Lossy encoding is never used and nothing is deleted outright.
+
+- The copy is written beside the original, then both are decoded and compared sample by sample (largest allowed difference: one 24-bit step). Any difference or error leaves the original untouched.
+- Only then does the library switch the track to the copy (a compare-and-set update through the storage gate) and the raw file is removed. The track keeps its transcripts and voice examples; its history records the original path, original hash and the verification.
+- Tracks with a queued or running job are skipped and retried next time. Imported (externally owned) audio is never touched.
+- The desktop app does this once at startup. From the CLI: `parakeet storage archive-audio --dry-run` to see what would change, then `parakeet storage archive-audio`.
+- Age is the file's modification time, which for a capture is when recording ended.
+
 ## Accounting scope
 
 Root totals count observed regular files and link entries, with hard-link identities counted once inside that root. Categories separate the selected SQLite database/sidecars, saved audio, models, processing files, playback, clipboard recovery, evaluation reports and other files. A database override outside the selected root is measured separately. Referenced source audio outside the root is inspected only at its exact saved locator, grouped by physical file identity, and is not added to the root total. External source directories are not recursively inventoried. Scope totals should not be added together as a physical-space calculation: links can cross scopes.
