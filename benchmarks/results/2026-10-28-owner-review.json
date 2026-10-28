@@ -1,0 +1,13 @@
+{
+  "date": "2026-10-28",
+  "what": "Owner listen-and-pick over 60 places where Parakeet TDT v2 and Whisper large-v3 disagreed on the owner's own meetings (private audio; counts only). Typed corrections were scored by word edits against each version.",
+  "disagreements_in_pool": 682,
+  "items_answered": 60,
+  "tdt_closer": 28,
+  "large_v3_closer": 20,
+  "both_wrong_equally": 5,
+  "both_fine": 3,
+  "unclear_or_skipped": 4,
+  "tdt_share_of_clear_winners": 0.583,
+  "conclusion": "Parakeet TDT stays the default: more often right than large-v3 on the owner's meetings, and about 100x faster. The sample is small, so treat the margin as modest. Neither version was right in 21 of 60 places, which is where later accuracy work should look."
+}
