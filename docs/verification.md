@@ -204,3 +204,19 @@ Evidence is stated by category; "unit" means no real model or hardware.
 | Permission requests (CAP-4), modifier-only and letter shortcuts (DIC-3) | unit for validation; hardware not tested |
 
 Limits of this pass: SEP-1's cancelled-microphone transcription (ASR on echo-cancelled audio) is not built; only bleed detection withholds "Me". The energy VAD removes silence and stationary noise, not speech-like noise. Clock-drift correction is recorded, not applied: a device clock 200 ppm fast leaves about 0.7 s of mic-to-system skew per hour. No UI performance harness was re-run after the UI changes.
+
+## Accuracy pass (October 28)
+
+All numbers are on public audio only; none were measured on the owner's recordings. Scripts and results are in `benchmarks/`.
+
+| Question | Result |
+|---|---|
+| New speech-aligned chunks versus the old 60 s windows | Parity on long read speech (3.7% vs 3.8% error); better on sparse meeting tracks (AMI, same small model: 24.3% to 20.8%). [Result](../benchmarks/results/2026-10-28-long-clip-chunking.json) |
+| Skipped sentences | One 25 s chunk silently dropped 23 words; chunks with implausibly few words are now re-decoded in halves, which recovered it |
+| Larger Whisper models | large-v3 best on read speech (2.0%), ties medium.en on AMI (19.5%); [result](../benchmarks/results/2026-10-28-whisper-models.json) |
+| Parakeet TDT v2 in the app | Best everywhere: 1.66% read speech, 16.42% AMI, versus 2.03% and 19.52% for large-v3, and about 100 times faster than real time; made the default. [Result](../benchmarks/results/2026-10-28-parakeet-tdt.json) |
+| Words invented on muted or idle microphones | Seven synthetic non-speech tracks: Parakeet TDT and Whisper small.en print nothing; large-v3 still printed 11 words on breathing-like noise. Sound annotations and caption sign-offs are suppressed. [Result](../benchmarks/results/2026-10-28-muted-mic.json) |
+| Raw capture retention | 7 days then verified lossless FLAC; SQLite integration test with real ffmpeg encode/decode |
+
+Test count: 149 workspace tests pass; clippy with warnings denied and fmt are clean. Build note: after the Command Line Tools 26.6 update, C++ headers are missing from the compiler's default search path; set `CPLUS_INCLUDE_PATH="$(xcrun --show-sdk-path)/usr/include/c++/v1"` when building (or reinstall the Command Line Tools).
+

@@ -7,6 +7,15 @@ The product authority is the user's original brief, "MacParakeet Clone — Produ
 - A personal, local-only macOS tool. Transcription, diarization and voice embeddings run on-device; nothing goes to an AI service without explicit authorization (B§2).
 - Priorities: reliable microphone selection, a responsive native UI, trustworthy speaker identification, correct transcript chronology, and no fabricated speech (B§1).
 
+## Priorities stated by the owner (October 28)
+
+- **Accuracy comes first.** Meetings may take minutes to transcribe after they end. Dictation also values accuracy, but must not make the owner wait long after they stop speaking.
+- **Dictation is transcribe-then-paste.** Typing as the owner speaks is not required. Live transcript preview is out of scope.
+- **No MacParakeet import and no feature parity.** Only add what the owner cares about.
+- **Raw recordings are kept seven days, then replaced by a verified lossless copy**, so a wrong transcript or speaker label can still be redone from the original.
+- **Maturity stages:** proof of concept, usable, stable, replacement. Headphones are the normal setup, so microphone bleed is a lower priority unless "Me" turns out wrong. Words invented while the microphone is muted or silent are a defect to measure and fix.
+- The default speech model is the most accurate one measured on the benchmarks in `benchmarks/results/`, not the one assumed to be best.
+
 ## Me, Them and Unknown (B§7, B§9, B§26)
 
 - Source categories are **Me** (microphone), **Them** (system audio) and **Unknown** (unattributed or ambiguous). They are source attribution, not confirmed identities.
