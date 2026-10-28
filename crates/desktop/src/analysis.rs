@@ -34,7 +34,7 @@ impl Workbench {
                         .disabled(candidates.is_empty())
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.candidates = candidates.clone();
-                            this.speaker_mode = SpeakerMode::Profiles;
+                            this.speaker_mode = SpeakerMode::Train;
                             this.area = Area::Speakers;
                             this.refresh_profiles(cx);
                             cx.notify();

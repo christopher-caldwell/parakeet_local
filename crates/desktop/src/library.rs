@@ -1019,7 +1019,7 @@ impl Workbench {
             .gap_3()
             .child(people)
             .child(caption(
-                "Assign only after listening. A correction does not enroll a voice example.",
+                "Assign only after listening. When the speech is clean, your confirmation also saves a removable voice example; undoing the correction removes it.",
             ))
             .child(
                 div()
@@ -1141,6 +1141,7 @@ impl Workbench {
                 .child(div().flex().flex_wrap().gap_2()
                     .child(primary("transcribe-source","Transcribe source").disabled(!track.available||self.pending>0).on_click(cx.listener(|this,_,_,cx|this.process(false,false,cx))))
                     .child(button("diarize-source","Detect speakers").disabled(!track.available||self.pending>0).on_click(cx.listener(|this,_,_,cx|this.process(true,false,cx))))
+                    .child(quiet("identify-voices","Identify voices").on_click(cx.listener(|this,_,_,cx|{this.speaker_mode=SpeakerMode::Train;this.navigate(Area::Speakers,cx);})))
                     .child(quiet("review-source-clusters","Review clusters").on_click(cx.listener(|this,_,_,cx|{this.speaker_mode=SpeakerMode::Clusters;this.navigate(Area::Speakers,cx);this.inspect_clusters(cx);}))))
                 .child(caption("Processing creates a new result. Existing audio, title, and corrections are retained.")));
             view = view.child(

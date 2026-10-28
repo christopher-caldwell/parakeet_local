@@ -1,4 +1,5 @@
-//! Durable, source-aware meeting analysis. This workflow never enrolls a voice.
+//! Durable, source-aware meeting analysis. Analysis only predicts; it never names a person or
+//! enrolls a voice. Examples come from the user's explicit identifications (`speakers`).
 use super::*;
 use crate::{
     audio_locations::AudioFileIdentityReader,

@@ -7,6 +7,7 @@ mod performance;
 mod reader;
 mod shell;
 mod storage;
+mod train;
 mod ui;
 use gpui::{div, prelude::*, px, rgb, size, *};
 use gpui_base::input::{Input, InputEvent, InputState, Textarea, TextareaState};
@@ -45,6 +46,7 @@ enum SpeakerMode {
     Profiles,
     Clusters,
     Comparisons,
+    Train,
 }
 enum Update {
     Clusters(parakeet_application::cluster_edits::ClusterReview),
@@ -56,6 +58,13 @@ enum Update {
     Profiles(Vec<SpeakerProfile>),
     Examples(String, Vec<VoiceExampleSummary>),
     Candidates(String, Vec<EnrollmentCandidate>),
+    Identified(
+        String,
+        ClusterIdentification,
+        Vec<SpeakerProfile>,
+        reader::Document,
+    ),
+    IdentificationUndone(UndoIdentificationReport),
     RefreshSelected,
     SegmentSaved(String),
     Models(Vec<ModelInfo>),
@@ -178,6 +187,10 @@ struct Workbench {
     profiles: Vec<SpeakerProfile>,
     examples: Vec<VoiceExampleSummary>,
     candidates: Vec<EnrollmentCandidate>,
+    train_person: Option<String>,
+    train_skipped: Vec<String>,
+    train_done: Vec<ClusterIdentification>,
+    train_candidates_named: Vec<(String, String)>,
     recording_shortcut: bool,
     model_list: Vec<ModelInfo>,
     shortcuts: Vec<gestures::Shortcut>,
@@ -304,6 +317,27 @@ impl Workbench {
                                 if this.selected_profile.as_deref() == Some(profile_id.as_str()) {
                                     this.examples = examples;
                                 }
+                            }
+                            Update::Identified(candidate, identification, profiles, detail) => {
+                                this.train_candidates_named.push((candidate, identification.id.clone()));
+                                this.status = format!("Named {} lines; {} voice examples saved", identification.segments.len(), identification.example_ids.len());
+                                this.train_done.push(identification);
+                                this.profiles = profiles;
+                                this.train_person = None;
+                                let name = this.person_name.clone();
+                                let _ = cx.update_window(this.main_window, move |_, window, cx| {
+                                    name.update(cx, |input, cx| input.set_value("", window, cx));
+                                });
+                                this.receive_detail(detail);
+                                cx.notify();
+                                return;
+                            }
+                            Update::IdentificationUndone(report) => {
+                                if let Some(done) = this.train_done.iter_mut().find(|i| i.id == report.identification.id) { *done = report.identification.clone(); }
+                                this.status = format!("Reverted {} lines and removed {} examples", report.reverted_segments, report.removed_examples);
+                                if let Some(d)=&this.detail { let id=d.recording.id.clone(); let library=this.library.clone(); this.task("Reloading derived speaker attribution",async move{Ok(Update::detail(library.show(&id).await?))},cx); }
+                                cx.notify();
+                                return;
                             }
                             Update::Candidates(recording,c) => {if this.requested_recording.as_deref()==Some(recording.as_str()){this.candidates = c;}},
                             Update::StoragePreview(result) => {this.storage_busy=false;match result {Ok((preview,reviews))=>{this.storage_policy=Some(preview.saved_policy.clone());this.storage_preview=Some(preview);if let Some(selected)=&this.cleanup_selected {this.cleanup_selected=reviews.iter().find(|r|r.id==selected.id).cloned();}this.cleanup_reviews=reviews;},Err(error)=>{this.last_error=Some(error);this.status="Storage inspection failed; no files changed".into();cx.notify();return;}}},
@@ -617,6 +651,7 @@ impl Render for Workbench {
                 content = content.child(
                     div().flex().flex_wrap().gap_2().children(
                         [
+                            (SpeakerMode::Train, "Identify voices"),
                             (SpeakerMode::Profiles, "People and examples"),
                             (SpeakerMode::Clusters, "Anonymous clusters"),
                             (SpeakerMode::Comparisons, "Identity comparisons"),
@@ -632,7 +667,9 @@ impl Render for Workbench {
                         }),
                     ),
                 );
-                if self.speaker_mode == SpeakerMode::Profiles {
+                if self.speaker_mode == SpeakerMode::Train {
+                    content = content.child(self.train_view(cx));
+                } else if self.speaker_mode == SpeakerMode::Profiles {
                     content=content.child(div().flex().flex_col().gap_2().child(caption("PEOPLE & VERIFIED EXAMPLES")).child(caption("A name is confirmed only when you identify the voice. Predictions never become training examples automatically.")))
      .child(div().flex().gap_2().child(field(&self.person_name).w(px(260.))).child(button("add-person","Create person").on_click(cx.listener(|this,_,_,cx|{let name=this.person_name.read(cx).value().to_string();let service=this.speakers.clone();this.task("Creating speaker profile",async move{service.create(&name).await?;Ok(Update::Profiles(service.profiles().await?))},cx);}))));
                     content = content.child(
@@ -2281,6 +2318,10 @@ fn main() -> anyhow::Result<()> {
                             profiles,
                             examples: vec![],
                             candidates: vec![],
+                            train_person: None,
+                            train_skipped: vec![],
+                            train_done: vec![],
+                            train_candidates_named: vec![],
                             recording_shortcut: false,
                             model_list: vec![],
                             shortcuts: vec![],
@@ -2726,7 +2767,7 @@ impl Workbench {
     fn cluster_panel(&self, cx: &mut Context<Self>) -> Div {
         use parakeet_application::cluster_edits::ClusterEdit;
         let mut panel=div().flex().flex_col().gap_2().mt_4().child(div().text_xl().child("Anonymous speaker clusters"))
-            .child("Split or merge voices within one source. This creates a derived result and does not enroll or name a person.")
+            .child("Split or merge voices within one source. This creates a derived result; it does not name a person or save voice examples.")
             .child(button("inspect-clusters","Inspect latest clusters for selected source").on_click(cx.listener(|this,_,_,cx|this.inspect_clusters(cx))));
         let Some(review) = self
             .cluster_review
