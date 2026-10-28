@@ -44,7 +44,11 @@ pub struct IdentityDecision {
     pub suggested_profile: Option<String>,
     pub candidates: Vec<IdentityCandidate>,
     pub reason: String,
+    /// How candidate scores were computed; scores from different methods are not comparable.
+    #[serde(default)]
+    pub scoring_method: String,
 }
+pub const SCORING_METHOD: &str = "centroid-cosine-v1";
 /// Suggestions never modify verified examples. Different model versions or capture domains are excluded.
 pub fn suggest(
     vector: &[f32],
@@ -60,7 +64,7 @@ pub fn suggest(
             "embedding must be finite, nonempty and nonzero".into(),
         ));
     }
-    let mut grouped = std::collections::BTreeMap::<String, Vec<f64>>::new();
+    let mut grouped = std::collections::BTreeMap::<String, (Vec<f64>, usize)>::new();
     let mut eligible: Vec<_> = examples
         .iter()
         .filter(|e| {
@@ -89,16 +93,36 @@ pub fn suggest(
             continue;
         }
         admitted.push(e);
-        if let Some(score) = cosine(vector, &e.vector) {
-            grouped.entry(e.profile_id.clone()).or_default().push(score);
+        let Some(norm) = cosine(&e.vector, &e.vector).map(|_| {
+            e.vector
+                .iter()
+                .map(|x| (*x as f64).powi(2))
+                .sum::<f64>()
+                .sqrt()
+        }) else {
+            continue;
+        };
+        let (sum, count) = grouped
+            .entry(e.profile_id.clone())
+            .or_insert_with(|| (vec![0.; e.vector.len()], 0));
+        if sum.len() == e.vector.len() {
+            for (total, x) in sum.iter_mut().zip(&e.vector) {
+                *total += *x as f64 / norm;
+            }
+            *count += 1;
         }
     }
     let mut candidates: Vec<_> = grouped
         .into_iter()
-        .map(|(profile_id, scores)| IdentityCandidate {
-            profile_id,
-            score: scores.iter().sum::<f64>() / scores.len() as f64,
-            examples: scores.len(),
+        .filter_map(|(profile_id, (sum, examples))| {
+            // Score against the re-normalized centroid so varied correct examples
+            // do not lower a person's score the way a mean of cosines would.
+            let centroid: Vec<f32> = sum.iter().map(|x| *x as f32).collect();
+            Some(IdentityCandidate {
+                profile_id,
+                score: cosine(vector, &centroid)?,
+                examples,
+            })
         })
         .collect();
     candidates.sort_by(|a, b| {
@@ -126,6 +150,7 @@ pub fn suggest(
         .into(),
         suggested_profile: accepted,
         candidates,
+        scoring_method: SCORING_METHOD.into(),
     })
 }
 #[cfg(test)]
@@ -196,6 +221,47 @@ mod tests {
         .unwrap();
         assert!(decision.suggested_profile.is_none());
         assert_eq!(decision.candidates[0].examples, 1);
+    }
+    fn at(id: &str, profile: &str, start: i64, vector: Vec<f32>) -> VoiceExample {
+        let mut x = e(id, "system");
+        x.profile_id = profile.into();
+        x.start_ms = start;
+        x.end_ms = start + 5000;
+        x.vector = vector;
+        x
+    }
+    #[test]
+    fn diverse_correct_examples_do_not_lower_the_true_score() {
+        let policy = MatchPolicy {
+            minimum_score: 0.5,
+            minimum_margin: 0.0,
+            minimum_examples: 1,
+        };
+        let query = [1., 0., 0.];
+        let single = suggest(
+            &query,
+            "m",
+            "1",
+            "system",
+            &[at("a", "p", 0, vec![1., 0., 0.])],
+            &policy,
+        )
+        .unwrap()
+        .candidates[0]
+            .score;
+        let varied = [
+            at("a", "p", 0, vec![1., 0., 0.]),
+            at("b", "p", 10_000, vec![0.8, 0.6, 0.]),
+            at("c", "p", 20_000, vec![0.8, 0., 0.6]),
+        ];
+        let many = suggest(&query, "m", "1", "system", &varied, &policy).unwrap();
+        assert!(many.candidates[0].score > 0.9 * single);
+        assert_eq!(many.scoring_method, SCORING_METHOD);
+        let impostor = suggest(&[0., 1., 0.], "m", "1", "system", &varied, &policy)
+            .unwrap()
+            .candidates[0]
+            .score;
+        assert!(impostor < many.candidates[0].score);
     }
     #[test]
     fn invalid_vectors_are_rejected() {
