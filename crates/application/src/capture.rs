@@ -40,6 +40,13 @@ pub trait AudioCapture: Send + Sync {
     fn current_status(&self) -> Value;
     async fn devices(&self) -> Result<Value, CapabilityError>;
     async fn permissions(&self) -> Result<Value, CapabilityError>;
+    /// Asks macOS for one permission (`accessibility`, `input_monitoring`, `screen_recording`
+    /// or `microphone`). Only ever called by an explicit user action.
+    async fn request_permission(&self, _kind: &str) -> Result<Value, CapabilityError> {
+        Err(CapabilityError::message(
+            "this capture adapter cannot request permissions",
+        ))
+    }
     async fn record(
         &self,
         request: &CaptureRecordingInput,
@@ -52,6 +59,7 @@ operation_error!(CaptureRecordingError,sources{Invalid:ValidationError=>"invalid
 operation_error!(RecoverCaptureError,sources{Source:CapabilityError=>"source",Persistence:PersistenceError=>"persistence"},values{});
 operation_error!(ListAudioDevicesError,sources{Source:CapabilityError=>"source"},values{});
 operation_error!(InspectPermissionsError,sources{Source:CapabilityError=>"source"},values{});
+operation_error!(RequestPermissionError,sources{Invalid:ValidationError=>"invalid_input",Source:CapabilityError=>"source"},values{});
 operation_error!(ListRecoverableCapturesError,sources{Source:CapabilityError=>"source"},values{});
 pub struct CaptureService {
     capture: Arc<dyn AudioCapture>,
@@ -107,6 +115,23 @@ impl AudioInspectionService {
     }
     pub async fn permissions(&self) -> Result<Value, InspectPermissionsError> {
         Ok(self.capture.permissions().await?)
+    }
+    /// Prompts for one permission at first use; inspection (`permissions`) never prompts.
+    pub async fn request_permission(&self, kind: &str) -> Result<Value, RequestPermissionError> {
+        if ![
+            "accessibility",
+            "input_monitoring",
+            "screen_recording",
+            "microphone",
+        ]
+        .contains(&kind)
+        {
+            return Err(ValidationError(
+                "choose accessibility, input_monitoring, screen_recording or microphone".into(),
+            )
+            .into());
+        }
+        Ok(self.capture.request_permission(kind).await?)
     }
     pub async fn recoverable(&self) -> Result<Value, ListRecoverableCapturesError> {
         Ok(self.capture.recoverable().await?)

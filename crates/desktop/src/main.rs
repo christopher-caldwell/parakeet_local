@@ -1507,7 +1507,22 @@ impl Render for Workbench {
             }
             Area::Privacy => {
                 content=content.child(section("Privacy & application prompts","Transcription and speaker processing run locally. AI enhancement stays disabled until you authorize an exact route."))
-                    .child(div().p_4().rounded_lg().border_1().border_color(rgb(BORDER)).bg(rgb(PANEL)).child("Raw speech is always retained. A CLI may use a remote provider: authorize it only after reviewing the route and prompt."));
+                    .child(div().p_4().rounded_lg().border_1().border_color(rgb(BORDER)).bg(rgb(PANEL)).child("Raw speech is always retained. A CLI may use a remote provider: authorize it only after reviewing the route and prompt."))
+                    .child(caption("macOS permissions are requested only when you press a button here; nothing prompts in the background."))
+                    .child(div().flex().flex_wrap().gap_2().children([
+                        ("microphone", "Microphone"),
+                        ("screen_recording", "System audio (Screen Recording)"),
+                        ("accessibility", "Insert text (Accessibility)"),
+                        ("input_monitoring", "Shortcuts (Input Monitoring)"),
+                    ].into_iter().enumerate().map(|(index, (kind, label))| {
+                        quiet(("request-permission", index), format!("Request {label}")).on_click(cx.listener(move |this, _, _, cx| {
+                            let service = this.audio_inspection.clone();
+                            this.task("Requesting macOS permission", async move {
+                                let result = service.request_permission(kind).await?;
+                                Ok(Update::Message(format!("{kind}: {}", if result["granted"] == true { "granted" } else { "not granted yet — approve it in System Settings if prompted" })))
+                            }, cx);
+                        }))
+                    })));
                 for (index, p) in self.prompts.iter().enumerate() {
                     let profile = p.clone();
                     let revoke = p.clone();

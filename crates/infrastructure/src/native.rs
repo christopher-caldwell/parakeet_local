@@ -33,10 +33,13 @@ impl NativeBridge {
         }
     }
     pub async fn query(&self, mode: &str) -> Result<Value, CapabilityError> {
+        self.query_args(&[mode]).await
+    }
+    async fn query_args(&self, args: &[&str]) -> Result<Value, CapabilityError> {
         let output = tokio::time::timeout(
             Duration::from_secs(10),
             Command::new(&self.executable)
-                .arg(mode)
+                .args(args)
                 .kill_on_drop(true)
                 .output(),
         )
@@ -140,6 +143,9 @@ impl AudioCapture for NativeBridge {
     }
     async fn permissions(&self) -> Result<Value, CapabilityError> {
         self.query("permissions").await
+    }
+    async fn request_permission(&self, kind: &str) -> Result<Value, CapabilityError> {
+        self.query_args(&["request-permission", kind]).await
     }
     async fn recoverable(&self) -> Result<Value, CapabilityError> {
         let mut sessions = vec![];

@@ -246,6 +246,17 @@ final class Hotkeys {
             case "timeline-self-test":emit(timelineSelfTest())
             case "devices":emit(["devices":try inputDevices()])
             case "permissions":emit(["microphone_status":AVCaptureDevice.authorizationStatus(for:.audio).rawValue,"screen_capture":CGPreflightScreenCaptureAccess(),"accessibility":AXIsProcessTrusted(),"input_monitoring":CGPreflightListenEventAccess(),"prompts_requested":false])
+            case "request-permission":
+                guard args.count==3 else{throw failure("request-permission requires accessibility, input_monitoring, screen_recording or microphone")}
+                let granted:Bool
+                switch args[2]{
+                case "accessibility":granted=AXIsProcessTrustedWithOptions(["AXTrustedCheckOptionPrompt" as CFString:true] as CFDictionary)
+                case "input_monitoring":granted=CGRequestListenEventAccess()
+                case "screen_recording":granted=CGRequestScreenCaptureAccess()
+                case "microphone":granted=await AVCaptureDevice.requestAccess(for:.audio)
+                default:throw failure("Unknown permission kind")
+                }
+                emit(["permission":args[2],"granted":granted,"prompt_requested":true])
             case "target":emit(try target(bundle:args.count==3 ? args[2]:nil))
             case "insert":guard args.count==3 else{throw failure("insert requires a JSON file")};let o=try JSONSerialization.jsonObject(with:Data(contentsOf:URL(fileURLWithPath:args[2]))) as! [String:Any];emit(try insert(o))
             case "record":guard args.count==3 else{throw failure("record requires a JSON file")};let o=try JSONSerialization.jsonObject(with:Data(contentsOf:URL(fileURLWithPath:args[2]))) as! [String:Any];emit(["event":"completed","report":try await record(o)])

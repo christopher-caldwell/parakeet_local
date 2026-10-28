@@ -191,6 +191,10 @@ enum Capture {
     },
     Devices,
     Permissions,
+    /// Ask macOS for one permission now (the only command that prompts).
+    RequestPermission {
+        kind: String,
+    },
     Recoverable,
     Recover {
         directory: PathBuf,
@@ -742,6 +746,13 @@ async fn execute(cli: Cli) -> anyhow::Result<Value> {
         } => {
             return Ok(AudioInspectionService::new(native.clone())
                 .permissions()
+                .await?);
+        }
+        Command::Capture {
+            command: Capture::RequestPermission { kind },
+        } => {
+            return Ok(AudioInspectionService::new(native.clone())
+                .request_permission(&kind)
                 .await?);
         }
         Command::Capture {
