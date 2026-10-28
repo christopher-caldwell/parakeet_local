@@ -84,11 +84,16 @@ impl SpeechProcessing for LocalSpeech {
     whisper_rs::install_logging_hooks();
     let file=directory.join(if req.model=="whisper-base.en"{"ggml-base.en.bin"}else{"ggml-small.en.bin"});
     let key=models.cache_identity(&req.model)?;
+    control.publish(ProcessingStage::VerifyingSource,0,Some(duration),0,None);
+    let source=crate::whisper_resume::identify_source(&track,&control)?;
+    let prefix=crate::whisper_resume::restore(crate::whisper_resume::ResumeInput{root:&models.root,request:&req,track:&track,run:&run,source:&source,model_key:&key,duration_ms:duration,control:&control})?;
+    control.publish(ProcessingStage::LoadingModel,prefix.consumed_ms,Some(duration),prefix.chunks,None);
+    let loaded=Instant::now();
     let mut cached=cache.whisper.lock().map_err(|_|CapabilityError::message("ASR model cache lock failed"))?;
     let reused=cached.as_ref().is_some_and(|c|c.key==key);
-    if !reused { *cached=None; let model=whisper_rs::WhisperContext::new_with_params(file.to_str().ok_or_else(||CapabilityError::message("invalid model path"))?,whisper_rs::WhisperContextParameters::default()).map_err(CapabilityError::new)?; *cached=Some(Cached{key,model,last_used:Instant::now()}); }
+    if !reused { *cached=None; let model=whisper_rs::WhisperContext::new_with_params(file.to_str().ok_or_else(||CapabilityError::message("invalid model path"))?,whisper_rs::WhisperContextParameters::default()).map_err(CapabilityError::new)?; *cached=Some(Cached{key:key.clone(),model,last_used:Instant::now()}); }
     let context=&cached.as_ref().ok_or_else(||CapabilityError::message("ASR cache missing after initialization"))?.model;
-    let load_seconds=if reused{0.}else{loaded.elapsed().as_secs_f64()};let mut segments=vec![];let mut raw=vec![];let mut consumed=0;let mut decode_seconds=0.;let mut audio_seconds=0.;let mut chunks=0;
+    let load_seconds=if reused{0.}else{loaded.elapsed().as_secs_f64()};let resumed_ms=prefix.consumed_ms;let resumed_audio_ms=prefix.decoded_ms;let resumed_chunks=prefix.chunks;let resume_report=prefix.report;let mut segments=prefix.segments;let mut raw=prefix.raw;let mut consumed=resumed_ms;let mut decode_seconds=0.;let mut audio_seconds=resumed_audio_ms as f64/1000.;let mut chunks=resumed_chunks;
     while consumed<duration{
      control.check()?;control.publish(ProcessingStage::Decoding,consumed,Some(duration),chunks,None);let first_segment=segments.len();let first_raw=raw.len();
      let length=(duration-consumed).min(60_000);let decoded=Instant::now();let samples=runtime.block_on(async {tokio::select!{r=audio::decode(&track,req.start_ms+consumed,length)=>r,_=control.cancelled()=>Err(CapabilityError::message("decoding cancelled"))}})?;decode_seconds+=decoded.elapsed().as_secs_f64();let actual_ms=samples.len() as i64/16;audio_seconds+=samples.len() as f64/16000.;
@@ -112,13 +117,14 @@ impl SpeechProcessing for LocalSpeech {
       segments.push(TranscriptSegment{id:stable_id("segment",&format!("{}:{ordinal}",run.id)),recording_id:run.recording_id.clone(),run_id:run.id.clone(),track_id:Some(track.id.clone()),ordinal,start_ms:track.meeting_offset_ms().map(|o|o+local_start),end_ms:track.meeting_offset_ms().map(|o|o+local_end.max(local_start)),text,speaker_claim:None,evidence});
      }
      let completed=(consumed+actual_ms).min(duration);
-     if control.retains_work(){crate::whisper_control::retain_chunk(&models.root,crate::whisper_control::ChunkEvidence{request:&req,track:&track,run:&run,index:chunks,start_ms:req.start_ms+consumed,completed_ms:completed,segments:&segments[first_segment..],raw:&raw[first_raw..]})?;}
+     if control.retains_work(){crate::whisper_resume::retain_chunk(&models.root,crate::whisper_resume::ChunkEvidence{request:&req,track:&track,run:&run,source:&source,model_key:&key,index:chunks,start_ms:req.start_ms+consumed,completed_ms:completed,decoded_ms:actual_ms,segments:&segments[first_segment..],raw:&raw[first_raw..]})?;}
      chunks+=1;control.publish(ProcessingStage::Transcribing,completed,Some(duration),chunks,None);
      consumed+=length;if actual_ms<length-100{break;}
     }
     if let Some(c)=cached.as_mut(){c.last_used=Instant::now();}
+    if crate::whisper_resume::identify_source(&track,&control)?!=source{return Err(CapabilityError::message("source content changed during transcription; refusing publication"));}
     order_segments(&mut segments);let wall=started.elapsed().as_secs_f64();
-    Ok(EngineOutput{segments,intervals:vec![],raw:json!(raw),metrics:json!({"wall_seconds":wall,"model_load_seconds":load_seconds,"decode_seconds":decode_seconds,"audio_seconds":audio_seconds,"real_time_factor":wall/audio_seconds,"process_lifetime_peak_rss_bytes":peak_rss_bytes(),"model_context_reused":reused,"cache_idle_seconds":60,"runtime_configuration":"whisper-rs-0.16.0:context-cache-v1:no-context-60s","experimental_word_timestamps":req.word_timestamps,"word_timing_algorithm":if req.word_timestamps{Some("whisper-token-estimates-v1:whitespace-byte-grouping:no-interpolation")}else{None},"chunk_ms":60_000,"chunk_overlap_ms":0,"threads":4,"timing_space":if track.meeting_offset_ms().is_some(){"meeting"}else{"untimed_with_track_local_evidence"}})})
+    Ok(EngineOutput{segments,intervals:vec![],raw:json!(raw),metrics:json!({"wall_seconds":wall,"model_load_seconds":load_seconds,"decode_seconds":decode_seconds,"audio_seconds":audio_seconds,"real_time_factor":wall/audio_seconds,"process_lifetime_peak_rss_bytes":peak_rss_bytes(),"model_context_reused":reused,"cache_idle_seconds":60,"runtime_configuration":"whisper-rs-0.16.0:context-cache-v1:no-context-60s","experimental_word_timestamps":req.word_timestamps,"word_timing_algorithm":if req.word_timestamps{Some("whisper-token-estimates-v1:whitespace-byte-grouping:no-interpolation")}else{None},"chunk_ms":60_000,"chunk_overlap_ms":0,"checkpoint_protocol":2,"source_sha256":source.sha256,"resume":resume_report,"inference_chunks":chunks-resumed_chunks,"inferred_audio_seconds":audio_seconds-resumed_audio_ms as f64/1000.,"threads":4,"timing_space":if track.meeting_offset_ms().is_some(){"meeting"}else{"untimed_with_track_local_evidence"}})})
    }else if req.model==SPEAKRS_ID || req.model=="speakrs-community-1-cpu"{
     control.publish(ProcessingStage::LoadingModel,0,Some(duration),0,None);
     let mut pipeline=speakrs::OwnedDiarizationPipeline::from_dir(&directory,if req.model==SPEAKRS_ID{speakrs::ExecutionMode::CoreMl}else{speakrs::ExecutionMode::Cpu}).map_err(CapabilityError::new)?;let load_seconds=loaded.elapsed().as_secs_f64();let decoding=Instant::now();let samples=runtime.block_on(async {tokio::select!{r=audio::decode(&track,req.start_ms,duration)=>r,_=control.cancelled()=>Err(CapabilityError::message("decoding cancelled"))}})?;let decode_seconds=decoding.elapsed().as_secs_f64();let audio_seconds=samples.len() as f64/16000.;

@@ -1263,6 +1263,17 @@ async fn meeting_partial_failure_resumes_only_failed_sources_and_keeps_title() {
     assert_eq!(d.recording.title(), "User title survives");
     assert_eq!(d.runs.len(), 3);
     assert_eq!(d.runs.iter().filter(|r| r.status == "failed").count(), 1);
+    let failed = d.runs.iter().find(|r| r.status == "failed").unwrap();
+    let retry = d
+        .runs
+        .iter()
+        .find(|r| r.configuration["retry_of_run_id"] == failed.id)
+        .unwrap();
+    assert_eq!(retry.status, "completed");
+    assert_eq!(
+        retry.configuration["meeting_finalization_id"],
+        failed.configuration["meeting_finalization_id"]
+    );
     assert_eq!(d.recording.metadata["read_only"], true);
 }
 struct LostMeetingCheckpoint {

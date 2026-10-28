@@ -10,6 +10,8 @@ pub const CONTROL_PROTOCOL: &str = "processing-control-v1";
 #[serde(rename_all = "snake_case")]
 pub enum ProcessingStage {
     Preparing,
+    VerifyingSource,
+    RestoringChunks,
     LoadingModel,
     Decoding,
     Transcribing,

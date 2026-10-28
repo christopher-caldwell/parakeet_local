@@ -169,6 +169,21 @@ impl ProcessingService {
         if !track.available {
             return Err(ProcessingError::Unavailable(track.path.clone()));
         }
+        // Finalization retries the latest compatible unfinished source, while
+        // completed sources remain handled by the meeting checkpoint.
+        let retry_of = retry_of.or_else(|| {
+            finalization.and_then(|(id, _)| {
+                d.runs
+                    .iter()
+                    .filter(|run| {
+                        ["failed", "interrupted"].contains(&run.status.as_str())
+                            && run.model == request.model
+                            && run.configuration["meeting_finalization_id"] == id
+                            && run.configuration["request"] == json!(request)
+                    })
+                    .max_by(|a, b| a.started_at.cmp(&b.started_at).then(a.id.cmp(&b.id)))
+            })
+        });
         let model = self.models.readiness(&request.model).await?;
         if request.word_timestamps && !model.experimental_word_timestamps {
             return Err(ValidationError(

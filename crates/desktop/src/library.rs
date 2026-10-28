@@ -1300,6 +1300,13 @@ impl Workbench {
                         }
                     )))
                     .child(caption(format!("Run {}", run.id)))
+                    .when(run.result["metrics"]["resume"]["status"] == "reused", |row| {
+                        let resume=&run.result["metrics"]["resume"];
+                        row.child(caption(format!("Reused {} saved chunks · {} audio · {} new inference chunks",resume["reused_chunks"].as_u64().unwrap_or(0),time_label(resume["reused_audio_ms"].as_i64()),run.result["metrics"]["inference_chunks"].as_u64().unwrap_or(0))))
+                    })
+                    .when(run.result["metrics"]["resume"]["status"] == "restart_required", |row| {
+                        row.child(caption(format!("Processed the source again because saved chunks could not be reused: {}",run.result["metrics"]["resume"]["reason"].as_str().unwrap_or("incompatible evidence"))))
+                    })
                     .when_some(run.error.clone(), |row, error| {
                         row.child(
                             div()
