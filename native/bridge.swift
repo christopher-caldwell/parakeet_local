@@ -137,7 +137,7 @@ final class SystemOutput: NSObject, SCStreamOutput, SCStreamDelegate {
     func stream(_ stream: SCStream, didStopWithError error: Error) { errors.append(error.localizedDescription); emit(["event":"source_failed","source":"system","message":error.localizedDescription]) }
 }
 final class StopFlag { let lock = NSLock(); private var stopped = false; func stop() { lock.lock(); stopped = true; lock.unlock() }; func get() -> Bool { lock.lock(); defer {lock.unlock()};return stopped } }
-func startMicrophone(_ uid:String?,_ mic:TrackWriter) async -> (AVAudioEngine?,String?,String?) {
+func startMicrophone(_ uid:String?,_ mic:TrackWriter,quiet:Bool=false) async -> (AVAudioEngine?,String?,String?) {
     if let uid=uid {
         do {
             let devices=try inputDevices();guard let device=devices.first(where: { ($0["uid"] as? String)==uid }), var deviceID=device["device_id"] as? AudioDeviceID else { throw failure("Selected microphone is unavailable; no silent default fallback") }
@@ -146,7 +146,7 @@ func startMicrophone(_ uid:String?,_ mic:TrackWriter) async -> (AVAudioEngine?,S
             let status=AudioUnitSetProperty(unit,kAudioOutputUnitProperty_CurrentDevice,kAudioUnitScope_Global,0,&deviceID,UInt32(MemoryLayout<AudioDeviceID>.size));guard status==noErr else{throw failure("Cannot select microphone: OSStatus \(status)")}
             var actual=AudioDeviceID(0);var size=UInt32(MemoryLayout<AudioDeviceID>.size);guard AudioUnitGetProperty(unit,kAudioOutputUnitProperty_CurrentDevice,kAudioUnitScope_Global,0,&actual,&size)==noErr, actual==deviceID else{throw failure("Effective microphone differs from selected input")};let effectiveUID=stringProperty(actual,kAudioDevicePropertyDeviceUID)
             node.installTap(onBus:0,bufferSize:4096,format:nil){buffer,time in if let copy=copyBuffer(buffer){mic.enqueue(copy,hostSeconds:time.isHostTimeValid ? AVAudioTime.seconds(forHostTime:time.hostTime):monotonic())} };e.prepare();try e.start();return (e,effectiveUID,nil)
-        }catch{emit(["event":"source_failed","source":"microphone","message":error.localizedDescription]);return (nil,nil,"microphone: "+error.localizedDescription)}
+        }catch{if !quiet{emit(["event":"source_failed","source":"microphone","message":error.localizedDescription])};return (nil,nil,"microphone: "+error.localizedDescription)}
     }
     return (nil,nil,nil)
 }
@@ -166,7 +166,7 @@ func record(_ o: [String: Any]) async throws -> [String: Any] {
     let directory = URL(fileURLWithPath: folder);try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     let origin=monotonic();let mic=TrackWriter(source:"microphone",directory:directory,origin:origin);let system=TrackWriter(source:"system",directory:directory,origin:origin)
     let stop=StopFlag();DispatchQueue.global().async { while let line=readLine() { if line == "stop" { stop.stop();return } };stop.stop() }
-    var engine: AVAudioEngine?;var stream: SCStream?;var systemOutput: SystemOutput?;var startupErrors:[String]=[];var effectiveUID:String?;let requestedUID=o["microphone_uid"] as? String
+    var micInterruptions:[[String:Any]]=[];var engine: AVAudioEngine?;var stream: SCStream?;var systemOutput: SystemOutput?;var startupErrors:[String]=[];var effectiveUID:String?;let requestedUID=o["microphone_uid"] as? String
     async let microphoneStart=startMicrophone(requestedUID,mic)
     async let systemStart=startSystemAudio(o["system_audio"] as? Bool ?? false,system)
     let (microphoneResult,systemResult)=await (microphoneStart,systemStart)
@@ -183,7 +183,22 @@ func record(_ o: [String: Any]) async throws -> [String: Any] {
                 var actual=AudioDeviceID(0);var size=UInt32(MemoryLayout<AudioDeviceID>.size)
                 let status=active.inputNode.audioUnit.map{AudioUnitGetProperty($0,kAudioOutputUnitProperty_CurrentDevice,kAudioUnitScope_Global,0,&actual,&size)} ?? kAudio_ParamError
                 let uid=status==noErr ? stringProperty(actual,kAudioDevicePropertyDeviceUID):""
-                if uid != requested {active.inputNode.removeTap(onBus:0);active.stop();engine=nil;effectiveUID=uid.isEmpty ? nil:uid;mic.markFailure("Selected microphone disconnected or effective device changed; no silent fallback accepted");startupErrors.append("Microphone device change at \(elapsed) seconds");emit(["event":"source_failed","source":"microphone","effective_microphone_uid":effectiveUID as Any? ?? NSNull(),"message":"Requested and effective input differ"]);if stream==nil{stop.stop()}}
+                if uid != requested {
+                    // Keep the session: record the gap and wait for the same device. No other input is ever used.
+                    active.inputNode.removeTap(onBus:0);active.stop();engine=nil;effectiveUID=nil
+                    micInterruptions.append(["atSeconds":elapsed,"reason":"selected microphone disconnected or the effective input changed"])
+                    emit(["event":"source_interrupted","source":"microphone","message":"Selected microphone is gone; waiting for it to return. No other input is used."])
+                }
+            } else if engine == nil, let requested=requestedUID, !micInterruptions.isEmpty {
+                let present=((try? inputDevices()) ?? []).contains{($0["uid"] as? String)==requested}
+                if present {
+                    let result=await startMicrophone(requested,mic,quiet:true)
+                    if let resumed=result.0 {
+                        engine=resumed;effectiveUID=result.1
+                        micInterruptions[micInterruptions.count-1]["resumedAtSeconds"]=elapsed
+                        emit(["event":"source_resumed","source":"microphone","effective_microphone_uid":effectiveUID as Any? ?? NSNull()])
+                    }
+                }
             }
             let mh=mic.health();let sh=system.health();emit(["event":"health","elapsed_seconds":elapsed,"microphone":mh,"system":sh]);lastHealth=elapsed
             if elapsed>=12 && mh["first_buffer_ready"] as? Bool != true && sh["first_buffer_ready"] as? Bool != true {startupErrors.append("No source delivered usable buffers within 12 seconds");break}
@@ -192,7 +207,7 @@ func record(_ o: [String: Any]) async throws -> [String: Any] {
     }
     engine?.inputNode.removeTap(onBus:0);engine?.stop();if let stream=stream{do{try await stream.stopCapture()}catch{startupErrors.append(error.localizedDescription)}}
     let micReport=mic.report();let sysReport=system.report();let duration=Int((monotonic()-origin)*1000)
-    let report:[String:Any]=["id":sessionID,"sourceAlignment":["microphone":micReport,"system":sysReport],"elapsedDurationMs":duration,"requestedSystemAudio": o["system_audio"] as? Bool ?? false,"requestedMicrophoneUID":requestedUID as Any? ?? NSNull(),"effectiveMicrophoneUID":effectiveUID as Any? ?? NSNull(),"errors":startupErrors+(systemOutput?.errors ?? [])]
+    let report:[String:Any]=["id":sessionID,"sourceAlignment":["microphone":micReport,"system":sysReport],"elapsedDurationMs":duration,"microphoneInterruptions":micInterruptions,"requestedSystemAudio": o["system_audio"] as? Bool ?? false,"requestedMicrophoneUID":requestedUID as Any? ?? NSNull(),"effectiveMicrophoneUID":effectiveUID as Any? ?? NSNull(),"errors":startupErrors+(systemOutput?.errors ?? [])]
     let data=try JSONSerialization.data(withJSONObject:report,options:[.prettyPrinted,.sortedKeys]);try data.write(to:directory.appendingPathComponent("meeting-recording-metadata.json"),options:.atomic)
     let title=(o["title"] as? String) ?? "Meeting";let manifest:[String:Any]=["schema":"com.parakeet.local.capture","schemaVersion":1,"meeting":["id":sessionID,"title":title,"createdAt":o["created_at"] as? String ?? ISO8601DateFormatter().string(from:Date()),"durationMs":duration]]
     try JSONSerialization.data(withJSONObject:manifest,options:[.prettyPrinted,.sortedKeys]).write(to:directory.appendingPathComponent("manifest.json"),options:.atomic)

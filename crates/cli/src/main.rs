@@ -752,7 +752,7 @@ async fn execute(cli: Cli) -> anyhow::Result<Value> {
             command: Capture::RequestPermission { kind },
         } => {
             return Ok(AudioInspectionService::new(native.clone())
-                .request_permission(&kind)
+                .request_permission(kind.as_str())
                 .await?);
         }
         Command::Capture {

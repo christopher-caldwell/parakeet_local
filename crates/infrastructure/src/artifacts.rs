@@ -154,6 +154,16 @@ fn parse_folder(folder: &Path) -> Result<ImportBundle, CapabilityError> {
                 ));
             }
         }
+        if native
+            && key == "microphone"
+            && metadata["microphoneInterruptions"]
+                .as_array()
+                .is_some_and(|gaps| !gaps.is_empty())
+        {
+            warnings.push(format!(
+                "{source_id}: the selected microphone disconnected during the meeting; the gap is recorded and nothing else was substituted"
+            ));
+        }
         let caf = current.replace(".m4a", ".caf");
         let p = if folder.join(&caf).exists() {
             folder.join(&caf)
