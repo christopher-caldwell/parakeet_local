@@ -23,6 +23,8 @@ pub struct SuggestSpeakerInput {
     pub track_id: String,
     pub start_ms: i64,
     pub end_ms: i64,
+    /// Further clean ranges of the same cluster pooled into one embedding.
+    pub more_ranges: Vec<(i64, i64)>,
     pub policy: MatchPolicy,
 }
 #[derive(Debug, Clone)]
@@ -218,6 +220,7 @@ impl SpeakerService {
                 track: track.clone(),
                 start_ms: input.start_ms,
                 end_ms: input.end_ms,
+                more_ranges: vec![],
                 model: self.models.selection().await?.embedding,
             })
             .await?;
@@ -265,6 +268,7 @@ impl SpeakerService {
             capture_domain: format!("{:?}", track.kind).to_lowercase(),
             vector: output.vector,
             verified_at: now(),
+            origin: None,
         };
         self.writes.enroll(&example).await?;
         Ok(example.into())
@@ -286,6 +290,7 @@ impl SpeakerService {
                 && existing.track_id == input.track_id
                 && existing.start_ms == input.start_ms
                 && existing.end_ms == input.end_ms
+                && existing.more_ranges == input.more_ranges
                 && existing.source_model.as_ref() == Some(model)
                 && json!(existing.policy) == json!(input.policy)
             {
@@ -311,12 +316,19 @@ impl SpeakerService {
         let track_id = input.track_id.as_str();
         let start_ms = input.start_ms;
         let end_ms = input.end_ms;
+        let more_ranges = input.more_ranges;
         let policy = input.policy;
         policy.validate()?;
-        if start_ms < 0 || end_ms - start_ms < 3000 || end_ms - start_ms > 30_000 {
-            return Err(
-                ValidationError("suggestion needs a 3–30 second clean sample".into()).into(),
-            );
+        let ranges = || std::iter::once((start_ms, end_ms)).chain(more_ranges.iter().copied());
+        let total: i64 = ranges().map(|(a, b)| b - a).sum();
+        if ranges().any(|(a, b)| a < 0 || b <= a || b - a > 30_000)
+            || !(3000..=90_000).contains(&total)
+        {
+            return Err(ValidationError(
+                "suggestion needs 3–90 seconds of clean speech in ranges of at most 30 seconds"
+                    .into(),
+            )
+            .into());
         }
         let d = self
             .library
@@ -334,6 +346,7 @@ impl SpeakerService {
                 track: t.clone(),
                 start_ms,
                 end_ms,
+                more_ranges: more_ranges.clone(),
                 model: if let Some(model) = model {
                     model.id.clone()
                 } else {
@@ -355,6 +368,7 @@ impl SpeakerService {
             track_id: track_id.into(),
             start_ms,
             end_ms,
+            more_ranges,
             model: e.model,
             revision: e.revision,
             source_model: model.cloned(),
@@ -458,7 +472,56 @@ pub struct EnrollmentCandidate {
     pub anonymous_speaker: String,
     pub local_start_ms: i64,
     pub local_end_ms: i64,
+    /// Other clean ranges of the same cluster, pooled with the representative clip.
+    #[serde(default)]
+    pub more_ranges: Vec<(i64, i64)>,
+    /// Total clean, non-overlapping speech pooled for this cluster.
+    #[serde(default)]
+    pub speech_ms: i64,
     pub note: String,
+}
+/// Shortest clean turn (after trimming its edges) that contributes to a pooled cluster embedding.
+const MIN_CLEAN_WINDOW_MS: i64 = 1500;
+const MAX_WINDOW_MS: i64 = 20_000;
+const POOLED_SPEECH_BUDGET_MS: i64 = 60_000;
+/// Clean (no other speaker active), edge-trimmed turns per anonymous speaker in source-local time.
+pub(crate) fn clean_windows(
+    intervals: &[SpeakerInterval],
+    offset: i64,
+) -> std::collections::BTreeMap<String, Vec<(i64, i64)>> {
+    let mut clean = std::collections::BTreeMap::<String, Vec<(i64, i64)>>::new();
+    for i in intervals {
+        if intervals
+            .iter()
+            .any(|j| j.speaker != i.speaker && j.start_ms < i.end_ms && j.end_ms > i.start_ms)
+        {
+            continue;
+        }
+        let start = i.start_ms - offset + 250;
+        let end = i.end_ms - offset - 250;
+        if start >= 0 && end - start >= MIN_CLEAN_WINDOW_MS {
+            clean
+                .entry(i.speaker.clone())
+                .or_default()
+                .push((start, end));
+        }
+    }
+    clean
+}
+/// Longest turns first within a speech budget, so pooling favours the most reliable speech.
+pub(crate) fn pool_windows(mut windows: Vec<(i64, i64)>) -> (Vec<(i64, i64)>, i64) {
+    windows.sort_by(|a, b| (b.1 - b.0).cmp(&(a.1 - a.0)).then(a.0.cmp(&b.0)));
+    let mut pooled = vec![];
+    let mut speech_ms = 0;
+    for (start, end) in windows {
+        let end = end.min(start + MAX_WINDOW_MS);
+        if speech_ms + (end - start) > POOLED_SPEECH_BUDGET_MS {
+            continue;
+        }
+        speech_ms += end - start;
+        pooled.push((start, end));
+    }
+    (pooled, speech_ms)
 }
 impl SpeakerService {
     pub async fn candidates(
@@ -500,42 +563,33 @@ impl SpeakerService {
             let intervals: Vec<SpeakerInterval> =
                 serde_json::from_value(run.result["intervals"].clone())
                     .map_err(|e| EnrollmentCandidatesError::Embedding(CapabilityError::new(e)))?;
-            for (ordinal, i) in intervals.iter().enumerate() {
-                if i.end_ms - i.start_ms < 4000 {
+            let clean = clean_windows(&intervals, offset);
+            for (speaker, windows) in clean {
+                let (pooled, speech_ms) = pool_windows(windows);
+                if speech_ms < 3000 || pooled.is_empty() {
                     continue;
                 }
-                if intervals.iter().any(|j| {
-                    j.speaker != i.speaker && j.start_ms < i.end_ms && j.end_ms > i.start_ms
-                }) {
-                    continue;
-                }
-                let start = i.start_ms - offset + 500;
-                let end = (i.end_ms - offset - 500).min(start + 20_000);
-                if start < 0 || end - start < 3000 {
-                    continue;
-                }
-                let candidate = EnrollmentCandidate {
-                    id: stable_id("candidate", &format!("{}:{ordinal}", run.id)),
-                    recording_id: recording_id.into(),
-                    run_id: run.id.clone(),
-                    track_id: track_id.clone(),
-                    anonymous_speaker: i.speaker.clone(),
-                    local_start_ms: start,
-                    local_end_ms: end,
-                    note:
-                        "Model predicts one nonoverlapping voice; listen before confirming identity"
-                            .into(),
-                };
-                let key = (track_id.clone(), i.speaker.clone());
-                let replace = selected
-                    .get(&key)
-                    .is_none_or(|old| old.local_end_ms - old.local_start_ms < end - start);
-                if replace {
-                    selected.insert(key, candidate);
-                }
+                let (start, end) = pooled[0];
+                let mut more_ranges = pooled[1..].to_vec();
+                more_ranges.sort();
+                selected.insert(
+                    (track_id.clone(), speaker.clone()),
+                    EnrollmentCandidate {
+                        id: stable_id("candidate", &format!("{}:{speaker}", run.id)),
+                        recording_id: recording_id.into(),
+                        run_id: run.id.clone(),
+                        track_id: track_id.clone(),
+                        anonymous_speaker: speaker,
+                        local_start_ms: start,
+                        local_end_ms: end,
+                        more_ranges,
+                        speech_ms,
+                        note: "Model predicts one nonoverlapping voice; listen before confirming identity".into(),
+                    },
+                );
             }
         }
-        Ok(selected.into_values().take(12).collect())
+        Ok(selected.into_values().collect())
     }
 }
 
@@ -549,6 +603,9 @@ pub struct SpeakerSuggestion {
     pub track_id: String,
     pub start_ms: i64,
     pub end_ms: i64,
+    /// Additional pooled ranges; empty for a single-interval comparison.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub more_ranges: Vec<(i64, i64)>,
     pub model: String,
     pub revision: String,
     pub policy: MatchPolicy,
@@ -607,7 +664,9 @@ fn covered_by_suggestion(
             .zip(offset)
             .and_then(|(t, o)| t.checked_sub(o))
     });
-    matches!((start,end),(Some(start),Some(end)) if start>=suggestion.start_ms && end<=suggestion.end_ms && end>start)
+    std::iter::once((suggestion.start_ms, suggestion.end_ms))
+        .chain(suggestion.more_ranges.iter().copied())
+        .any(|(from, to)| matches!((start,end),(Some(start),Some(end)) if start>=from && end<=to && end>start))
 }
 operation_error!(ListSuggestionsError,sources{Persistence:PersistenceError=>"persistence"},values{});
 operation_error!(ResolveSuggestionError,sources{Persistence:PersistenceError=>"persistence",Invalid:ValidationError=>"invalid_input"},values{NotFound=>"not_found",Conflict=>"conflict"});
@@ -786,5 +845,50 @@ impl SpeakerService {
             ));
         }
         Ok(resolution)
+    }
+}
+
+#[cfg(test)]
+mod pooling_tests {
+    use super::*;
+    fn interval(speaker: &str, start_ms: i64, end_ms: i64) -> SpeakerInterval {
+        SpeakerInterval {
+            start_ms,
+            end_ms,
+            speaker: speaker.into(),
+            track_id: Some("t".into()),
+        }
+    }
+    #[test]
+    fn a_cluster_of_only_short_turns_pools_enough_clean_speech() {
+        let intervals: Vec<_> = (0..4)
+            .map(|n| interval("a", n * 10_000, n * 10_000 + 2_500))
+            .collect();
+        let windows = clean_windows(&intervals, 0).remove("a").unwrap();
+        assert_eq!(windows.len(), 4);
+        let (pooled, speech_ms) = pool_windows(windows);
+        assert_eq!(pooled.len(), 4);
+        assert_eq!(speech_ms, 4 * 2_000);
+    }
+    #[test]
+    fn overlapping_and_too_short_turns_are_not_clean() {
+        let intervals = vec![
+            interval("a", 0, 5_000),
+            interval("b", 4_000, 9_000),
+            interval("a", 20_000, 20_800),
+        ];
+        let clean = clean_windows(&intervals, 0);
+        assert!(clean.is_empty());
+    }
+    #[test]
+    fn more_than_twelve_clusters_are_all_kept_and_pooling_is_bounded() {
+        let intervals: Vec<_> = (0..20)
+            .map(|n| interval(&format!("s{n:02}"), n * 10_000, n * 10_000 + 5_000))
+            .collect();
+        assert_eq!(clean_windows(&intervals, 0).len(), 20);
+        let (pooled, speech_ms) =
+            pool_windows((0..10).map(|n| (n * 30_000, n * 30_000 + 20_000)).collect());
+        assert!(speech_ms <= POOLED_SPEECH_BUDGET_MS);
+        assert_eq!(pooled.len(), 3);
     }
 }

@@ -378,6 +378,7 @@ async fn suggestion_resolution_is_durable_atomic_and_never_enrolls_predictions()
                 capture_domain: "system".into(),
                 vector: vec![1., 0.],
                 verified_at: "fixture-confirmation".into(),
+                origin: None,
             })
             .await
             .unwrap();
@@ -396,6 +397,7 @@ async fn suggestion_resolution_is_durable_atomic_and_never_enrolls_predictions()
             track_id: "track".into(),
             start_ms: 0,
             end_ms: 5000,
+            more_ranges: vec![],
             policy: MatchPolicy {
                 minimum_score: 0.9,
                 minimum_margin: 0.1,
@@ -2126,6 +2128,7 @@ async fn storage_preview_only_admits_old_owned_completed_scratch_without_losing_
                     capture_domain: "fixture".into(),
                     vector: vec![1., 0.],
                     verified_at: "human fixture".into(),
+                    origin: None,
                 })
                 .await
                 .unwrap();

@@ -574,6 +574,7 @@ impl MeetingAnalysisService {
                             track_id: candidate.track_id.clone(),
                             start_ms: candidate.local_start_ms,
                             end_ms: candidate.local_end_ms,
+                            more_ranges: candidate.more_ranges.clone(),
                             policy: policy.clone(),
                         },
                         &model,

@@ -98,6 +98,7 @@ async fn real_model_reuse_verification_and_idle_expiry() {
         track: track.clone(),
         start_ms: 0,
         end_ms: track.duration_ms.unwrap().min(10_000),
+        more_ranges: vec![],
         model: "speakrs-community-1-cpu".into(),
     };
     let ecold = engine.embed(&embedding).await.unwrap();

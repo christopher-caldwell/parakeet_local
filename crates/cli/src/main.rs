@@ -1353,6 +1353,7 @@ async fn execute(cli: Cli) -> anyhow::Result<Value> {
                         track_id: track.to_string(),
                         start_ms,
                         end_ms,
+                        more_ranges: vec![],
                         policy: MatchPolicy {
                             minimum_score,
                             minimum_margin,

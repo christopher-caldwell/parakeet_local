@@ -318,6 +318,7 @@ async fn fresh_policy_references_and_missing_sources_block_stale_reviews() {
                         capture_domain: "system".into(),
                         vector: vec![1., 0.],
                         verified_at: "explicit fixture confirmation".into(),
+                        origin: None,
                     })
                     .await
                     .unwrap();

@@ -2432,6 +2432,7 @@ impl Workbench {
                         track_id,
                         start_ms,
                         end_ms,
+                        more_ranges: vec![],
                         policy,
                     })
                     .await?;

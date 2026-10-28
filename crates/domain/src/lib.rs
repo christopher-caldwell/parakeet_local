@@ -260,6 +260,18 @@ pub struct VoiceExample {
     pub capture_domain: String,
     pub vector: Vec<f32>,
     pub verified_at: String,
+    /// How the user's confirmation produced this example; `None` for a manually chosen interval.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<ExampleOrigin>,
+}
+/// Reversible provenance of an example admitted from a user's identification or correction.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExampleOrigin {
+    /// Always `user_identification`: a model prediction alone never creates an example.
+    pub verified_by: String,
+    /// `cluster_identification`, `suggestion_resolution` or `segment_correction`.
+    pub source_kind: String,
+    pub source_id: String,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Correction {

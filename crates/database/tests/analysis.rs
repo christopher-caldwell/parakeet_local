@@ -626,6 +626,7 @@ async fn explicit_matching_can_suggest_fixture_identity_without_creating_more_ex
                 capture_domain: "system".into(),
                 vector: vec![1., 0.],
                 verified_at: now(),
+                origin: None,
             })
             .await
             .unwrap();

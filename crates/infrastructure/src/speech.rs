@@ -159,8 +159,9 @@ impl VoiceEmbeddings for LocalSpeech {
         let cache = self.cache.clone();
         let models = self.models.clone();
         let track = track.clone();
+        let more_ranges = request.more_ranges.clone();
         let runtime = tokio::runtime::Handle::current();
-        tokio::task::spawn_blocking(move ||{let _lease=models.acquire()?;let started=Instant::now();let samples=runtime.block_on(audio::decode(&track,start_ms,end_ms-start_ms))?;
+        tokio::task::spawn_blocking(move ||{let _lease=models.acquire()?;let started=Instant::now();let mut samples=runtime.block_on(audio::decode(&track,start_ms,end_ms-start_ms))?;for (a,b) in &more_ranges{samples.extend(runtime.block_on(audio::decode(&track,*a,*b-*a))?);}
    if samples.len()<48000{return Err(CapabilityError::message("decoded enrollment sample contains less than three seconds"));}
    let rms=(samples.iter().map(|s|(*s as f64).powi(2)).sum::<f64>()/samples.len() as f64).sqrt();if rms<0.0003{return Err(CapabilityError::message("sample has insufficient acoustic energy for enrollment"));}
    let key=models.cache_identity(&model_id)?;let mut cached=cache.embedding.lock().map_err(|_|CapabilityError::message("embedding cache lock failed"))?;

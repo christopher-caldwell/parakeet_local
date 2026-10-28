@@ -169,6 +169,7 @@ mod tests {
             capture_domain: domain.into(),
             vector: vec![1., 0.],
             verified_at: "now".into(),
+            origin: None,
         }
     }
     #[test]
