@@ -1,85 +1,227 @@
-//! Speaker training session: play a voice, say who it is, move on. Naming a voice goes through
-//! the shared `identify_cluster` use case and can be undone as one unit.
+//! Naming the voices found in a recording: listen to a clip, type who it is, move on. Naming a
+//! voice goes through the shared `identify_cluster` use case and can be undone as one unit.
 use super::*;
 
+/// One numbered instruction row: a small badge and a title, with the control beneath it.
+fn step(number: usize, title: &str, body: impl IntoElement) -> Div {
+    div()
+        .flex()
+        .gap_3()
+        .child(
+            div()
+                .mt_0p5()
+                .size(px(22.))
+                .flex_shrink_0()
+                .rounded_full()
+                .bg(rgb(SELECTED))
+                .text_color(rgb(ACCENT))
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_size(px(12.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .child(number.to_string()),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(
+                    div()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(title.to_owned()),
+                )
+                .child(body),
+        )
+}
+
 impl Workbench {
-    pub(super) fn train_view(&self, cx: &mut Context<Self>) -> Div {
-        let mut view = div().flex().flex_col().gap_3();
-        let Some(detail) = &self.detail else {
-            return view.child(caption(
-                "Open a recording in the Library, then come back to identify its voices.",
-            ));
-        };
-        let title = detail.recording.title().to_owned();
-        let queue: Vec<_> = self
-            .candidates
+    /// Voices found in the open recording that nobody has named or skipped yet.
+    pub(super) fn waiting_voices(&self) -> Vec<EnrollmentCandidate> {
+        self.candidates
             .iter()
-            .filter(|c| !self.train_skipped.contains(&c.id) && !self.train_named(&c.id))
+            .filter(|c| !self.train_skipped.contains(&c.id) && !self.train_named(c))
             .cloned()
-            .collect();
-        view = view
-            .child(caption(format!(
-                "{title} · {} voices waiting · {} named this session",
-                queue.len(),
-                self.train_done
-                    .iter()
-                    .filter(|i| i.undone_at.is_none())
-                    .count()
-            )))
-            .child(
-                quiet("train-prepare", "Find the voices in this recording")
-                    .self_start()
-                    .disabled(self.pending > 0)
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        let Some(detail) = &this.detail else { return };
-                        let id = detail.recording.id.clone();
-                        let service = this.speakers.clone();
-                        this.task(
-                            "Finding clean speech for each voice",
-                            async move {
-                                Ok(Update::Candidates(
-                                    id.clone(),
-                                    service.candidates(&id).await?,
-                                ))
-                            },
-                            cx,
-                        );
-                    })),
-            );
+            .collect()
+    }
+    pub(super) fn has_waiting_voices(&self) -> bool {
+        self.candidates
+            .iter()
+            .any(|c| !self.train_skipped.contains(&c.id) && !self.train_named(c))
+    }
+    /// Reads the prepared voices and the names already given for a recording.
+    pub(super) fn load_voices(&mut self, recording: String, cx: &mut Context<Self>) {
+        let service = self.speakers.clone();
+        self.task(
+            "Finding the voices in this recording",
+            async move {
+                let candidates = service.candidates(&recording).await?;
+                let named = service.identifications(Some(&recording)).await?;
+                Ok(Update::Candidates(recording, candidates, named))
+            },
+            cx,
+        );
+    }
+    /// Jumps to the naming screen of the open recording.
+    pub(super) fn open_voices(&mut self, cx: &mut Context<Self>) {
+        self.area = Area::Library;
+        self.recording_tab = library::RecordingTab::Voices;
+        self.train_hint = None;
+        self.reset_reader_rows(true);
+        self.refresh_profiles(cx);
+        if let Some(detail) = &self.detail {
+            let id = detail.recording.id.clone();
+            self.load_voices(id, cx);
+        }
+        cx.notify();
+    }
+    pub(super) fn voices_view(&self, cx: &mut Context<Self>) -> Div {
+        let mut view = div().p_5().flex().flex_col().gap_4().child(section(
+            "Name the voices",
+            "The app found the separate voices in this recording. Listen to each one and type who it is. Every line that voice speaks on its own gets that name, and you can undo any name.",
+        ));
+        let Some(detail) = &self.detail else {
+            return view;
+        };
+        let queue = self.waiting_voices();
         if let Some(candidate) = queue.first().cloned() {
-            let source = detail
+            let position = self.candidates.len() - queue.len() + 1;
+            let heard = detail
                 .tracks
                 .iter()
                 .find(|t| t.id == candidate.track_id)
-                .map(|t| format!("{:?}", t.kind))
-                .unwrap_or_default();
+                .map(|t| match t.kind {
+                    TrackKind::Microphone => "heard on your microphone",
+                    TrackKind::System => "heard on the meeting audio, so someone other than you",
+                    _ => "heard in this recording",
+                })
+                .unwrap_or("heard in this recording");
+            let mut card = div()
+                .p_5()
+                .rounded_lg()
+                .bg(rgb(PANEL))
+                .border_1()
+                .border_color(rgb(BORDER))
+                .flex()
+                .flex_col()
+                .gap_4()
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(
+                            div()
+                                .text_size(px(18.))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child(format!("Voice {position} of {}", self.candidates.len())),
+                        )
+                        .child(caption(format!(
+                            "{} · {heard} · {:.0} s of clear speech",
+                            anonymous_label(&candidate.anonymous_speaker),
+                            candidate.speech_ms as f64 / 1000.
+                        ))),
+                );
+            card = card
+                .child(step(
+                    1,
+                    "Listen",
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(self.play_button(&candidate, cx))
+                        .child(caption(
+                            "If it sounds like more than one person, choose Skip.",
+                        )),
+                ))
+                .child(step(2, "Type who it is", self.name_picker(cx)))
+                .child(step(3, "Save", self.save_row(&candidate, cx)));
+            view = view.child(card);
+        } else if self.candidates.is_empty() {
             view = view.child(
                 div()
-                    .p_4()
+                    .p_5()
                     .rounded_lg()
                     .bg(rgb(PANEL))
                     .flex()
                     .flex_col()
                     .gap_3()
-                    .child(section(
-                        format!("{} · {source}", anonymous_label(&candidate.anonymous_speaker)),
-                        format!(
-                            "{:.0} s of clean speech. Listen, then say who this is. Naming applies to every line this voice speaks alone and can be undone.",
-                            candidate.speech_ms as f64 / 1000.
-                        ),
+                    .child(div().font_weight(FontWeight::SEMIBOLD).child("No voices are ready to name yet"))
+                    .child(caption(
+                        "Voices appear here once the speakers in this recording have been detected. Detection can take a few minutes for a long meeting.",
                     ))
-                    .child(self.train_actions(&candidate, cx)),
+                    .child(
+                        div()
+                            .flex()
+                            .gap_2()
+                            .child(
+                                primary("voices-detect", "Detect speakers")
+                                    .disabled(self.pending > 0)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.analyze_meeting(false, false, cx)
+                                    })),
+                            )
+                            .child(
+                                quiet("voices-refresh", "Look again")
+                                    .disabled(self.pending > 0)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        if let Some(d) = &this.detail {
+                                            let id = d.recording.id.clone();
+                                            this.load_voices(id, cx);
+                                        }
+                                    })),
+                            ),
+                    ),
             );
-        } else if self.candidates.is_empty() {
-            view = view.child(caption(
-                "No voices prepared yet. Find the voices, or run the meeting analysis first.",
-            ));
         } else {
-            view = view.child(caption("All prepared voices are handled for this session."));
+            view = view.child(
+                div()
+                    .p_5()
+                    .rounded_lg()
+                    .bg(rgb(PANEL))
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .child(
+                        div()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(SUCCESS))
+                            .child("Every voice in this recording is handled"),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .gap_2()
+                            .child(primary("voices-done", "Back to the transcript").on_click(
+                                cx.listener(|this, _, _, cx| {
+                                    this.recording_tab = library::RecordingTab::Transcript;
+                                    this.reset_reader_rows(true);
+                                    cx.notify();
+                                }),
+                            ))
+                            .when(!self.train_skipped.is_empty(), |row| {
+                                row.child(
+                                    quiet("voices-unskip", "Bring back the voices I skipped")
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.train_skipped.clear();
+                                            cx.notify();
+                                        })),
+                                )
+                            }),
+                    ),
+            );
         }
-        view = view.child(self.imported_clip_view(cx));
-        view = view.child(self.calibration_view(cx));
+        let mut named = div().flex().flex_col().gap_2();
+        let mut any = false;
         for (index, done) in self.train_done.iter().enumerate() {
+            if done.undone_at.is_some() {
+                continue;
+            }
+            any = true;
             let id = done.id.clone();
             let name = self
                 .profiles
@@ -87,29 +229,24 @@ impl Workbench {
                 .find(|p| p.id == done.profile_id)
                 .map(|p| p.name.clone())
                 .unwrap_or_else(|| "removed person".into());
-            let undone = done.undone_at.is_some();
-            view = view.child(
+            named = named.child(
                 div()
                     .flex()
-                    .flex_wrap()
                     .items_center()
                     .gap_2()
-                    .child(caption(format!(
-                        "{} → {name}: {} lines named, {} ambiguous left alone, {} voice examples{}",
+                    .child(div().flex_1().min_w_0().child(format!(
+                        "{} → {name} · {} lines named",
                         anonymous_label(&done.cluster),
-                        done.segments.len(),
-                        done.skipped.len(),
-                        done.example_ids.len(),
-                        if undone { " · undone" } else { "" }
+                        done.segments.len()
                     )))
                     .child(
                         quiet(("train-undo", index), "Undo")
-                            .disabled(undone || self.pending > 0)
+                            .disabled(self.pending > 0)
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 let service = this.speakers.clone();
                                 let id = id.clone();
                                 this.task(
-                                    "Undoing identification",
+                                    "Undoing the name",
                                     async move {
                                         let report = service.undo_identification(&id).await?;
                                         Ok(Update::IdentificationUndone(report))
@@ -120,96 +257,110 @@ impl Workbench {
                     ),
             );
         }
-        view
-    }
-    /// Labels imported from another app are claims. They only suggest clips; each one is
-    /// enrolled after the user listens and picks the person.
-    fn imported_clip_view(&self, cx: &mut Context<Self>) -> Div {
-        let mut view = div().flex().flex_col().gap_2().child(
-            quiet("train-imported", "Suggest clips from imported labels")
-                .self_start()
-                .on_click(cx.listener(|this, _, _, cx| {
-                    let Some(detail) = &this.detail else { return };
-                    let id = detail.recording.id.clone();
-                    let service = this.speakers.clone();
-                    this.task(
-                        "Finding clips for imported labels",
-                        async move {
-                            Ok(Update::ImportedClips(
-                                id.clone(),
-                                service.imported_label_candidates(&id).await?,
-                            ))
-                        },
-                        cx,
-                    );
-                })),
-        );
-        for (group_index, group) in self.imported_clips.iter().enumerate() {
-            view = view.child(caption(format!(
-                "Imported label \"{}\" (unverified claim) — pick the person above, listen, then confirm each clip",
-                group.claim
-            )));
-            for (clip_index, clip) in group.clips.iter().enumerate() {
-                let play = clip.clone();
-                let enroll = clip.clone();
-                let key = group_index * 100 + clip_index;
-                view = view.child(
-                    div()
-                        .flex()
-                        .gap_2()
-                        .child(
-                            quiet(
-                                ("train-clip-play", key),
-                                format!("Play {:.0}s", clip.local_start_ms as f64 / 1000.),
-                            )
-                            .on_click(cx.listener(
-                                move |this, _, _, cx| {
-                                    this.play_range(
-                                        play.track_id.clone(),
-                                        play.local_start_ms,
-                                        play.local_end_ms,
-                                        cx,
-                                    )
-                                },
-                            )),
-                        )
-                        .child(
-                            button(("train-clip-enroll", key), "This is the selected person")
-                                .disabled(self.train_person.is_none() || self.pending > 0)
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    let (Some(person), Some(detail)) =
-                                        (this.train_person.clone(), &this.detail)
-                                    else {
-                                        return;
-                                    };
-                                    let input = EnrollSpeakerInput {
-                                        profile_id: person.clone(),
-                                        recording_id: detail.recording.id.clone(),
-                                        track_id: enroll.track_id.clone(),
-                                        start_ms: enroll.local_start_ms,
-                                        end_ms: enroll.local_end_ms,
-                                        confirmed: true,
-                                    };
-                                    let service = this.speakers.clone();
-                                    this.task(
-                                        "Extracting local verified embedding",
-                                        async move {
-                                            service.enroll(input).await?;
-                                            let examples = service.examples(Some(&person)).await?;
-                                            Ok(Update::Examples(person, examples))
-                                        },
-                                        cx,
-                                    );
-                                })),
-                        ),
-                );
-            }
+        if any {
+            view = view.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(caption("NAMED IN THIS RECORDING"))
+                    .child(named),
+            );
         }
         view
     }
+    fn play_button(
+        &self,
+        candidate: &EnrollmentCandidate,
+        cx: &mut Context<Self>,
+    ) -> gpui_base::Button {
+        let play = candidate.clone();
+        primary("train-play", "Play a clip").on_click(cx.listener(move |this, _, _, cx| {
+            this.play_range(
+                play.track_id.clone(),
+                play.local_start_ms,
+                play.local_end_ms,
+                cx,
+            )
+        }))
+    }
+    /// A name field, with the people already named offered as shortcuts that fill it in.
+    fn name_picker(&self, cx: &mut Context<Self>) -> Div {
+        let mut view = div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(field(&self.person_name).w_full().max_w(px(360.)));
+        if !self.profiles.is_empty() {
+            let mut people = div().flex().flex_wrap().items_center().gap_1();
+            people = people.child(caption("Already named:"));
+            for person in &self.profiles {
+                let id = person.id.clone();
+                let name = person.name.clone();
+                people = people.child(
+                    choice(
+                        ("train-person", people_key(&person.id)),
+                        person.name.clone(),
+                        self.train_person.as_ref() == Some(&person.id),
+                    )
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.train_person = Some(id.clone());
+                        this.train_hint = None;
+                        this.person_name
+                            .update(cx, |input, cx| input.set_value(name.clone(), window, cx));
+                        cx.notify();
+                    })),
+                );
+            }
+            view = view.child(people);
+        }
+        view
+    }
+    fn save_row(&self, candidate: &EnrollmentCandidate, cx: &mut Context<Self>) -> Div {
+        let skip = candidate.id.clone();
+        let save = candidate.clone();
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        primary("train-save", "Save name")
+                            .disabled(self.pending > 0)
+                            .on_click(
+                                cx.listener(move |this, _, _, cx| {
+                                    this.train_save(save.clone(), cx)
+                                }),
+                            ),
+                    )
+                    .child(quiet("train-skip", "Skip this voice").on_click(cx.listener(
+                        move |this, _, window, cx| {
+                            this.train_skipped.push(skip.clone());
+                            this.train_person = None;
+                            this.train_hint = None;
+                            this.person_name
+                                .update(cx, |input, cx| input.set_value("", window, cx));
+                            cx.notify();
+                        },
+                    ))),
+            )
+            .when_some(self.train_hint.clone(), |col, hint| {
+                col.child(
+                    div()
+                        .text_size(px(12.))
+                        .text_color(rgb(WARNING))
+                        .child(hint),
+                )
+            })
+    }
     /// Evaluates verified examples across recordings and proposes criteria; nothing changes
     /// until the user adopts them.
-    fn calibration_view(&self, cx: &mut Context<Self>) -> Div {
+    pub(super) fn calibration_view(&self, cx: &mut Context<Self>) -> Div {
         let mut view = div().flex().flex_col().gap_2().child(
             quiet(
                 "train-calibrate",
@@ -277,102 +428,41 @@ impl Workbench {
         }
         view
     }
-    fn train_named(&self, candidate_id: &str) -> bool {
+    fn train_named(&self, candidate: &EnrollmentCandidate) -> bool {
         self.train_done.iter().any(|i| {
             i.undone_at.is_none()
-                && self
-                    .train_candidates_named
-                    .contains(&(candidate_id.to_owned(), i.id.clone()))
+                && i.run_id == candidate.run_id
+                && i.track_id == candidate.track_id
+                && i.cluster == candidate.anonymous_speaker
         })
-    }
-    fn train_actions(&self, candidate: &EnrollmentCandidate, cx: &mut Context<Self>) -> Div {
-        let mut people = div().flex().flex_wrap().gap_2();
-        for person in &self.profiles {
-            let id = person.id.clone();
-            people = people.child(
-                choice(
-                    ("train-person", people_key(&person.id)),
-                    person.name.clone(),
-                    self.train_person.as_ref() == Some(&person.id),
-                )
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.train_person = Some(id.clone());
-                    cx.notify();
-                })),
-            );
-        }
-        let play = candidate.clone();
-        let skip = candidate.id.clone();
-        let save = candidate.clone();
-        div()
-            .flex()
-            .flex_col()
-            .gap_2()
-            .child(
-                button("train-play", "Play representative speech")
-                    .self_start()
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.play_range(
-                            play.track_id.clone(),
-                            play.local_start_ms,
-                            play.local_end_ms,
-                            cx,
-                        )
-                    })),
-            )
-            .child(caption("Who is this?"))
-            .child(people)
-            .child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .items_center()
-                    .gap_2()
-                    .child(caption("or a new person"))
-                    .child(field(&self.person_name).w(px(220.))),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .gap_2()
-                    .child(
-                        primary("train-save", "Save: I listened and this is them")
-                            .disabled(self.pending > 0)
-                            .on_click(
-                                cx.listener(move |this, _, _, cx| {
-                                    this.train_save(save.clone(), cx)
-                                }),
-                            ),
-                    )
-                    .child(
-                        quiet("train-skip", "Unknown / skip for now").on_click(cx.listener(
-                            move |this, _, _, cx| {
-                                this.train_skipped.push(skip.clone());
-                                this.train_person = None;
-                                cx.notify();
-                            },
-                        )),
-                    ),
-            )
     }
     fn train_save(&mut self, candidate: EnrollmentCandidate, cx: &mut Context<Self>) {
         let typed = self.person_name.read(cx).value().trim().to_string();
-        let person = match (&self.train_person, typed.is_empty()) {
-            (Some(id), _) => PersonChoice::Existing(id.clone()),
-            (None, false) => PersonChoice::New(typed),
-            (None, true) => {
-                self.status = "Choose a person or type a new name first".into();
-                cx.notify();
-                return;
+        let person = if typed.is_empty() {
+            match &self.train_person {
+                Some(id) => PersonChoice::Existing(id.clone()),
+                None => {
+                    self.train_hint = Some("Type a name for this voice first.".into());
+                    cx.notify();
+                    return;
+                }
             }
+        } else if let Some(known) = self
+            .profiles
+            .iter()
+            .find(|p| p.name.trim().eq_ignore_ascii_case(&typed))
+        {
+            PersonChoice::Existing(known.id.clone())
+        } else {
+            PersonChoice::New(typed)
         };
+        self.train_hint = None;
         let service = self.speakers.clone();
         let library = self.library.clone();
         let recording = candidate.recording_id.clone();
         let candidate_id = candidate.id.clone();
         self.task(
-            "Naming this voice and saving verified examples",
+            "Naming this voice",
             async move {
                 let identification = service
                     .identify_cluster(IdentifyClusterInput {

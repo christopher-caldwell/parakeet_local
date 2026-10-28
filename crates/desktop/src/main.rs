@@ -46,7 +46,6 @@ enum SpeakerMode {
     Profiles,
     Clusters,
     Comparisons,
-    Train,
 }
 enum Update {
     Clusters(parakeet_application::cluster_edits::ClusterReview),
@@ -57,7 +56,7 @@ enum Update {
     Detail(reader::Document),
     Profiles(Vec<SpeakerProfile>),
     Examples(String, Vec<VoiceExampleSummary>),
-    Candidates(String, Vec<EnrollmentCandidate>),
+    Candidates(String, Vec<EnrollmentCandidate>, Vec<ClusterIdentification>),
     Identified(
         Box<(
             String,
@@ -67,7 +66,6 @@ enum Update {
         )>,
     ),
     IdentificationUndone(UndoIdentificationReport),
-    ImportedClips(String, Vec<ImportedLabelCandidates>),
     Calibration(parakeet_domain::calibration::CalibrationReport),
     PolicyAdopted(AudioPreferences),
     RefreshSelected,
@@ -173,12 +171,11 @@ struct Workbench {
     profiles: Vec<SpeakerProfile>,
     examples: Vec<VoiceExampleSummary>,
     candidates: Vec<EnrollmentCandidate>,
-    imported_clips: Vec<ImportedLabelCandidates>,
     calibration: Option<parakeet_domain::calibration::CalibrationReport>,
     train_person: Option<String>,
+    train_hint: Option<String>,
     train_skipped: Vec<String>,
     train_done: Vec<ClusterIdentification>,
-    train_candidates_named: Vec<(String, String)>,
     recording_shortcut: bool,
     model_list: Vec<ModelInfo>,
     shortcuts: Vec<gestures::Shortcut>,
@@ -313,8 +310,7 @@ impl Workbench {
                                 }
                             }
                             Update::Identified(done) => {
-                                let (candidate, identification, profiles, detail) = *done;
-                                this.train_candidates_named.push((candidate, identification.id.clone()));
+                                let (_, identification, profiles, detail) = *done;
                                 this.status = format!("Named {} lines; {} voice examples saved", identification.segments.len(), identification.example_ids.len());
                                 this.train_done.push(identification);
                                 this.profiles = profiles;
@@ -327,9 +323,6 @@ impl Workbench {
                                 cx.notify();
                                 return;
                             }
-                            Update::ImportedClips(recording, clips) => {
-                                if this.requested_recording.as_deref() == Some(recording.as_str()) { this.imported_clips = clips; }
-                            }
                             Update::Calibration(report) => { this.calibration = Some(report); }
                             Update::PolicyAdopted(preferences) => { this.audio_preferences = preferences; this.status = "Calibrated criteria saved; suggestions stay opt-in and are never confirmed names".into(); }
                             Update::IdentificationUndone(report) => {
@@ -339,7 +332,7 @@ impl Workbench {
                                 cx.notify();
                                 return;
                             }
-                            Update::Candidates(recording,c) => {if this.requested_recording.as_deref()==Some(recording.as_str()){this.candidates = c;}},
+                            Update::Candidates(recording,c,named) => {if this.requested_recording.as_deref()==Some(recording.as_str()){this.candidates = c;this.train_done = named;}},
                             Update::StoragePreview(result) => {this.storage_busy=false;match result {Ok(preview)=>{this.storage_policy=Some(preview.saved_policy.clone());this.storage_preview=Some(preview);},Err(error)=>{this.last_error=Some(error);this.status="Storage inspection failed; no files changed".into();cx.notify();return;}}},
                             Update::StoragePolicySaved(result) => {this.storage_busy=false;match result {Ok(policy)=>{this.storage_policy=Some(policy);this.storage_preview=None;this.status="Preview policy saved. No files were removed; refresh to inspect it.".into();},Err(error)=>{this.last_error=Some(error);this.status="Preview policy could not be saved; refresh before retrying".into();}}cx.notify();return;},
                             Update::Jobs(jobs) => {this.pending_jobs = jobs;this.load_meeting_plans(cx);},
@@ -387,7 +380,7 @@ impl Workbench {
                                         this.editing_title=false;this.editing_segment=None;this.segment_page=0;
                                         this.recording_tab=library::RecordingTab::Transcript;
                                         this.show_transcript_find=false;this.transcript_query.clear();
-                                        this.cluster_review=None;this.selected_clusters.clear();this.candidates.clear();this.imported_clips.clear();
+                                        this.cluster_review=None;this.selected_clusters.clear();this.candidates.clear();
                                         this.suggestions.clear();this.suggestion_review=None;
                                         this.reader_list.reset(0);
                                         this.library_filter=library::LibraryFilter::All;
@@ -507,6 +500,9 @@ impl Workbench {
         self.suggestions.clear();
         self.suggestion_review = None;
         self.candidates.clear();
+        self.train_done.clear();
+        self.train_skipped.clear();
+        self.train_person = None;
         self.selected_track = None;
         self.segment_page = 0;
         self.editing_title = false;
@@ -523,6 +519,7 @@ impl Workbench {
             self.title
                 .update(cx, |s, cx| s.set_value(title, window, cx));
         }
+        self.load_voices(id.clone(), cx);
         self.task(
             "Opening recording",
             async move { Ok(Update::detail(lib.show(&id).await?)) },
@@ -648,14 +645,13 @@ impl Render for Workbench {
                 content = self.library_view(window, cx).id("library-area");
             }
             Area::Speakers => {
-                content = content.child(section("Speakers", "Review anonymous voices, make corrections, and manage the examples you explicitly verified."));
+                content = content.child(section("People", "Everyone you have named, and how well their voices are recognized. To name the voices in a recording, open it in the Library and choose Name voices."));
                 content = content.child(
                     div().flex().flex_wrap().gap_2().children(
                         [
-                            (SpeakerMode::Train, "Identify voices"),
-                            (SpeakerMode::Profiles, "People and examples"),
-                            (SpeakerMode::Clusters, "Anonymous clusters"),
-                            (SpeakerMode::Comparisons, "Identity comparisons"),
+                            (SpeakerMode::Profiles, "People"),
+                            (SpeakerMode::Clusters, "Voice groups"),
+                            (SpeakerMode::Comparisons, "Match checks"),
                         ]
                         .into_iter()
                         .enumerate()
@@ -668,16 +664,15 @@ impl Render for Workbench {
                         }),
                     ),
                 );
-                if self.speaker_mode == SpeakerMode::Train {
-                    content = content.child(self.train_view(cx));
-                } else if self.speaker_mode == SpeakerMode::Profiles {
-                    content=content.child(div().flex().flex_col().gap_2().child(caption("PEOPLE & VERIFIED EXAMPLES")).child(caption("A name is confirmed only when you identify the voice. Predictions never become training examples automatically.")))
+                if self.speaker_mode == SpeakerMode::Profiles {
+                    content=content.child(div().flex().flex_col().gap_2().child(caption("PEOPLE")).child(caption("A person is created when you name a voice in a recording, or here. Computer guesses are never saved as names on their own.")))
      .child(div().flex().gap_2().child(field(&self.person_name).w(px(260.))).child(button("add-person","Create person").on_click(cx.listener(|this,_,_,cx|{let name=this.person_name.read(cx).value().to_string();let service=this.speakers.clone();this.task("Creating speaker profile",async move{service.create(&name).await?;Ok(Update::Profiles(service.profiles().await?))},cx);}))));
                     content = content.child(
-                        button("refresh-people", "Refresh people and examples")
+                        button("refresh-people", "Refresh")
                             .self_start()
                             .on_click(cx.listener(|this, _, _, cx| this.refresh_profiles(cx))),
                     );
+                    content = content.child(self.calibration_view(cx));
                     let mut people = div().flex().flex_wrap().gap_2();
                     for p in &self.profiles {
                         let id = p.id.clone();
@@ -741,116 +736,6 @@ impl Render for Workbench {
                                         }
                                     })),
                             ),
-                    );
-                    for (index, candidate) in self.candidates.iter().enumerate() {
-                        let c = candidate.clone();
-                        content = content.child(
-                            button(
-                                ("candidate", index),
-                                format!(
-                                    "Prepare {} · {:.1}–{:.1}s",
-                                    anonymous_label(&candidate.anonymous_speaker),
-                                    candidate.local_start_ms as f64 / 1000.,
-                                    candidate.local_end_ms as f64 / 1000.
-                                ),
-                            )
-                            .on_click(cx.listener(
-                                move |this, _, window, cx| {
-                                    this.selected_track = Some(c.track_id.clone());
-                                    this.start.update(cx, |s, cx| {
-                                        s.set_value(c.local_start_ms.to_string(), window, cx)
-                                    });
-                                    this.end.update(cx, |s, cx| {
-                                        s.set_value(c.local_end_ms.to_string(), window, cx)
-                                    });
-                                    cx.notify();
-                                },
-                            )),
-                        );
-                    }
-                    if let Some(detail) = &self.detail {
-                        let source = self
-                            .selected_track
-                            .as_ref()
-                            .and_then(|id| detail.tracks.iter().find(|t| &t.id == id))
-                            .map(|t| format!("{:?}", t.kind))
-                            .unwrap_or_else(|| "No source selected".into());
-                        content = content
-                            .child(caption(format!(
-                                "Prepared audio: {} · {} · track-local milliseconds",
-                                detail.recording.title(),
-                                source
-                            )))
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_wrap()
-                                    .items_center()
-                                    .gap_2()
-                                    .child(caption("Start ms"))
-                                    .child(field(&self.start).w(px(120.)))
-                                    .child(caption("End ms"))
-                                    .child(field(&self.end).w(px(120.))),
-                            );
-                    } else {
-                        content = content.child(caption(
-                            "Open a recording in the Library to prepare voice examples.",
-                        ));
-                    }
-                    content = content.child(
-                        button("play-enrollment", "Play prepared interval")
-                            .self_start()
-                            .disabled(self.detail.is_none() || self.selected_track.is_none())
-                            .on_click(cx.listener(|this, _, _, cx| this.play(cx))),
-                    );
-                    content = content.child(
-                        primary("enroll", "I verified this voice — enroll selected interval")
-                            .self_start()
-                            .disabled(
-                                self.detail.is_none()
-                                    || self.selected_track.is_none()
-                                    || self.selected_profile.is_none()
-                                    || self.pending > 0,
-                            )
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                let (Some(d), Some(track), Some(profile)) = (
-                                    &this.detail,
-                                    this.selected_track.clone(),
-                                    this.selected_profile.clone(),
-                                ) else {
-                                    this.status =
-                                        "Select a recording, source, and person first".into();
-                                    cx.notify();
-                                    return;
-                                };
-                                let (a, b) = match this.range(cx) {
-                                    Ok(r) => r,
-                                    Err(e) => {
-                                        this.status = e;
-                                        cx.notify();
-                                        return;
-                                    }
-                                };
-                                let service = this.speakers.clone();
-                                let profile_id = profile.clone();
-                                let input = EnrollSpeakerInput {
-                                    profile_id: profile,
-                                    recording_id: d.recording.id.clone(),
-                                    track_id: track,
-                                    start_ms: a,
-                                    end_ms: b,
-                                    confirmed: true,
-                                };
-                                this.task(
-                                    "Extracting local verified embedding",
-                                    async move {
-                                        service.enroll(input).await?;
-                                        let examples = service.examples(Some(&profile_id)).await?;
-                                        Ok(Update::Examples(profile_id, examples))
-                                    },
-                                    cx,
-                                );
-                            })),
                     );
                     if self.selected_profile.is_some() {
                         content = content.child(caption(format!(
@@ -2347,12 +2232,11 @@ fn main() -> anyhow::Result<()> {
                             profiles,
                             examples: vec![],
                             candidates: vec![],
-                            imported_clips: vec![],
                             calibration: None,
                             train_person: None,
+                            train_hint: None,
                             train_skipped: vec![],
                             train_done: vec![],
-                            train_candidates_named: vec![],
                             recording_shortcut: false,
                             model_list: vec![],
                             shortcuts: vec![],

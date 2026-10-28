@@ -5,7 +5,7 @@ A detected cluster is anonymous and run-local. Microphone and system are acousti
 Profiles have stable UUIDs and user-controlled names. Examples come only from the user's explicit confirmation, never from a model prediction or an imported label:
 
 - manual enrollment of a clean 3–30 second interval;
-- **naming a whole cluster** (`speakers identify-cluster`, or Speakers → Identify voices), which corrects every segment the cluster speaks alone, lists overlapping or already-corrected segments untouched, and admits up to three clean single-turn windows as examples;
+- **naming a whole cluster** (`speakers identify-cluster`, or the recording's Name voices tab), which corrects every segment the cluster speaks alone, lists overlapping or already-corrected segments untouched, and admits up to three clean single-turn windows as examples;
 - accepting or replacing a suggestion (the compared interval becomes an example);
 - assigning a person to a clean single-speaker segment of at least three seconds.
 

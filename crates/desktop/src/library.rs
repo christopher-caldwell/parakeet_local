@@ -10,6 +10,7 @@ pub enum LibraryFilter {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum RecordingTab {
     Transcript,
+    Voices,
     Audio,
     Processing,
 }
@@ -552,10 +553,19 @@ impl Workbench {
             .gap_1()
             .border_b_1()
             .border_color(rgb(BORDER));
+        let waiting = self.waiting_voices().len();
         for (i, (tab, label)) in [
-            (RecordingTab::Transcript, "Transcript"),
-            (RecordingTab::Audio, "Audio & sources"),
-            (RecordingTab::Processing, "Processing"),
+            (RecordingTab::Transcript, "Transcript".to_owned()),
+            (
+                RecordingTab::Voices,
+                if waiting > 0 {
+                    format!("Name voices ({waiting})")
+                } else {
+                    "Name voices".to_owned()
+                },
+            ),
+            (RecordingTab::Audio, "Audio & sources".to_owned()),
+            (RecordingTab::Processing, "Processing".to_owned()),
         ]
         .into_iter()
         .enumerate()
@@ -572,10 +582,49 @@ impl Workbench {
         }
         reader = reader.child(heading).child(tabs);
         match self.recording_tab {
-            RecordingTab::Transcript => reader.child(self.transcript_view(detail, cx)),
+            RecordingTab::Transcript => {
+                if waiting > 0 {
+                    reader = reader.child(self.naming_banner(waiting, cx));
+                }
+                reader.child(self.transcript_view(detail, cx))
+            }
+            RecordingTab::Voices => reader.child(self.voices_view(cx)),
             RecordingTab::Audio => reader.child(self.audio_view(detail, cx)),
             RecordingTab::Processing => reader.child(self.processing_view(detail, cx)),
         }
+    }
+    /// The next step for a recording whose voices have no names yet, shown above its transcript.
+    fn naming_banner(&self, waiting: usize, cx: &mut Context<Self>) -> Div {
+        div()
+            .flex_shrink_0()
+            .mx_5()
+            .mt_3()
+            .px_4()
+            .py_3()
+            .rounded_lg()
+            .bg(rgb(SELECTED))
+            .flex()
+            .items_center()
+            .gap_3()
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .child(div().font_weight(FontWeight::SEMIBOLD).child(format!(
+                        "{waiting} {} in this recording {} no name yet",
+                        if waiting == 1 { "voice" } else { "voices" },
+                        if waiting == 1 { "has" } else { "have" }
+                    )))
+                    .child(caption(
+                        "Name them once and every line they speak shows who said it.",
+                    )),
+            )
+            .child(
+                primary("name-voices", "Name voices")
+                    .on_click(cx.listener(|this, _, _, cx| this.open_voices(cx))),
+            )
     }
     fn transcript_view(&self, detail: &reader::Document, cx: &mut Context<Self>) -> Div {
         let segments = &self.reader_matches;
@@ -819,6 +868,11 @@ impl Workbench {
             .and_then(|id| detail.tracks.iter().find(|t| &t.id == id))
             .map(|t| track_name(&t.kind))
             .unwrap_or("Unresolved source");
+        let source_shown = source_label.is_none();
+        let can_name = !confirmed
+            && correction.speaker.is_none()
+            && attribution.is_some_and(|a| a.state == "anonymous_model_attribution")
+            && self.has_waiting_voices();
         let segment_id = segment.id.clone();
         let play_id = segment.id.clone();
         let recording = detail.recording.id.clone();
@@ -848,6 +902,17 @@ impl Workbench {
                             .child(label.clone()),
                     )
                     .when(confirmed, |row| row.child(pill("Confirmed", SUCCESS)))
+                    .when(can_name, |row| {
+                        row.child(
+                            quiet(format!("name-voice-{}", segment.id), "Name…")
+                                .text_size(px(11.))
+                                .px_2()
+                                .py_0p5()
+                                .min_h(px(22.))
+                                .text_color(rgb(ACCENT))
+                                .on_click(cx.listener(|this, _, _, cx| this.open_voices(cx))),
+                        )
+                    })
                     .when(imported, |row| {
                         row.child(pill("Imported · unverified", MUTED))
                     })
@@ -857,7 +922,7 @@ impl Workbench {
                     .when_some(source_label, |row, (text, color)| {
                         row.child(pill(text, color))
                     })
-                    .child(caption(source))
+                    .when(source_shown, |row| row.child(caption(source)))
                     .child(
                         quiet(
                             format!("play-speech-{}", segment.id),
@@ -937,11 +1002,6 @@ impl Workbench {
             }
             if segment.evidence["uncertain_speech"] == true {
                 evidence = evidence.child(pill("Uncertain speech", WARNING));
-            }
-            if a.state == "ambiguous" && correction.speaker.is_none() {
-                evidence = evidence.child(caption(
-                    "Multiple voices or a turn boundary · identity unresolved",
-                ));
             }
             body = body.child(evidence);
         }
@@ -1167,8 +1227,8 @@ impl Workbench {
                 .child(div().flex().flex_wrap().gap_2()
                     .child(primary("transcribe-source","Transcribe source").disabled(!track.available||self.pending>0).on_click(cx.listener(|this,_,_,cx|this.process(false,false,cx))))
                     .child(button("diarize-source","Detect speakers").disabled(!track.available||self.pending>0).on_click(cx.listener(|this,_,_,cx|this.process(true,false,cx))))
-                    .child(quiet("identify-voices","Identify voices").on_click(cx.listener(|this,_,_,cx|{this.speaker_mode=SpeakerMode::Train;this.navigate(Area::Speakers,cx);})))
-                    .child(quiet("review-source-clusters","Review clusters").on_click(cx.listener(|this,_,_,cx|{this.speaker_mode=SpeakerMode::Clusters;this.navigate(Area::Speakers,cx);this.inspect_clusters(cx);}))))
+                    .child(quiet("identify-voices","Name voices").on_click(cx.listener(|this,_,_,cx|this.open_voices(cx))))
+                    .child(quiet("review-source-clusters","Review voice groups").on_click(cx.listener(|this,_,_,cx|{this.speaker_mode=SpeakerMode::Clusters;this.navigate(Area::Speakers,cx);this.inspect_clusters(cx);}))))
                 .child(caption("Processing creates a new result. Existing audio, title, and corrections are retained.")));
             view = view.child(
                 div()

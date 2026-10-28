@@ -64,17 +64,7 @@ impl Workbench {
                 self.refresh_profiles(cx);
                 if let Some(d) = &self.detail {
                     let id = d.recording.id.clone();
-                    let service = self.speakers.clone();
-                    self.task(
-                        "Preparing clean enrollment candidates",
-                        async move {
-                            Ok(Update::Candidates(
-                                id.clone(),
-                                service.candidates(&id).await?,
-                            ))
-                        },
-                        cx,
-                    );
+                    self.load_voices(id, cx);
                 }
             }
             Area::Dictation => {
@@ -171,7 +161,7 @@ impl Workbench {
             (Area::Library, "Library", "library", "⌘1"),
             (Area::Capture, "Record a meeting", "mic", "⌘2"),
             (Area::Dictation, "Dictation", "keyboard", "⌘3"),
-            (Area::Speakers, "Speakers", "people", "⌘4"),
+            (Area::Speakers, "People", "people", "⌘4"),
             (Area::Models, "Local models", "models", ""),
             (Area::Jobs, "Background jobs", "jobs", ""),
             (Area::Storage, "Storage", "models", ""),
@@ -181,7 +171,7 @@ impl Workbench {
         .enumerate()
         {
             if i == 4 {
-                nav = nav.child(caption("PREFERENCES").px_2().mt_5().mb_1());
+                nav = nav.child(caption("SETTINGS").px_2().mt_5().mb_1());
             }
             let active = self.area == area;
             nav = nav.child(

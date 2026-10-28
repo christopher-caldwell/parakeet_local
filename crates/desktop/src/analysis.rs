@@ -28,17 +28,11 @@ impl Workbench {
                 for failure in plan.failures.iter().take(8) {
                     panel = panel.child(caption(failure.clone()).text_color(rgb(WARNING)));
                 }
-                let candidates = plan.candidates.clone();
+                let any_candidates = !plan.candidates.is_empty();
                 panel = panel.child(
-                    quiet("analysis-review-speakers", "Review prepared voices")
-                        .disabled(candidates.is_empty())
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.candidates = candidates.clone();
-                            this.speaker_mode = SpeakerMode::Train;
-                            this.area = Area::Speakers;
-                            this.refresh_profiles(cx);
-                            cx.notify();
-                        })),
+                    quiet("analysis-review-speakers", "Name the voices")
+                        .disabled(!any_candidates)
+                        .on_click(cx.listener(|this, _, _, cx| this.open_voices(cx))),
                 );
             }
             Ok(None) => {
@@ -59,7 +53,12 @@ impl Workbench {
             .child(quiet("analysis-new-matching","New analysis with entered policy").disabled(self.pending>0).on_click(cx.listener(|this,_,_,cx|this.analyze_meeting(true,true,cx))));
         panel
     }
-    fn analyze_meeting(&mut self, new_run: bool, matching: bool, cx: &mut Context<Self>) {
+    pub(super) fn analyze_meeting(
+        &mut self,
+        new_run: bool,
+        matching: bool,
+        cx: &mut Context<Self>,
+    ) {
         let Some(detail) = &self.detail else { return };
         let recording_id = detail.recording.id.clone();
         let matching_policy = if matching {
