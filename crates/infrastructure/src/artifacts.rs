@@ -137,6 +137,11 @@ fn parse_folder(folder: &Path) -> Result<ImportBundle, CapabilityError> {
         }
         if native {
             let report = &metadata["sourceAlignment"][key];
+            if report["clockDrift"].as_array().is_some_and(|d| !d.is_empty()) {
+                warnings.push(format!(
+                    "{source_id}: {key} device clock ran ahead of the host clock; no audio was dropped, drift is recorded in the source report"
+                ));
+            }
             if report["errors"].as_array().is_some_and(|e| !e.is_empty())
                 || report["droppedBuffers"].as_u64().unwrap_or(0) > 0
                 || report["gaps"].as_array().is_some_and(|g| !g.is_empty())

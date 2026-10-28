@@ -58,12 +58,25 @@ func insert(_ options: [String: Any]) throws -> [String:Any] {
     return try clipboardInsert(element:element,pid:pid,token:token,text:text,directory:URL(fileURLWithPath:directory))
 }
 
+/// Places each buffer on the source timeline from host timestamps without ever discarding audio.
+struct Timeline {
+    struct Step { var gapFrames: Int64 = 0; var driftFrames: Int64 = 0 }
+    /// `first` is the host time of the first frame; it is re-based when the device clock runs ahead.
+    func place(hostSeconds: Double, first: inout Double, rate: Double, timeline: Int64) -> Step {
+        let expected = Int64(max(0, (hostSeconds - first) * rate))
+        let delta = expected - timeline
+        var step = Step()
+        if delta > Int64(rate * 0.1) { step.gapFrames = delta }
+        else if delta < -Int64(rate * 0.1) { step.driftFrames = -delta; first += Double(delta) / rate }
+        return step
+    }
+}
 final class TrackWriter {
     let source: String; let path: URL; let origin: Double
     private let queue: DispatchQueue; private let lock = NSLock(); private var pending = 0
     private var healthyFrames: Int64 = 0; private var lastCallback: Double = 0; private var latestPeak:Float = 0; private var sessionPeak:Float = 0; private var healthRate:Double = 0
     private var file: AVAudioFile?; private var first: Double?; private var rate: Double = 0
-    private var written: Int64 = 0; private var timeline: Int64 = 0; private var dropped = 0; private var gaps: [[String: Any]] = []; private var errors: [String] = []; private var failed=false; private var peak: Float = 0
+    private var written: Int64 = 0; private var timeline: Int64 = 0; private var dropped = 0; private var gaps: [[String: Any]] = []; private var errors: [String] = []; private var failed=false; private var peak: Float = 0; private var drift: [[String: Any]] = []; private var timeline_ = Timeline()
     init(source: String, directory: URL, origin: Double) { self.source = source; self.path = directory.appendingPathComponent(source + "-raw.caf"); self.origin = origin; self.queue = DispatchQueue(label: "parakeet.writer." + source) }
     func enqueue(_ buffer: AVAudioPCMBuffer, hostSeconds: Double) {
         lock.lock(); if pending >= 32 { dropped += 1; lock.unlock(); return }; pending += 1; lock.unlock()
@@ -74,16 +87,17 @@ final class TrackWriter {
                 if file == nil { file = try AVAudioFile(forWriting: path, settings: buffer.format.settings, commonFormat: buffer.format.commonFormat, interleaved: buffer.format.isInterleaved); rate = buffer.format.sampleRate; first = hostSeconds; emit(["event": "first_buffer", "source": source, "start_offset_ms": max(0, Int((hostSeconds-origin)*1000)), "sample_rate": rate]) }
                 guard let first = first, let file = file else { return }
                 guard buffer.format.sampleRate==rate && buffer.format.channelCount==file.processingFormat.channelCount else{throw failure("Source audio format changed during capture; retained original format audio")}
-                let expected = Int64(max(0, (hostSeconds-first)*rate))
-                let delta = expected - timeline
-                if delta > Int64(rate * 0.1) {
-                    guard delta < Int64(rate*7200) else { throw failure("Implausible source timestamp jump") }
-                    gaps.append(["startFrame": timeline, "frames": delta, "reason": "capture_timestamp_gap"])
-                    var missing = delta
+                let step = timeline_.place(hostSeconds: hostSeconds, first: &self.first!, rate: rate, timeline: timeline)
+                if step.gapFrames > 0 {
+                    guard step.gapFrames < Int64(rate*7200) else { throw failure("Implausible source timestamp jump") }
+                    gaps.append(["startFrame": timeline, "frames": step.gapFrames, "reason": "capture_timestamp_gap"])
+                    var missing = step.gapFrames
                     while missing > 0 { let count = AVAudioFrameCount(min(missing, 4096)); guard let silence = AVAudioPCMBuffer(pcmFormat: buffer.format, frameCapacity: count) else { throw failure("Cannot allocate gap buffer") }; silence.frameLength = count; for audio in UnsafeMutableAudioBufferListPointer(silence.mutableAudioBufferList) { if let data = audio.mData { memset(data, 0, Int(audio.mDataByteSize)) } }; try file.write(from: silence); missing -= Int64(count) }
-                    timeline += delta
+                    timeline += step.gapFrames
                 }
-                if delta < -Int64(rate * 0.1) { errors.append("Out-of-order native audio buffer rejected"); return }
+                // A device clock that runs ahead of the host clock is recorded, never answered by
+                // dropping audio: every captured frame is written and the timeline is re-based.
+                if step.driftFrames > 0 { drift.append(["atFrame": timeline, "framesAhead": step.driftFrames]) }
                 var bufferPeak:Float=0
                 let count=Int(buffer.frameLength);let channels=Int(buffer.format.channelCount)
                 for channel in 0..<channels { for frame in 0..<count {
@@ -102,7 +116,7 @@ final class TrackWriter {
     func report() -> [String: Any] {
         queue.sync { file = nil }; lock.lock(); let stalled=healthyFrames>0 && monotonic()-lastCallback>3; lock.unlock(); if stalled{errors.append("Source stalled before finalization")}
         lock.lock(); let drops = dropped; lock.unlock()
-        return ["startOffsetMs": first.map { max(0, Int(($0-origin)*1000)) } as Any? ?? NSNull(), "sampleRate": rate, "writtenFrameCount": written, "timelineFrameCount": timeline, "droppedBuffers": drops, "gaps": gaps, "errors": errors, "peakAmplitude": peak, "firstBufferReceived": first != nil]
+        return ["startOffsetMs": first.map { max(0, Int(($0-origin)*1000)) } as Any? ?? NSNull(), "sampleRate": rate, "writtenFrameCount": written, "timelineFrameCount": timeline, "droppedBuffers": drops, "gaps": gaps, "clockDrift": drift, "errors": errors, "peakAmplitude": peak, "firstBufferReceived": first != nil]
     }
 }
 func copyBuffer(_ original: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {
@@ -219,6 +233,7 @@ final class Hotkeys {
             case "clipboard-self-test":emit(try clipboardSelfTest())
             case "clipboard-test-child":guard args.count==4 else{throw failure("test child requires private pasteboard and directory")};try clipboardTestChild(board:args[2],directory:args[3])
             case "clipboard-recover":guard args.count==3 else{throw failure("clipboard recovery requires its own directory")};emit(try recoverClipboard(URL(fileURLWithPath:args[2])))
+            case "timeline-self-test":emit(timelineSelfTest())
             case "devices":emit(["devices":try inputDevices()])
             case "permissions":emit(["microphone_status":AVCaptureDevice.authorizationStatus(for:.audio).rawValue,"screen_capture":CGPreflightScreenCaptureAccess(),"accessibility":AXIsProcessTrusted(),"input_monitoring":CGPreflightListenEventAccess(),"prompts_requested":false])
             case "target":emit(try target(bundle:args.count==3 ? args[2]:nil))
@@ -229,4 +244,29 @@ final class Hotkeys {
             }
         }catch{emit(["event":"failed","message":error.localizedDescription]);exit(1)}
     }
+}
+
+/// Simulates a device clock running fast and slow; no frame may be dropped and the timeline must
+/// stay within the stated bound of the host clock.
+func timelineSelfTest() -> [String: Any] {
+    var results: [[String: Any]] = []
+    for ppm in [-200.0, 0.0, 200.0] {
+        let rate = 48_000.0, framesPerBuffer = 4096.0, seconds = 3600.0
+        var first = 100.0, timeline: Int64 = 0, written: Int64 = 0, dropped = 0, gaps: Int64 = 0, drift: Int64 = 0
+        var host = first, maxError = 0.0
+        let buffers = Int(seconds * rate / framesPerBuffer)
+        let timeline_ = Timeline()
+        for _ in 0..<buffers {
+            let step = timeline_.place(hostSeconds: host, first: &first, rate: rate, timeline: timeline)
+            if step.gapFrames > 0 { timeline += step.gapFrames; gaps += step.gapFrames }
+            if step.driftFrames > 0 { drift += step.driftFrames }
+            timeline += Int64(framesPerBuffer); written += Int64(framesPerBuffer)
+            // The device delivers a buffer every framesPerBuffer / (rate * (1 + ppm))) host seconds.
+            host += framesPerBuffer / (rate * (1 + ppm / 1_000_000))
+            maxError = max(maxError, abs(Double(timeline) / rate - (host - 100.0)))
+        }
+        if written != Int64(buffers) * Int64(framesPerBuffer) { dropped += 1 }
+        results.append(["ppm": ppm, "buffers": buffers, "writtenFrames": written, "droppedBuffers": dropped, "insertedSilenceFrames": gaps, "driftReportedFrames": drift, "maxTimelineErrorSeconds": maxError])
+    }
+    return ["event": "timeline_self_test", "results": results]
 }
