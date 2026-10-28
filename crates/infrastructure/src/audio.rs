@@ -211,7 +211,8 @@ impl parakeet_application::AudioPlayback for LocalPlayback {
             let mut w = hound::WavWriter::create(
                 &scratch.0,
                 hound::WavSpec {
-                    channels: 1,
+                    // Both ears: a mono file can come out of one side on some outputs.
+                    channels: 2,
                     sample_rate: 16000,
                     bits_per_sample: 32,
                     sample_format: hound::SampleFormat::Float,
@@ -219,6 +220,7 @@ impl parakeet_application::AudioPlayback for LocalPlayback {
             )
             .map_err(CapabilityError::new)?;
             for s in samples {
+                w.write_sample(s).map_err(CapabilityError::new)?;
                 w.write_sample(s).map_err(CapabilityError::new)?;
             }
             w.finalize().map_err(CapabilityError::new)?;

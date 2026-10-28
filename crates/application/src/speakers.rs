@@ -664,6 +664,34 @@ pub(crate) fn pool_windows(mut windows: Vec<(i64, i64)>) -> (Vec<(i64, i64)>, i6
     }
     (pooled, speech_ms)
 }
+/// Merges overlapping or touching `(start, end)` ranges into a sorted disjoint list.
+fn merge_ranges(mut ranges: Vec<(i64, i64)>) -> Vec<(i64, i64)> {
+    ranges.sort();
+    let mut merged: Vec<(i64, i64)> = vec![];
+    for (start, end) in ranges {
+        match merged.last_mut() {
+            Some(last) if start <= last.1 => last.1 = last.1.max(end),
+            _ => merged.push((start, end)),
+        }
+    }
+    merged
+}
+/// Milliseconds of `windows` (source-local, shifted by `offset` to meeting time) that fall inside
+/// the merged `other` ranges.
+fn overlap_ms(windows: &[(i64, i64)], offset: i64, other: &[(i64, i64)]) -> i64 {
+    windows
+        .iter()
+        .map(|&(start, end)| {
+            other
+                .iter()
+                .map(|&(a, b)| ((end + offset).min(b) - (start + offset).max(a)).max(0))
+                .sum::<i64>()
+        })
+        .sum()
+}
+/// A microphone voice that mostly speaks while the system audio is speaking is almost always the
+/// other participants leaking into the microphone, not a person to name.
+const ECHO_OVERLAP_SHARE: f64 = 0.5;
 impl SpeakerService {
     pub async fn candidates(
         &self,
@@ -692,6 +720,18 @@ impl SpeakerService {
             .into_iter()
             .filter(|(_, r)| run_ids.is_none_or(|ids| ids.contains(&r.id)))
             .collect::<std::collections::BTreeMap<_, _>>();
+        let mut system_speech = vec![];
+        for (track_id, run) in current_diarization_runs(&d.runs) {
+            if d.tracks
+                .iter()
+                .any(|t| t.id == track_id && t.kind == TrackKind::System)
+            {
+                let intervals: Vec<SpeakerInterval> =
+                    serde_json::from_value(run.result["intervals"].clone()).unwrap_or_default();
+                system_speech.extend(intervals.iter().map(|i| (i.start_ms, i.end_ms)));
+            }
+        }
+        let system_speech = merge_ranges(system_speech);
         let mut selected =
             std::collections::BTreeMap::<(String, String), EnrollmentCandidate>::new();
         for (track_id, run) in latest {
@@ -708,6 +748,12 @@ impl SpeakerService {
             for (speaker, windows) in clean {
                 let (pooled, speech_ms) = pool_windows(windows);
                 if speech_ms < 3000 || pooled.is_empty() {
+                    continue;
+                }
+                if track.kind == TrackKind::Microphone
+                    && overlap_ms(&pooled, offset, &system_speech) as f64
+                        >= speech_ms as f64 * ECHO_OVERLAP_SHARE
+                {
                     continue;
                 }
                 let (start, end) = pooled[0];
@@ -1062,5 +1108,15 @@ mod pooling_tests {
             pool_windows((0..10).map(|n| (n * 30_000, n * 30_000 + 20_000)).collect());
         assert!(speech_ms <= POOLED_SPEECH_BUDGET_MS);
         assert_eq!(pooled.len(), 3);
+    }
+    #[test]
+    fn microphone_speech_that_coincides_with_system_speech_is_measured_as_overlap() {
+        let system = merge_ranges(vec![(10_000, 20_000), (15_000, 30_000), (50_000, 55_000)]);
+        assert_eq!(system, vec![(10_000, 30_000), (50_000, 55_000)]);
+        // Source-local windows shifted by a 1 s offset: 11-16 s sits fully inside system speech.
+        assert_eq!(overlap_ms(&[(10_000, 15_000)], 1_000, &system), 5_000);
+        // 29-34 s is only 1 s inside, 34-40 s is outside.
+        assert_eq!(overlap_ms(&[(28_000, 33_000)], 1_000, &system), 1_000);
+        assert_eq!(overlap_ms(&[(60_000, 65_000)], 0, &system), 0);
     }
 }

@@ -386,6 +386,10 @@ pub struct AudioPreferences {
     pub suggest_speakers_after_stop: bool,
     #[serde(default)]
     pub matching_policy: Option<SavedMatchingPolicy>,
+    /// Voice candidates the user chose to skip for good (for example people who will not come up
+    /// again), so they are not offered for naming every time the recording opens.
+    #[serde(default)]
+    pub skipped_voices: Vec<String>,
 }
 /// Criteria the user adopted from a calibration report, kept with the evidence behind them.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -408,6 +412,7 @@ impl Default for AudioPreferences {
             analyze_meetings_after_stop: false,
             suggest_speakers_after_stop: false,
             matching_policy: None,
+            skipped_voices: vec![],
         }
     }
 }

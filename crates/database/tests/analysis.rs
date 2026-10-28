@@ -111,9 +111,16 @@ impl SpeechProcessing for Engine {
                 vec![]
             },
             intervals: if request.model == "diari" {
+                // The microphone voice speaks after the system audio finishes; one that coincided
+                // with system speech would be treated as echo and not offered for naming.
+                let lead = if track.kind == TrackKind::Microphone {
+                    7000
+                } else {
+                    0
+                };
                 vec![SpeakerInterval {
-                    start_ms: offset,
-                    end_ms: offset + 8000,
+                    start_ms: offset + lead,
+                    end_ms: offset + lead + 8000,
                     speaker: "anonymous-0".into(),
                     track_id: Some(track.id.clone()),
                 }]

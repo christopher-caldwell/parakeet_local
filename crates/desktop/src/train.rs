@@ -43,14 +43,39 @@ impl Workbench {
     pub(super) fn waiting_voices(&self) -> Vec<EnrollmentCandidate> {
         self.candidates
             .iter()
-            .filter(|c| !self.train_skipped.contains(&c.id) && !self.train_named(c))
+            .filter(|c| !self.voice_skipped(c) && !self.train_named(c))
             .cloned()
             .collect()
+    }
+    fn voice_skipped(&self, candidate: &EnrollmentCandidate) -> bool {
+        self.audio_preferences
+            .skipped_voices
+            .contains(&candidate.id)
+    }
+    /// Skipping is remembered, so people who will not come up again stop being offered.
+    fn set_voices_skipped(&mut self, ids: Vec<String>, skipped: bool, cx: &mut Context<Self>) {
+        let list = &mut self.audio_preferences.skipped_voices;
+        for id in ids {
+            list.retain(|existing| *existing != id);
+            if skipped {
+                list.push(id);
+            }
+        }
+        let preferences = self.audio_preferences.clone();
+        let service = self.audio_settings.clone();
+        self.task(
+            "Saving voices to skip",
+            async move {
+                service.save(&preferences).await?;
+                Ok(Update::Message("Saved".into()))
+            },
+            cx,
+        );
     }
     pub(super) fn has_waiting_voices(&self) -> bool {
         self.candidates
             .iter()
-            .any(|c| !self.train_skipped.contains(&c.id) && !self.train_named(c))
+            .any(|c| !self.voice_skipped(c) && !self.train_named(c))
     }
     /// Reads the prepared voices and the names already given for a recording.
     pub(super) fn load_voices(&mut self, recording: String, cx: &mut Context<Self>) {
@@ -94,11 +119,11 @@ impl Workbench {
                 .iter()
                 .find(|t| t.id == candidate.track_id)
                 .map(|t| match t.kind {
-                    TrackKind::Microphone => "heard on your microphone",
-                    TrackKind::System => "heard on the meeting audio, so someone other than you",
-                    _ => "heard in this recording",
+                    TrackKind::Microphone => "on your microphone",
+                    TrackKind::System => "on the meeting audio, so someone other than you",
+                    _ => "in this recording",
                 })
-                .unwrap_or("heard in this recording");
+                .unwrap_or("in this recording");
             let mut card = div()
                 .p_5()
                 .rounded_lg()
@@ -120,7 +145,7 @@ impl Workbench {
                                 .child(format!("Voice {position} of {}", self.candidates.len())),
                         )
                         .child(caption(format!(
-                            "{} · {heard} · {:.0} s of clear speech",
+                            "{} heard {heard} · {:.0} s of clear speech",
                             anonymous_label(&candidate.anonymous_speaker),
                             candidate.speech_ms as f64 / 1000.
                         ))),
@@ -141,6 +166,29 @@ impl Workbench {
                 .child(step(2, "Type who it is", self.name_picker(cx)))
                 .child(step(3, "Save", self.save_row(&candidate, cx)));
             view = view.child(card);
+        } else if self.candidates.is_empty()
+            && !detail
+                .tracks
+                .iter()
+                .any(|t| t.available && t.kind != TrackKind::Playback)
+        {
+            view = view.child(
+                div()
+                    .p_5()
+                    .rounded_lg()
+                    .bg(rgb(PANEL))
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(
+                        div()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child("The audio is no longer on this Mac"),
+                    )
+                    .child(caption(
+                        "Voices can only be detected from the original audio, so this recording can't be analyzed.",
+                    )),
+            );
         } else if self.candidates.is_empty() {
             view = view.child(
                 div()
@@ -203,15 +251,22 @@ impl Workbench {
                                     cx.notify();
                                 }),
                             ))
-                            .when(!self.train_skipped.is_empty(), |row| {
-                                row.child(
-                                    quiet("voices-unskip", "Bring back the voices I skipped")
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.train_skipped.clear();
-                                            cx.notify();
-                                        })),
-                                )
-                            }),
+                            .when(
+                                self.candidates.iter().any(|c| self.voice_skipped(c)),
+                                |row| {
+                                    row.child(
+                                        quiet("voices-unskip", "Bring back the voices I skipped")
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                let ids = this
+                                                    .candidates
+                                                    .iter()
+                                                    .map(|c| c.id.clone())
+                                                    .collect();
+                                                this.set_voices_skipped(ids, false, cx);
+                                            })),
+                                    )
+                                },
+                            ),
                     ),
             );
         }
@@ -223,6 +278,16 @@ impl Workbench {
             }
             any = true;
             let id = done.id.clone();
+            let source = detail
+                .tracks
+                .iter()
+                .find(|t| t.id == done.track_id)
+                .map(|t| match t.kind {
+                    TrackKind::Microphone => " (microphone)",
+                    TrackKind::System => " (meeting audio)",
+                    _ => "",
+                })
+                .unwrap_or("");
             let name = self
                 .profiles
                 .iter()
@@ -235,7 +300,7 @@ impl Workbench {
                     .items_center()
                     .gap_2()
                     .child(div().flex_1().min_w_0().child(format!(
-                        "{} → {name} · {} lines named",
+                        "{}{source} → {name} · {} lines named",
                         anonymous_label(&done.cluster),
                         done.segments.len()
                     )))
@@ -275,14 +340,16 @@ impl Workbench {
         cx: &mut Context<Self>,
     ) -> gpui_base::Button {
         let play = candidate.clone();
-        primary("train-play", "Play a clip").on_click(cx.listener(move |this, _, _, cx| {
-            this.play_range(
-                play.track_id.clone(),
-                play.local_start_ms,
-                play.local_end_ms,
-                cx,
-            )
-        }))
+        primary("train-play", "Play a clip")
+            .self_start()
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.play_range(
+                    play.track_id.clone(),
+                    play.local_start_ms,
+                    play.local_end_ms,
+                    cx,
+                )
+            }))
     }
     /// A name field, with the people already named offered as shortcuts that fill it in.
     fn name_picker(&self, cx: &mut Context<Self>) -> Div {
@@ -340,14 +407,33 @@ impl Workbench {
                     )
                     .child(quiet("train-skip", "Skip this voice").on_click(cx.listener(
                         move |this, _, window, cx| {
-                            this.train_skipped.push(skip.clone());
+                            this.set_voices_skipped(vec![skip.clone()], true, cx);
                             this.train_person = None;
                             this.train_hint = None;
                             this.person_name
                                 .update(cx, |input, cx| input.set_value("", window, cx));
                             cx.notify();
                         },
-                    ))),
+                    )))
+                    .when(self.waiting_voices().len() > 1, |row| {
+                        row.child(
+                            quiet("train-skip-rest", "Skip all remaining voices").on_click(
+                                cx.listener(|this, _, window, cx| {
+                                    let ids = this
+                                        .waiting_voices()
+                                        .iter()
+                                        .map(|c| c.id.clone())
+                                        .collect();
+                                    this.set_voices_skipped(ids, true, cx);
+                                    this.train_person = None;
+                                    this.train_hint = None;
+                                    this.person_name
+                                        .update(cx, |input, cx| input.set_value("", window, cx));
+                                    cx.notify();
+                                }),
+                            ),
+                        )
+                    }),
             )
             .when_some(self.train_hint.clone(), |col, hint| {
                 col.child(

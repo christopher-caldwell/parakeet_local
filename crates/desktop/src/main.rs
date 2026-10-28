@@ -176,7 +176,6 @@ struct Workbench {
     calibration: Option<parakeet_domain::calibration::CalibrationReport>,
     train_person: Option<String>,
     train_hint: Option<String>,
-    train_skipped: Vec<String>,
     train_done: Vec<ClusterIdentification>,
     recording_shortcut: bool,
     model_list: Vec<ModelInfo>,
@@ -503,7 +502,6 @@ impl Workbench {
         self.suggestion_review = None;
         self.candidates.clear();
         self.train_done.clear();
-        self.train_skipped.clear();
         self.train_person = None;
         self.selected_track = None;
         self.segment_page = 0;
@@ -1782,7 +1780,6 @@ fn main() -> anyhow::Result<()> {
                             calibration: None,
                             train_person: None,
                             train_hint: None,
-                            train_skipped: vec![],
                             train_done: vec![],
                             recording_shortcut: false,
                             model_list: vec![],
