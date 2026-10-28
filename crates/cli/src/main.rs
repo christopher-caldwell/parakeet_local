@@ -258,16 +258,11 @@ enum Meetings {
         duration_ms: i64,
     },
     Discover {
-        path: Option<PathBuf>,
+        path: PathBuf,
         #[arg(long)]
         details: bool,
     },
     Import {
-        path: PathBuf,
-        #[arg(long)]
-        dry_run: bool,
-    },
-    ImportSourceDb {
         path: PathBuf,
         #[arg(long)]
         dry_run: bool,
@@ -575,9 +570,6 @@ fn home() -> PathBuf {
 fn data_root() -> PathBuf {
     home().join("Library/Application Support/ParakeetLocal")
 }
-fn source_root() -> PathBuf {
-    home().join("Library/Application Support/MacParakeet/meeting-recordings")
-}
 fn yt_dlp() -> PathBuf {
     std::env::var_os("PARAKEET_YT_DLP")
         .map(PathBuf::from)
@@ -616,7 +608,6 @@ fn writes(command: &Command) -> bool {
             command: Jobs::Recover | Jobs::Retry { .. } | Jobs::Cancel { .. }
         } | Command::Meetings {
             command: Meetings::Import { dry_run: false, .. }
-                | Meetings::ImportSourceDb { dry_run: false, .. }
                 | Meetings::Finalize { .. }
                 | Meetings::Analyze { .. }
                 | Meetings::Rename { .. }
@@ -800,9 +791,7 @@ async fn execute(cli: Cli) -> anyhow::Result<Value> {
         Command::Meetings {
             command: Meetings::Discover { path, details },
         } => {
-            let discovery = DiscoveryService::new(source.clone())
-                .discover(&path.clone().unwrap_or_else(source_root))
-                .await?;
+            let discovery = DiscoveryService::new(source.clone()).discover(path).await?;
             return if *details {
                 value(discovery)
             } else {
@@ -1075,18 +1064,6 @@ async fn execute(cli: Cli) -> anyhow::Result<Value> {
                         dry_run,
                     })
                     .await?,
-            ),
-            Meetings::ImportSourceDb { path, dry_run } => value(
-                LegacyImportService::new(
-                    Arc::new(parakeet_database::MacParakeetCatalog),
-                    source.clone(),
-                    guarded_audio.clone(),
-                )
-                .import(ImportLegacyInput {
-                    path: path.to_path_buf(),
-                    dry_run,
-                })
-                .await?,
             ),
             Meetings::Import { path, dry_run } => value(
                 library
@@ -1713,7 +1690,6 @@ fn kind(error: &anyhow::Error) -> &'static str {
             DiscoverRecordingsError,
             MediaImportError,
             TranscribeMediaError,
-            ImportLegacyError,
             PlayAudioError,
             PlaySegmentError,
             ListModelsError,

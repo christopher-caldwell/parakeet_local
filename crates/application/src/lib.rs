@@ -65,7 +65,6 @@ operation_error!(PlanImportError,sources{Invalid:ValidationError=>"invalid_input
 operation_error!(DiscoverRecordingsError,sources{Source:CapabilityError=>"source"},values{});
 operation_error!(InspectMediaError,sources{Source:CapabilityError=>"source"},values{});
 operation_error!(MediaImportError,sources{Source:CapabilityError=>"source",Persistence:PersistenceError=>"persistence"},values{});
-operation_error!(ImportLegacyError,sources{Source:CapabilityError=>"source",Persistence:PersistenceError=>"persistence"},values{});
 #[derive(Debug, Clone)]
 pub struct ImportRecordingsInput {
     pub path: std::path::PathBuf,
@@ -75,11 +74,6 @@ pub struct ImportRecordingsInput {
 pub struct RenameRecordingInput {
     pub id: String,
     pub title: String,
-}
-#[derive(Debug, Clone)]
-pub struct ImportLegacyInput {
-    pub path: std::path::PathBuf,
-    pub dry_run: bool,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecordingDetail {
@@ -659,71 +653,6 @@ impl PlaybackService {
 }
 
 pub mod capture;
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LegacySourceRecord {
-    pub source_id: String,
-    pub source_type: String,
-    pub title: String,
-    pub created_at: String,
-    pub duration_ms: Option<i64>,
-    pub file_path: Option<String>,
-    pub original: Value,
-}
-#[async_trait]
-pub trait LegacyCatalog: Send + Sync {
-    async fn read(&self, path: &Path) -> Result<Vec<LegacySourceRecord>, CapabilityError>;
-}
-#[async_trait]
-pub trait LegacyNormalization: Send + Sync {
-    async fn normalize(&self, source: &LegacySourceRecord)
-    -> Result<ImportBundle, CapabilityError>;
-}
-pub struct LegacyImportService {
-    catalog: Arc<dyn LegacyCatalog>,
-    normalizer: Arc<dyn LegacyNormalization>,
-    writes: Arc<dyn LibraryWrites>,
-}
-impl LegacyImportService {
-    pub fn new(
-        catalog: Arc<dyn LegacyCatalog>,
-        normalizer: Arc<dyn LegacyNormalization>,
-        writes: Arc<dyn LibraryWrites>,
-    ) -> Self {
-        Self {
-            catalog,
-            normalizer,
-            writes,
-        }
-    }
-    pub async fn import(
-        &self,
-        input: ImportLegacyInput,
-    ) -> Result<ImportReport, ImportLegacyError> {
-        let path = input.path.as_path();
-        let dry_run = input.dry_run;
-        let rows = self.catalog.read(path).await?;
-        let mut report = ImportReport {
-            imported: 0,
-            existing: 0,
-            recordings: vec![],
-            warnings: vec![],
-        };
-        for row in rows {
-            let b = self.normalizer.normalize(&row).await?;
-            report.recordings.push(b.recording.id.clone());
-            report.warnings.extend(b.warnings.clone());
-            if !dry_run {
-                if self.writes.import(&b).await? {
-                    report.imported += 1;
-                } else {
-                    report.existing += 1;
-                }
-            }
-        }
-        Ok(report)
-    }
-}
 
 pub mod dictation;
 

@@ -2,7 +2,7 @@
 
 A personal Apple Silicon macOS transcription workbench: one Rust application core, a JSON CLI, and a native GPUI desktop. This is an initial working implementation, not a completed or human-validated MacParakeet replacement.
 
-The development library already contains ten imported MacParakeet records (six meetings and four media items), plus public evaluation fixtures. Original recordings remain referenced in place. No source files or source database are modified. Model weights, private transcripts, audio, embeddings, caches and test databases are excluded from Git.
+Imported recordings stay where they are and are referenced in place; their files are never modified. Importing from MacParakeet is not a goal. Model weights, private transcripts, audio, embeddings, caches and test databases are excluded from Git.
 
 ## Try the existing development library
 
@@ -43,7 +43,6 @@ All normal results are JSON envelopes (`schema_version: 1`, `ok`, `data` or `err
 target/debug/parakeet --data-root .local/app meetings discover
 target/debug/parakeet meetings import /path/to/audio-or-artifacts --dry-run
 target/debug/parakeet --data-root .local/app meetings import /path/to/artifacts
-target/debug/parakeet --data-root .local/app meetings import-source-db /path/to/macparakeet.db
 target/debug/parakeet --data-root .local/app meetings show RECORDING_ID
 target/debug/parakeet --data-root .local/app meetings tracks RECORDING_ID
 target/debug/parakeet --data-root .local/app meetings fingerprint RECORDING_ID --track TRACK_ID

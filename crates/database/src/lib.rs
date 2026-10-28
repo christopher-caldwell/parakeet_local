@@ -172,9 +172,6 @@ fn decode<T: serde::de::DeserializeOwned>(value: &str) -> Result<T, PersistenceE
     serde_json::from_str(value).map_err(PersistenceError::new)
 }
 
-mod source;
-pub use source::MacParakeetCatalog;
-
 mod storage;
 
 mod analysis;
