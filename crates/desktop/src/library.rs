@@ -786,9 +786,13 @@ impl Workbench {
                             .unwrap_or("unknown"),
                     ),
                 ),
-                _ => ("Unknown speaker".into(), false, WARNING),
+                _ => match imported_claim(segment) {
+                    Some(claim) => (claim.to_owned(), false, MUTED),
+                    None => ("Unknown speaker".into(), false, WARNING),
+                },
             },
         };
+        let imported = correction.speaker.is_none() && imported_claim(segment).is_some();
         let source = segment
             .track_id
             .as_ref()
@@ -824,6 +828,7 @@ impl Workbench {
                             .child(label.clone()),
                     )
                     .when(confirmed, |row| row.child(pill("Confirmed", SUCCESS)))
+                    .when(imported, |row| row.child(pill("Imported · unverified", MUTED)))
                     .child(caption(source))
                     .child(
                         quiet(
@@ -1380,4 +1385,11 @@ impl Workbench {
             .overflow_y_scroll()
             .child(view)
     }
+}
+
+/// A speaker label carried over from an imported MacParakeet transcript: a claim, never a verified name.
+fn imported_claim(segment: &TranscriptSegment) -> Option<&str> {
+    (segment.evidence["origin"] == "imported_unverified")
+        .then_some(segment.speaker_claim.as_deref())
+        .flatten()
 }
