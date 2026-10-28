@@ -1,10 +1,14 @@
 use super::*;
 use crate::processing::{EmbeddingRequest, VoiceEmbeddings};
 use parakeet_domain::recognition::{IdentityDecision, MatchPolicy, suggest};
+mod history;
 mod identification;
 mod imported;
+mod reembed;
+pub use history::*;
 pub use identification::*;
 pub use imported::*;
+pub use reembed::*;
 operation_error!(ListSpeakersError,sources{Persistence:PersistenceError=>"persistence"},values{});
 operation_error!(ListVoiceExamplesError,sources{Persistence:PersistenceError=>"persistence"},values{});
 operation_error!(CreateSpeakerError,sources{Invalid:ValidationError=>"invalid_input",Persistence:PersistenceError=>"persistence"},values{});
@@ -59,6 +63,7 @@ pub trait SpeakerQueries: Send + Sync {
         recording_id: Option<&str>,
     ) -> Result<Vec<SpeakerSuggestion>, PersistenceError>;
     async fn suggestion(&self, id: &str) -> Result<Option<SpeakerSuggestion>, PersistenceError>;
+    async fn notes(&self, profile_id: &str) -> Result<String, PersistenceError>;
     async fn identification(
         &self,
         id: &str,
@@ -84,6 +89,7 @@ pub trait SpeakerWrites: Send + Sync {
     async fn delete_profile(&self, id: &str) -> Result<bool, PersistenceError>;
     async fn enroll(&self, example: &VoiceExample) -> Result<(), PersistenceError>;
     async fn remove_example(&self, id: &str) -> Result<bool, PersistenceError>;
+    async fn save_notes(&self, profile_id: &str, notes: &str) -> Result<bool, PersistenceError>;
     /// Atomically records a cluster identification, appends its segment corrections (each
     /// against the expected revision) and inserts the examples it admitted. `false` on conflict.
     async fn save_identification(

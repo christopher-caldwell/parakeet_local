@@ -5,6 +5,14 @@ use parakeet_application::speakers::{
 };
 #[async_trait]
 impl SpeakerQueries for SqliteStore {
+    async fn notes(&self, profile_id: &str) -> Result<String, PersistenceError> {
+        Ok(sqlx::query_file!("src/speakers/notes.sql", profile_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(PersistenceError::new)?
+            .map(|r| r.notes)
+            .unwrap_or_default())
+    }
     async fn identification(
         &self,
         id: &str,
@@ -226,6 +234,16 @@ impl SpeakerWrites for SqliteStore {
         }
         tx.commit().await.map_err(PersistenceError::new)?;
         Ok(true)
+    }
+    async fn save_notes(&self, profile_id: &str, notes: &str) -> Result<bool, PersistenceError> {
+        Ok(
+            sqlx::query_file!("src/speakers/save_notes.sql", profile_id, notes)
+                .execute(&self.pool)
+                .await
+                .map_err(PersistenceError::new)?
+                .rows_affected()
+                > 0,
+        )
     }
     async fn create_profile(&self, p: &SpeakerProfile) -> Result<(), PersistenceError> {
         sqlx::query_file!("src/speakers/create.sql", p.id, p.name, p.created_at)

@@ -3,7 +3,7 @@ use parakeet_application::{
     processing::{EmbeddingOutput, EmbeddingRequest, RunWrites, VoiceEmbeddings},
     speakers::{
         CorrectSegmentInput, IdentifyClusterInput, PersonChoice, ResolveSuggestionInput,
-        SpeakerQueries, SpeakerService, SuggestSpeakerInput,
+        SpeakerQueries, SpeakerService, SpeakerWrites, SuggestSpeakerInput,
     },
 };
 use parakeet_database::*;
@@ -430,4 +430,87 @@ async fn imported_labels_only_propose_clean_clips_and_enroll_nothing() {
     assert!(candidates[1].is_self);
     assert!(candidates.iter().all(|c| c.claim != "Others 1"));
     assert!(service.examples(None).await.unwrap().is_empty());
+}
+#[tokio::test]
+async fn reembedding_replaces_old_revisions_and_reports_missing_audio() {
+    let (_tmp, store, service) = fixture().await;
+    let person = service.create("Person").await.unwrap();
+    let old = VoiceExample {
+        id: "old".into(),
+        profile_id: person.id.clone(),
+        recording_id: "r".into(),
+        track_id: "track".into(),
+        start_ms: 0,
+        end_ms: 5_000,
+        model: "test".into(),
+        revision: "0".into(),
+        capture_domain: "system".into(),
+        vector: vec![0., 1.],
+        verified_at: "then".into(),
+        origin: None,
+    };
+    let current = VoiceExample {
+        id: "current".into(),
+        revision: "1".into(),
+        start_ms: 7_000,
+        end_ms: 12_000,
+        ..old.clone()
+    };
+    for example in [&old, &current] {
+        store.enroll(example).await.unwrap();
+    }
+    let report = service.reembed(None).await.unwrap();
+    assert_eq!(report.replaced, 1);
+    assert_eq!(report.already_current, 1);
+    let examples = service.examples(None).await.unwrap();
+    assert_eq!(examples.len(), 2);
+    assert!(examples.iter().all(|e| e.revision == "1" && e.id != "old"));
+    assert!(
+        examples
+            .iter()
+            .all(|e| e.verified_at == "then" || e.id == "current")
+    );
+}
+#[tokio::test]
+async fn profile_history_lists_enrollments_recognitions_and_notes() {
+    let (_tmp, _store, service) = fixture().await;
+    let named = service
+        .identify_cluster(identify(PersonChoice::New("Person".into())))
+        .await
+        .unwrap();
+    service
+        .save_notes(&named.profile_id, "met at standup")
+        .await
+        .unwrap();
+    let suggestion = service
+        .suggest(SuggestSpeakerInput {
+            recording_id: "r".into(),
+            track_id: "track".into(),
+            start_ms: 14_000,
+            end_ms: 20_500,
+            more_ranges: vec![],
+            policy: parakeet_domain::recognition::MatchPolicy {
+                minimum_score: 0.5,
+                minimum_margin: 0.0,
+                minimum_examples: 1,
+            },
+        })
+        .await
+        .unwrap();
+    let before = service.history(&named.profile_id).await.unwrap();
+    assert_eq!(before.recognitions[0].outcome, "suggested");
+    service
+        .resolve_suggestion(ResolveSuggestionInput {
+            id: suggestion.id,
+            action: "accept".into(),
+            segment_id: Some("s3".into()),
+            profile_id: None,
+        })
+        .await
+        .unwrap();
+    let after = service.history(&named.profile_id).await.unwrap();
+    assert_eq!(after.notes, "met at standup");
+    assert_eq!(after.recognitions[0].outcome, "accepted");
+    assert_eq!(after.enrollments.len(), 3);
+    assert!(service.save_notes("missing", "x").await.is_err());
 }

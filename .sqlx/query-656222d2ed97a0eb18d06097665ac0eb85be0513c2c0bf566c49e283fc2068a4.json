@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT notes FROM speaker_notes WHERE profile_id=?1\n",
+  "describe": {
+    "columns": [
+      {
+        "name": "notes",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "656222d2ed97a0eb18d06097665ac0eb85be0513c2c0bf566c49e283fc2068a4"
+}

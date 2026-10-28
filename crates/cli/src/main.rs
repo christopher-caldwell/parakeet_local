@@ -385,6 +385,20 @@ enum Speakers {
     Candidates {
         meeting: String,
     },
+    /// Notes, enrollment history and recognition history for one person.
+    History {
+        id: String,
+    },
+    /// Set free-form notes for a person.
+    Notes {
+        id: String,
+        text: String,
+    },
+    /// Recompute voice examples with the selected embedding model after a model or backend change.
+    Reembed {
+        #[arg(long)]
+        profile: Option<String>,
+    },
     /// Propose matching criteria from verified examples; `--adopt` saves a proposed policy.
     Calibrate {
         #[arg(long)]
@@ -652,6 +666,8 @@ fn writes(command: &Command) -> bool {
                     | Speakers::Enroll { .. }
                     | Speakers::IdentifyCluster { .. }
                     | Speakers::Calibrate { adopt: true }
+                    | Speakers::Reembed { .. }
+                    | Speakers::Notes { .. }
                     | Speakers::UndoIdentification { .. }
                     | Speakers::Assign { .. }
                     | Speakers::Reject { .. }
@@ -1418,6 +1434,12 @@ async fn execute(cli: Cli) -> anyhow::Result<Value> {
                         .await?,
                 )
             }
+            Speakers::History { id } => value(speakers.history(&id).await?),
+            Speakers::Notes { id, text } => {
+                speakers.save_notes(&id, &text).await?;
+                value(speakers.history(&id).await?)
+            }
+            Speakers::Reembed { profile } => value(speakers.reembed(profile.as_deref()).await?),
             Speakers::Calibrate { adopt } => {
                 let report = speakers.calibrate().await?;
                 if adopt {

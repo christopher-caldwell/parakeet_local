@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO speaker_notes(profile_id,notes) SELECT id,?2 FROM speaker_profiles WHERE id=?1 ON CONFLICT(profile_id) DO UPDATE SET notes=excluded.notes\n",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "6cc8b9222a421420371a270405d730211d05bd57507d603863e51323ce995d25"
+}
