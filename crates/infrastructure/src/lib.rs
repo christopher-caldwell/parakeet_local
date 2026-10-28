@@ -15,8 +15,9 @@ mod native_models;
 
 mod word_timing;
 
+mod vad;
+mod whisper;
 mod whisper_control;
-mod whisper_resume;
 
 pub mod storage;
 

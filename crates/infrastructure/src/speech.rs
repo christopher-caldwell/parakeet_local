@@ -25,7 +25,7 @@ impl LocalSpeech {
         }
     }
 }
-fn peak_rss_bytes() -> Option<u64> {
+pub(crate) fn peak_rss_bytes() -> Option<u64> {
     // macOS reports ru_maxrss in bytes; process lifetime peak, not a per-model allocation estimate.
     #[cfg(target_os = "macos")]
     {
@@ -81,50 +81,8 @@ impl SpeechProcessing for LocalSpeech {
    let started=Instant::now();let loaded=Instant::now();
    if req.model.starts_with("nemotron3-"){return crate::native_models::nemotron(crate::native_models::NemotronJob{runtime:&runtime,models:&models,request:&req,track:&track,run:&run,duration,started,executable:&model_runtime,control:&control});}
    if req.model.starts_with("whisper-"){
-    whisper_rs::install_logging_hooks();
-    let file=directory.join(if req.model=="whisper-base.en"{"ggml-base.en.bin"}else{"ggml-small.en.bin"});
-    let key=models.cache_identity(&req.model)?;
-    control.publish(ProcessingStage::VerifyingSource,0,Some(duration),0,None);
-    let source=crate::whisper_resume::identify_source(&track,&control)?;
-    let prefix=crate::whisper_resume::restore(crate::whisper_resume::ResumeInput{root:&models.root,request:&req,track:&track,run:&run,source:&source,model_key:&key,duration_ms:duration,control:&control})?;
-    control.publish(ProcessingStage::LoadingModel,prefix.consumed_ms,Some(duration),prefix.chunks,None);
-    let loaded=Instant::now();
-    let mut cached=cache.whisper.lock().map_err(|_|CapabilityError::message("ASR model cache lock failed"))?;
-    let reused=cached.as_ref().is_some_and(|c|c.key==key);
-    if !reused { *cached=None; let model=whisper_rs::WhisperContext::new_with_params(file.to_str().ok_or_else(||CapabilityError::message("invalid model path"))?,whisper_rs::WhisperContextParameters::default()).map_err(CapabilityError::new)?; *cached=Some(Cached{key:key.clone(),model,last_used:Instant::now()}); }
-    let context=&cached.as_ref().ok_or_else(||CapabilityError::message("ASR cache missing after initialization"))?.model;
-    let load_seconds=if reused{0.}else{loaded.elapsed().as_secs_f64()};let resumed_ms=prefix.consumed_ms;let resumed_audio_ms=prefix.decoded_ms;let resumed_chunks=prefix.chunks;let resume_report=prefix.report;let mut segments=prefix.segments;let mut raw=prefix.raw;let mut consumed=resumed_ms;let mut decode_seconds=0.;let mut audio_seconds=resumed_audio_ms as f64/1000.;let mut chunks=resumed_chunks;
-    while consumed<duration{
-     control.check()?;control.publish(ProcessingStage::Decoding,consumed,Some(duration),chunks,None);let first_segment=segments.len();let first_raw=raw.len();
-     let length=(duration-consumed).min(60_000);let decoded=Instant::now();let samples=runtime.block_on(async {tokio::select!{r=audio::decode(&track,req.start_ms+consumed,length)=>r,_=control.cancelled()=>Err(CapabilityError::message("decoding cancelled"))}})?;decode_seconds+=decoded.elapsed().as_secs_f64();let actual_ms=samples.len() as i64/16;audio_seconds+=samples.len() as f64/16000.;
-     let rms=(samples.iter().map(|s|(*s as f64).powi(2)).sum::<f64>()/samples.len() as f64).sqrt();
-     let mut state=context.create_state().map_err(CapabilityError::new)?;
-     let mut params=whisper_rs::FullParams::new(whisper_rs::SamplingStrategy::BeamSearch{beam_size:5,patience:-1.});params.set_language(Some("en"));params.set_token_timestamps(req.word_timestamps);params.set_n_threads(4);params.set_no_context(true);params.set_print_special(false);params.set_print_progress(false);params.set_print_realtime(false);params.set_print_timestamps(false);params.set_temperature(0.);params.set_temperature_inc(0.);params.set_suppress_blank(true);
-     control.check()?;
-     let callbacks=Box::new(crate::whisper_control::Callbacks{control:control.clone(),consumed,duration,chunks});
-     let inference=callbacks.run(&mut state,params,&samples);drop(callbacks);inference.map_err(CapabilityError::new)?;
-     for s in state.as_iter(){let ordinal=segments.len();let text=s.to_str_lossy().map_err(CapabilityError::new)?.to_string();let local_start=req.start_ms+consumed+s.start_timestamp()*10;let local_end=(req.start_ms+consumed+s.end_timestamp()*10).min(req.start_ms+consumed+actual_ms);let no_speech=s.no_speech_probability();
-      let mut evidence=json!({"local_start_ms":local_start,"local_end_ms":local_end,"no_speech_probability":no_speech,"chunk_rms":rms,"uncertain_speech":rms<0.0003||no_speech>0.6,"attribution":"unknown","timing_quality":"model_segment"});
-      if req.word_timestamps {
-       let mut tokens=vec![];let mut raw_tokens=vec![];
-       for index in 0..s.n_tokens(){let token=s.get_token(index).ok_or_else(||CapabilityError::message("missing ASR token"))?;if token.token_id()>=context.token_eot(){continue;}let data=token.token_data();let bytes=token.to_bytes().map_err(CapabilityError::new)?.to_vec();raw_tokens.push(json!({"id":data.id,"bytes":bytes,"probability":data.p,"t0_10ms":data.t0,"t1_10ms":data.t1}));tokens.push(crate::word_timing::TokenTiming{bytes,start_ms:data.t0.saturating_mul(10),end_ms:data.t1.saturating_mul(10)});}
-       evidence["word_timing_version"]=json!(1);
-       evidence["words"]=json!(crate::word_timing::words(&text,&tokens,req.start_ms+consumed,actual_ms,track.meeting_offset_ms()));
-       evidence["raw_token_timing"]=json!(raw_tokens);
-      }
-      raw.push(json!({"text":text,"evidence":evidence}));
-      // Low-energy recognition stays inspectable; it is never silently turned into a named speaker.
-      segments.push(TranscriptSegment{id:stable_id("segment",&format!("{}:{ordinal}",run.id)),recording_id:run.recording_id.clone(),run_id:run.id.clone(),track_id:Some(track.id.clone()),ordinal,start_ms:track.meeting_offset_ms().map(|o|o+local_start),end_ms:track.meeting_offset_ms().map(|o|o+local_end.max(local_start)),text,speaker_claim:None,evidence});
-     }
-     let completed=(consumed+actual_ms).min(duration);
-     if control.retains_work(){crate::whisper_resume::retain_chunk(&models.root,crate::whisper_resume::ChunkEvidence{request:&req,track:&track,run:&run,source:&source,model_key:&key,index:chunks,start_ms:req.start_ms+consumed,completed_ms:completed,decoded_ms:actual_ms,segments:&segments[first_segment..],raw:&raw[first_raw..]})?;}
-     chunks+=1;control.publish(ProcessingStage::Transcribing,completed,Some(duration),chunks,None);
-     consumed+=length;if actual_ms<length-100{break;}
-    }
-    if let Some(c)=cached.as_mut(){c.last_used=Instant::now();}
-    if crate::whisper_resume::identify_source(&track,&control)?!=source{return Err(CapabilityError::message("source content changed during transcription; refusing publication"));}
-    order_segments(&mut segments);let wall=started.elapsed().as_secs_f64();
-    Ok(EngineOutput{segments,intervals:vec![],raw:json!(raw),metrics:json!({"wall_seconds":wall,"model_load_seconds":load_seconds,"decode_seconds":decode_seconds,"audio_seconds":audio_seconds,"real_time_factor":wall/audio_seconds,"process_lifetime_peak_rss_bytes":peak_rss_bytes(),"model_context_reused":reused,"cache_idle_seconds":60,"runtime_configuration":"whisper-rs-0.16.0:context-cache-v1:no-context-60s","experimental_word_timestamps":req.word_timestamps,"word_timing_algorithm":if req.word_timestamps{Some("whisper-token-estimates-v1:whitespace-byte-grouping:no-interpolation")}else{None},"chunk_ms":60_000,"chunk_overlap_ms":0,"checkpoint_protocol":2,"source_sha256":source.sha256,"resume":resume_report,"inference_chunks":chunks-resumed_chunks,"inferred_audio_seconds":audio_seconds-resumed_audio_ms as f64/1000.,"threads":4,"timing_space":if track.meeting_offset_ms().is_some(){"meeting"}else{"untimed_with_track_local_evidence"}})})
+    control.publish(ProcessingStage::LoadingModel,0,Some(duration),0,None);
+    crate::whisper::transcribe(crate::whisper::WhisperJob{runtime:&runtime,models:&models,cache:&cache,request:&req,track:&track,run:&run,control:&control,duration,started,directory:&directory})
    }else if req.model==SPEAKRS_ID || req.model=="speakrs-community-1-cpu"{
     control.publish(ProcessingStage::LoadingModel,0,Some(duration),0,None);
     let mut pipeline=speakrs::OwnedDiarizationPipeline::from_dir(&directory,if req.model==SPEAKRS_ID{speakrs::ExecutionMode::CoreMl}else{speakrs::ExecutionMode::Cpu}).map_err(CapabilityError::new)?;let load_seconds=loaded.elapsed().as_secs_f64();let decoding=Instant::now();let samples=runtime.block_on(async {tokio::select!{r=audio::decode(&track,req.start_ms,duration)=>r,_=control.cancelled()=>Err(CapabilityError::message("decoding cancelled"))}})?;let decode_seconds=decoding.elapsed().as_secs_f64();let audio_seconds=samples.len() as f64/16000.;
