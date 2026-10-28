@@ -1182,6 +1182,7 @@ async fn meeting_capture_saves_a_durable_plan_and_finalization_is_idempotent() {
                     final_transcription: None,
                 },
                 transcribe_after_stop: true,
+                skip_unavailable_model: false,
                 analyze_speakers: false,
             },
             Arc::new(AtomicBool::new(false)),
@@ -1220,7 +1221,7 @@ async fn meeting_capture_saves_a_durable_plan_and_finalization_is_idempotent() {
     // Existing settings JSON decodes safely; explicit UI preference persists separately.
     use parakeet_application::settings::{AudioPreferencesQueries, AudioPreferencesWrites};
     assert!(
-        !store
+        store
             .audio_preferences()
             .await
             .unwrap()
@@ -2772,4 +2773,100 @@ async fn stale_schema_is_refused_without_migrating() {
     assert!(error.contains("db migrate"), "{error}");
     assert!(open_read_only(&p).await.is_err());
     assert!(verify(&p).await.is_ok());
+}
+struct UnverifiedModels;
+#[async_trait::async_trait]
+impl parakeet_application::LocalModels for UnverifiedModels {
+    async fn selection(
+        &self,
+    ) -> Result<parakeet_application::ModelSelection, parakeet_application::CapabilityError> {
+        FixtureModels.selection().await
+    }
+    async fn list(
+        &self,
+    ) -> Result<Vec<parakeet_application::ModelInfo>, parakeet_application::CapabilityError> {
+        FixtureModels.list().await
+    }
+    async fn install(
+        &self,
+        id: &str,
+    ) -> Result<parakeet_application::ModelInfo, parakeet_application::CapabilityError> {
+        FixtureModels.install(id).await
+    }
+    async fn verify(
+        &self,
+        id: &str,
+    ) -> Result<parakeet_application::ModelInfo, parakeet_application::CapabilityError> {
+        let mut m = FixtureModels.verify(id).await?;
+        m.verified = false;
+        Ok(m)
+    }
+    async fn select(&self, id: &str) -> Result<(), parakeet_application::CapabilityError> {
+        FixtureModels.select(id).await
+    }
+    async fn select_embedding(
+        &self,
+        id: &str,
+    ) -> Result<(), parakeet_application::CapabilityError> {
+        FixtureModels.select_embedding(id).await
+    }
+    async fn remove(&self, id: &str) -> Result<(), parakeet_application::CapabilityError> {
+        FixtureModels.remove(id).await
+    }
+}
+#[tokio::test]
+async fn meeting_without_a_verified_asr_model_records_audio_and_reports_the_skip() {
+    use std::sync::{Arc, atomic::AtomicBool};
+    let (tmp, store) = database().await;
+    let store = Arc::new(store);
+    let engine = Arc::new(MeetingEngine::default());
+    let ownership = Arc::new(
+        parakeet_infrastructure::jobs::FileProcessingOwnership::for_database(
+            &tmp.path().join("test.db"),
+        )
+        .unwrap(),
+    );
+    let models = Arc::new(UnverifiedModels);
+    let processing = Arc::new(parakeet_application::processing::ProcessingService::new(
+        store.clone(),
+        store.clone(),
+        models.clone(),
+        engine.clone(),
+        store.clone(),
+        ownership.clone(),
+        store.clone(),
+    ));
+    let service = parakeet_application::meeting::MeetingService::new(
+        Arc::new(parakeet_application::capture::CaptureService::new(
+            Arc::new(FixtureCapture),
+            store.clone(),
+        )),
+        store.clone(),
+        store.clone(),
+        models,
+        processing,
+        ownership,
+    );
+    let report = service
+        .record(
+            parakeet_application::meeting::RecordMeetingInput {
+                capture: parakeet_application::capture::CaptureRecordingInput {
+                    microphone_uid: None,
+                    system_audio: true,
+                    title: "Fixture capture".into(),
+                    maximum_seconds: 1,
+                    final_transcription: None,
+                },
+                transcribe_after_stop: true,
+                skip_unavailable_model: true,
+                analyze_speakers: false,
+            },
+            Arc::new(AtomicBool::new(false)),
+        )
+        .await
+        .unwrap();
+    assert!(report.finalization.is_none());
+    assert!(report.transcription_skipped.is_some());
+    assert!(store.detail(&report.recording_id).await.unwrap().is_some());
+    assert!(engine.calls.lock().unwrap().is_empty());
 }

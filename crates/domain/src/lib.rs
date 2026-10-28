@@ -358,14 +358,29 @@ mod tests {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AudioPreferences {
     pub microphone_uid: Option<String>,
     pub system_audio: bool,
-    #[serde(default)]
+    /// Meetings are transcribed after Stop unless the user turns this off. When no verified
+    /// ASR model is installed the audio is still saved and the skipped transcription is reported.
+    #[serde(default = "transcribe_by_default")]
     pub transcribe_meetings_after_stop: bool,
     #[serde(default)]
     pub analyze_meetings_after_stop: bool,
+}
+fn transcribe_by_default() -> bool {
+    true
+}
+impl Default for AudioPreferences {
+    fn default() -> Self {
+        Self {
+            microphone_uid: None,
+            system_audio: false,
+            transcribe_meetings_after_stop: true,
+            analyze_meetings_after_stop: false,
+        }
+    }
 }
 impl AudioPreferences {
     pub fn validate(&self) -> Result<(), ValidationError> {

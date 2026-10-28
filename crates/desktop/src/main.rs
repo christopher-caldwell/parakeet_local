@@ -1808,13 +1808,19 @@ impl Workbench {
                         parakeet_application::meeting::RecordMeetingInput {
                             capture: request,
                             transcribe_after_stop: transcribe,
+                            skip_unavailable_model: true,
                             analyze_speakers,
                         },
                         stop,
                     )
                     .await
                 {
-                    Ok(report) => (Some(report.recording_id), None),
+                    Ok(report) => (
+                        Some(report.recording_id),
+                        report
+                            .transcription_skipped
+                            .map(|why| format!("Audio saved without a transcript: {why}")),
+                    ),
                     Err(error) => (
                         error.retained_recording_id().map(str::to_owned),
                         Some(error.to_string()),

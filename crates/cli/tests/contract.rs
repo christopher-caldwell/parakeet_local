@@ -224,7 +224,7 @@ fn meeting_finalization_commands_keep_provisioning_and_consent_explicit() {
     assert_eq!(run(&root, &["db", "migrate"]).0, 0);
     let (code, settings) = run(&root, &["capture", "settings"]);
     assert_eq!(code, 0);
-    assert_eq!(settings["data"]["transcribe_meetings_after_stop"], false);
+    assert_eq!(settings["data"]["transcribe_meetings_after_stop"], true);
     assert_eq!(
         run(
             &root,

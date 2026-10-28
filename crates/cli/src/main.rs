@@ -1254,6 +1254,7 @@ async fn execute(cli: Cli) -> anyhow::Result<Value> {
                             final_transcription: None,
                         },
                         transcribe_after_stop: transcribe,
+                        skip_unavailable_model: false,
                         analyze_speakers,
                     },
                     Arc::new(std::sync::atomic::AtomicBool::new(false)),
