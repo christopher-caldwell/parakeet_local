@@ -2753,3 +2753,21 @@ async fn coordinated_transcription_publishes_all_sources_together_and_search_ign
     );
     assert_eq!(s.list(Some("new batch token")).await.unwrap().len(), 1);
 }
+#[tokio::test]
+async fn stale_schema_is_refused_without_migrating() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = tmp.path().join("test.db");
+    create_empty(&p).await.unwrap();
+    assert!(open_existing(&p).await.is_err());
+    migrate(&p).await.unwrap();
+    let pool = open_existing(&p).await.unwrap();
+    sqlx::query("DELETE FROM _sqlx_migrations WHERE version=(SELECT MAX(version) FROM _sqlx_migrations)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    pool.close().await;
+    let error = open_existing(&p).await.unwrap_err().to_string();
+    assert!(error.contains("db migrate"), "{error}");
+    assert!(open_read_only(&p).await.is_err());
+    assert!(verify(&p).await.is_ok());
+}

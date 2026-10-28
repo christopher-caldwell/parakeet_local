@@ -50,6 +50,32 @@ pub async fn create_empty(path: &Path) -> Result<(), Box<dyn std::error::Error +
 }
 pub async fn open_existing(path: &Path) -> Result<SqlitePool, sqlx::Error> {
     check_ownership(path).await?;
+    check_schema(path).await?;
+    open_writable(path).await
+}
+/// Refuse a library whose applied migrations differ from the embedded ones; never migrates.
+async fn check_schema(path: &Path) -> Result<(), sqlx::Error> {
+    let pool = raw_read_only(path).await?;
+    let applied: Result<i64, sqlx::Error> = sqlx::query_scalar(
+        "SELECT COALESCE(MAX(version),0) FROM _sqlx_migrations WHERE success=1",
+    )
+    .fetch_one(&pool)
+    .await;
+    pool.close().await;
+    let applied = applied.unwrap_or(0);
+    let expected = sqlx::migrate!("./migrations")
+        .iter()
+        .map(|m| m.version)
+        .max()
+        .unwrap_or(0);
+    if applied != expected {
+        return Err(sqlx::Error::Protocol(format!(
+            "library schema is version {applied} but this build expects {expected}; run `parakeet db migrate`"
+        )));
+    }
+    Ok(())
+}
+async fn open_writable(path: &Path) -> Result<SqlitePool, sqlx::Error> {
     let options = SqliteConnectOptions::new()
         .filename(path)
         .create_if_missing(false)
@@ -106,10 +132,12 @@ async fn check_ownership(path: &Path) -> Result<(), sqlx::Error> {
 }
 pub async fn open_read_only(path: &Path) -> Result<SqlitePool, sqlx::Error> {
     check_ownership(path).await?;
+    check_schema(path).await?;
     raw_read_only(path).await
 }
 pub async fn migrate(path: &Path) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let pool = open_existing(path).await?;
+    check_ownership(path).await?;
+    let pool = open_writable(path).await?;
     sqlx::migrate!("./migrations").run(&pool).await?;
     sqlx::query(&format!("PRAGMA application_id={APPLICATION_ID}"))
         .execute(&pool)
@@ -120,7 +148,8 @@ pub async fn migrate(path: &Path) -> Result<(), Box<dyn std::error::Error + Send
 pub async fn verify(
     path: &Path,
 ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
-    let pool = open_read_only(path).await?;
+    check_ownership(path).await?;
+    let pool = raw_read_only(path).await?;
     // Operational introspection exception: PRAGMA/schema information is not application SQL.
     let integrity: String = sqlx::query_scalar("PRAGMA quick_check")
         .fetch_one(&pool)
