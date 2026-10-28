@@ -20,6 +20,8 @@ pub struct MeetingTrackFailure {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct MeetingFinalization {
     pub version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speaker_analysis: Option<crate::analysis::AnalysisRecipe>,
     pub id: String,
     pub recording_id: String,
     pub model: String,
@@ -92,6 +94,12 @@ pub enum FinalizeMeetingError {
     NotFound(String),
     #[error("meeting finalization conflict: {0}")]
     Conflict(String),
+    #[error("recording {recording_id} is saved; speaker analysis needs attention")]
+    Analysis {
+        recording_id: String,
+        #[source]
+        source: Box<crate::analysis::AnalyzeMeetingError>,
+    },
     #[error("recording {recording_id} is saved; final transcription needs attention")]
     Incomplete {
         recording_id: String,
@@ -103,7 +111,7 @@ impl FinalizeMeetingError {
         match self {
             Self::NotFound(_) => "not_found",
             Self::Conflict(_) => "conflict",
-            Self::Incomplete { .. } => "incomplete",
+            Self::Incomplete { .. } | Self::Analysis { .. } => "incomplete",
             Self::Invalid(_) => "invalid_input",
             Self::Persistence(_) => "persistence",
             Self::Capability(_) => "capability",
@@ -111,6 +119,12 @@ impl FinalizeMeetingError {
     }
     pub fn retained(&self) -> Option<Value> {
         match self {
+            Self::Analysis {
+                recording_id,
+                source,
+            } => Some(
+                json!({"recording_id":recording_id,"speaker_analysis":source.retained(),"failure":source.to_string()}),
+            ),
             Self::Incomplete {
                 recording_id,
                 report,
@@ -125,9 +139,9 @@ pub enum RecordMeetingError {
     Capture(#[from] crate::capture::CaptureRecordingError),
     #[error(transparent)]
     Preparation(#[from] FinalizeMeetingError),
-    #[error(
-        "recording {recording_id} is saved, but final transcription did not complete: {source}"
-    )]
+    #[error("speaker analysis preflight failed before capture: {0}")]
+    AnalysisPreparation(#[source] Box<crate::analysis::AnalyzeMeetingError>),
+    #[error("recording {recording_id} is saved, but meeting processing did not complete: {source}")]
     Finalization {
         recording_id: String,
         #[source]
@@ -138,6 +152,7 @@ impl RecordMeetingError {
     pub fn kind(&self) -> &'static str {
         match self {
             Self::Capture(e) => e.kind(),
+            Self::AnalysisPreparation(e) => e.kind(),
             Self::Preparation(e) | Self::Finalization { source: e, .. } => e.kind(),
         }
     }
@@ -158,6 +173,7 @@ operation_error!(ListPendingMeetingsError,sources{Persistence:PersistenceError=>
 pub struct RecordMeetingInput {
     pub capture: CaptureRecordingInput,
     pub transcribe_after_stop: bool,
+    pub analyze_speakers: bool,
 }
 #[derive(Debug, Clone)]
 pub struct FinalizeMeetingInput {
@@ -171,6 +187,7 @@ pub struct MeetingService {
     models: Arc<dyn LocalModels>,
     processing: Arc<ProcessingService>,
     ownership: Arc<dyn ProcessingOwnership>,
+    analysis: Option<Arc<crate::analysis::MeetingAnalysisService>>,
 }
 impl MeetingService {
     pub fn new(
@@ -188,8 +205,14 @@ impl MeetingService {
             models,
             processing,
             ownership,
+            analysis: None,
         }
     }
+    pub fn with_analysis(mut self, analysis: Arc<crate::analysis::MeetingAnalysisService>) -> Self {
+        self.analysis = Some(analysis);
+        self
+    }
+
     async fn plan(&self, model: &str) -> Result<MeetingFinalization, FinalizeMeetingError> {
         let id = if model == "selected-asr" {
             self.models.selection().await?.asr
@@ -201,6 +224,7 @@ impl MeetingService {
             return Err(ValidationError("automatic final transcription requires an installed, verified ASR model; record without it or install/verify a model explicitly".into()).into());
         }
         Ok(MeetingFinalization {
+            speaker_analysis: None,
             version: 1,
             id: new_id(),
             recording_id: String::new(),
@@ -222,18 +246,38 @@ impl MeetingService {
         let RecordMeetingInput {
             capture: mut request,
             transcribe_after_stop,
+            analyze_speakers,
         } = input;
         request
             .validate()
             .map_err(crate::capture::CaptureRecordingError::Invalid)?;
-        request.final_transcription = if transcribe_after_stop {
-            Some(self.plan("selected-asr").await?)
+        request.final_transcription = if transcribe_after_stop || analyze_speakers {
+            let mut plan = self.plan("selected-asr").await?;
+            if analyze_speakers {
+                let service = self.analysis.as_ref().ok_or_else(|| {
+                    FinalizeMeetingError::Conflict(
+                        "speaker analysis is not configured at this entry point".into(),
+                    )
+                })?;
+                let recipe = service
+                    .prepare_recipe()
+                    .await
+                    .map_err(|source| RecordMeetingError::AnalysisPreparation(Box::new(source)))?;
+                if recipe.asr.id != plan.model || recipe.asr.revision != plan.model_revision {
+                    return Err(FinalizeMeetingError::Conflict(
+                        "ASR selection changed during preflight; retry".into(),
+                    )
+                    .into());
+                }
+                plan.speaker_analysis = Some(recipe);
+            }
+            Some(plan)
         } else {
             None
         };
         let bundle = self.capture.record(request, stop).await?;
         let recording_id = bundle.recording.id;
-        let finalization = if transcribe_after_stop {
+        let finalization = if transcribe_after_stop || analyze_speakers {
             Some(
                 self.finalize(crate::meeting::FinalizeMeetingInput {
                     id: recording_id.to_string(),
@@ -257,7 +301,9 @@ impl MeetingService {
         let mut result = vec![];
         for recording in self.queries.list(None).await? {
             if let Some(plan) = Self::read_plan(&recording)?
-                && plan.status != "completed"
+                && (plan.status != "completed"
+                    || (plan.speaker_analysis.is_some()
+                        && recording.metadata["meeting_analysis"]["status"] != "completed"))
             {
                 result.push(plan);
             }
@@ -371,7 +417,7 @@ impl MeetingService {
                     })
                 })
             {
-                return Ok(plan);
+                return self.finish_analysis(plan).await;
             }
             return Err(FinalizeMeetingError::Conflict(
                 "completed plan has no matching durable source-run evidence".into(),
@@ -493,12 +539,35 @@ impl MeetingService {
         plan.updated_at = now();
         self.save(&prior, &plan).await?;
         if plan.status == "completed" {
-            Ok(plan)
+            self.finish_analysis(plan).await
         } else {
             Err(FinalizeMeetingError::Incomplete {
                 recording_id: id.into(),
                 report: Box::new(plan),
             })
         }
+    }
+    async fn finish_analysis(
+        &self,
+        plan: MeetingFinalization,
+    ) -> Result<MeetingFinalization, FinalizeMeetingError> {
+        if let Some(recipe) = &plan.speaker_analysis {
+            let service=self.analysis.as_ref().ok_or_else(||FinalizeMeetingError::Conflict("this saved plan requires speaker analysis; configure the analysis service before resuming".into()))?;
+            service
+                .analyze_pinned(
+                    crate::analysis::AnalyzeMeetingInput {
+                        recording_id: plan.recording_id.clone(),
+                        matching_policy: None,
+                        new_run: false,
+                    },
+                    Some(recipe.clone()),
+                )
+                .await
+                .map_err(|source| FinalizeMeetingError::Analysis {
+                    recording_id: plan.recording_id.clone(),
+                    source: Box::new(source),
+                })?;
+        }
+        Ok(plan)
     }
 }

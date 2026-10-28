@@ -162,12 +162,7 @@ impl AudioSettingsService {
         Ok(self.queries.audio_preferences().await?)
     }
     pub async fn save(&self, p: &AudioPreferences) -> Result<(), SaveAudioPreferencesError> {
-        if p.microphone_uid
-            .as_ref()
-            .is_some_and(|s| s.trim().is_empty())
-        {
-            return Err(ValidationError("microphone UID cannot be blank".into()).into());
-        }
+        p.validate()?;
         self.writes.save_audio_preferences(p).await?;
         Ok(())
     }

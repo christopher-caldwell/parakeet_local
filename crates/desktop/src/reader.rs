@@ -5,6 +5,7 @@ use std::{collections::HashMap, ops::Deref, rc::Rc};
 
 pub(super) struct Document {
     detail: RecordingDetail,
+    pub analysis: Result<Option<parakeet_application::analysis::MeetingAnalysis>, String>,
     pub row_corrections: Vec<CorrectionState>,
     pub row_attributions: Vec<Option<usize>>,
     pub row_word_indices: Vec<Vec<usize>>,
@@ -59,8 +60,21 @@ impl Document {
             .zip(&corrections)
             .map(|(s, c)| c.text.as_deref().unwrap_or(&s.text).to_lowercase())
             .collect();
+        let analysis = detail
+            .recording
+            .metadata
+            .get("meeting_analysis")
+            .filter(|v| !v.is_null())
+            .map(|v| {
+                let plan: parakeet_application::analysis::MeetingAnalysis =
+                    serde_json::from_value(v.clone()).map_err(|e| e.to_string())?;
+                plan.validate().map_err(|e| e.to_string())?;
+                Ok(plan)
+            })
+            .transpose();
         Self {
             detail,
+            analysis,
             row_corrections: corrections,
             row_attributions,
             row_word_indices,

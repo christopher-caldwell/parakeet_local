@@ -1182,6 +1182,7 @@ async fn meeting_capture_saves_a_durable_plan_and_finalization_is_idempotent() {
                     final_transcription: None,
                 },
                 transcribe_after_stop: true,
+                analyze_speakers: false,
             },
             Arc::new(AtomicBool::new(false)),
         )

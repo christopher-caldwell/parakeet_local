@@ -1202,11 +1202,12 @@ impl Workbench {
             .overflow_y_scroll()
             .child(view)
     }
-    fn processing_view(&self, detail: &RecordingDetail, cx: &mut Context<Self>) -> Stateful<Div> {
+    fn processing_view(&self, detail: &reader::Document, cx: &mut Context<Self>) -> Stateful<Div> {
         let mut view = div().p_5().flex().flex_col().gap_3().child(section(
             "Processing history",
             "Original results and errors remain available after reprocessing.",
         ));
+        view = view.child(self.analysis_panel(detail, cx));
         for run in self
             .pending_jobs
             .iter()
@@ -1237,7 +1238,17 @@ impl Workbench {
             let id = detail.recording.id.clone();
             view = view.child(
                 button("resume-finalization", "Resume final transcription")
-                    .disabled(self.pending > 0 || plan["status"] == "completed")
+                    .disabled(
+                        self.pending > 0
+                            || (plan["status"] == "completed"
+                                && (plan["speaker_analysis"].is_null()
+                                    || detail
+                                        .analysis
+                                        .as_ref()
+                                        .ok()
+                                        .and_then(Option::as_ref)
+                                        .is_some_and(|a| a.status == "completed"))),
+                    )
                     .on_click(
                         cx.listener(move |this, _, _, cx| this.finalize_meeting(id.clone(), cx)),
                     ),

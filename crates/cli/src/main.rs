@@ -181,6 +181,8 @@ enum Capture {
     Settings {
         #[arg(long)]
         transcribe_after_stop: Option<bool>,
+        #[arg(long)]
+        analyze_after_stop: Option<bool>,
     },
     Devices,
     Permissions,
@@ -200,6 +202,9 @@ enum Capture {
         /// Run pinned local ASR on every saved source after stopping; audio is retained on failure.
         #[arg(long)]
         transcribe: bool,
+        /// Also diarize sources and prepare anonymous speaker candidates after Stop.
+        #[arg(long)]
+        analyze_speakers: bool,
     },
 }
 #[derive(Subcommand)]
@@ -220,6 +225,22 @@ enum Models {
 }
 #[derive(Subcommand)]
 enum Meetings {
+    /// Run/resume pinned ASR, diarization and clean speaker preparation. Matching is optional.
+    Analyze {
+        id: String,
+        #[arg(long,requires_all=["minimum_margin","minimum_examples"])]
+        minimum_score: Option<f64>,
+        #[arg(long,requires_all=["minimum_score","minimum_examples"])]
+        minimum_margin: Option<f64>,
+        #[arg(long,requires_all=["minimum_score","minimum_margin"])]
+        minimum_examples: Option<usize>,
+        #[arg(long)]
+        new_run: bool,
+    },
+    /// Read the current saved analysis without starting work.
+    Analysis {
+        id: String,
+    },
     /// Resume durable final transcription; completed source work is reused.
     Finalize {
         id: String,
@@ -532,12 +553,14 @@ fn yt_dlp() -> PathBuf {
 }
 fn writes(command: &Command) -> bool {
     if let Command::Capture {
-        command: Capture::Settings {
-            transcribe_after_stop,
-        },
+        command:
+            Capture::Settings {
+                transcribe_after_stop,
+                analyze_after_stop,
+            },
     } = command
     {
-        return transcribe_after_stop.is_some();
+        return transcribe_after_stop.is_some() || analyze_after_stop.is_some();
     }
     if let Command::Dictation {
         command:
@@ -565,6 +588,7 @@ fn writes(command: &Command) -> bool {
             command: Meetings::Import { dry_run: false, .. }
                 | Meetings::ImportSourceDb { dry_run: false, .. }
                 | Meetings::Finalize { .. }
+                | Meetings::Analyze { .. }
                 | Meetings::Rename { .. }
                 | Meetings::Fingerprint { .. }
                 | Meetings::Relink { dry_run: false, .. }
@@ -843,13 +867,13 @@ async fn execute(cli: Cli) -> anyhow::Result<Value> {
         ownership.clone(),
         store.clone(),
     ));
-    let speakers = SpeakerService::new(
+    let speakers = Arc::new(SpeakerService::new(
         store.clone(),
         store.clone(),
         store.clone(),
         engine.clone(),
         models.clone(),
-    );
+    ));
     let settings = Arc::new(SettingsService::new(
         store.clone(),
         store.clone(),
@@ -860,6 +884,15 @@ async fn execute(cli: Cli) -> anyhow::Result<Value> {
         guarded_audio.clone(),
         Arc::new(parakeet_infrastructure::audio::LocalAudioIdentity),
     );
+    let analysis = Arc::new(parakeet_application::analysis::MeetingAnalysisService::new(
+        store.clone(),
+        store.clone(),
+        processing.clone(),
+        speakers.clone(),
+        models.clone(),
+        Arc::new(parakeet_infrastructure::audio::LocalAudioIdentity),
+        ownership.clone(),
+    ));
     let meeting = parakeet_application::meeting::MeetingService::new(
         Arc::new(parakeet_application::capture::CaptureService::new(
             native.clone(),
@@ -870,7 +903,8 @@ async fn execute(cli: Cli) -> anyhow::Result<Value> {
         models.clone(),
         processing.clone(),
         ownership.clone(),
-    );
+    )
+    .with_analysis(analysis.clone());
     let storage = parakeet_application::storage::StorageService::new(
         store.clone(),
         store.clone(),
@@ -958,6 +992,28 @@ async fn execute(cli: Cli) -> anyhow::Result<Value> {
             Jobs::Retry { id } => value(processing.retry(&id).await?),
         },
         Command::Meetings { command } => match command {
+            Meetings::Analysis { id } => value(analysis.show(&id).await?),
+            Meetings::Analyze {
+                id,
+                minimum_score,
+                minimum_margin,
+                minimum_examples,
+                new_run,
+            } => value(
+                analysis
+                    .analyze(parakeet_application::analysis::AnalyzeMeetingInput {
+                        recording_id: id,
+                        matching_policy: minimum_score.map(|minimum_score| {
+                            parakeet_domain::recognition::MatchPolicy {
+                                minimum_score,
+                                minimum_margin: minimum_margin.expect("clap checked"),
+                                minimum_examples: minimum_examples.expect("clap checked"),
+                            }
+                        }),
+                        new_run,
+                    })
+                    .await?,
+            ),
             Meetings::Finalize { id, model } => value(
                 meeting
                     .finalize(parakeet_application::meeting::FinalizeMeetingInput {
@@ -1144,14 +1200,27 @@ async fn execute(cli: Cli) -> anyhow::Result<Value> {
                 .await?,
         ),
         Command::Capture {
-            command: Capture::Settings {
-                transcribe_after_stop,
-            },
+            command:
+                Capture::Settings {
+                    transcribe_after_stop,
+                    analyze_after_stop,
+                },
         } => {
             let service = AudioSettingsService::new(store.clone(), store.clone());
             let mut preferences = service.get().await?;
+            if let Some(enabled) = analyze_after_stop {
+                preferences.analyze_meetings_after_stop = enabled;
+                if enabled {
+                    preferences.transcribe_meetings_after_stop = true;
+                }
+            }
             if let Some(enabled) = transcribe_after_stop {
                 preferences.transcribe_meetings_after_stop = enabled;
+                if !enabled {
+                    preferences.analyze_meetings_after_stop = false;
+                }
+            }
+            if transcribe_after_stop.is_some() || analyze_after_stop.is_some() {
                 service.save(&preferences).await?;
             }
             value(preferences)
@@ -1171,6 +1240,7 @@ async fn execute(cli: Cli) -> anyhow::Result<Value> {
                     title,
                     seconds,
                     transcribe,
+                    analyze_speakers,
                 },
         } => value(
             meeting
@@ -1184,6 +1254,7 @@ async fn execute(cli: Cli) -> anyhow::Result<Value> {
                             final_transcription: None,
                         },
                         transcribe_after_stop: transcribe,
+                        analyze_speakers,
                     },
                     Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 )
@@ -1510,6 +1581,8 @@ fn kind(error: &anyhow::Error) -> &'static str {
             parakeet_application::storage::SaveRetentionPolicyError,
             parakeet_application::storage::PreviewRetentionError,
             ImportRecordingsError,
+            parakeet_application::analysis::AnalyzeMeetingError,
+            parakeet_application::analysis::ShowMeetingAnalysisError,
             InspectMediaError,
             parakeet_application::meeting::ListPendingMeetingsError,
             parakeet_application::scoring::ScoreDiarizationError,
@@ -1646,6 +1719,7 @@ async fn main() {
                         .map(|e| json!(e.0))
                 })
                 .or_else(|| error.chain().find_map(|e|e.downcast_ref::<parakeet_application::processing::TranscribeRecordingError>().and_then(|e|e.retained())))
+                .or_else(|| error.chain().find_map(|e|e.downcast_ref::<parakeet_application::analysis::AnalyzeMeetingError>().and_then(|e|e.retained())))
                 .or_else(|| {
                     error.chain().find_map(|e| {
                         e.downcast_ref::<parakeet_application::meeting::FinalizeMeetingError>()

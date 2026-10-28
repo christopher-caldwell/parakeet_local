@@ -1,4 +1,5 @@
 mod activity;
+mod analysis;
 mod job_control;
 mod library;
 #[cfg(feature = "performance")]
@@ -108,6 +109,7 @@ struct Workbench {
     speakers: Arc<SpeakerService>,
     models: Arc<ModelService>,
     processing: Arc<ProcessingService>,
+    analysis: Arc<parakeet_application::analysis::MeetingAnalysisService>,
     recovery: Arc<parakeet_application::jobs::ProcessingRecoveryService>,
     pending_jobs: Vec<ProcessingRun>,
     storage: Arc<parakeet_application::storage::StorageService>,
@@ -1138,9 +1140,17 @@ impl Render for Workbench {
                 content = content.child(choice("auto-final-transcription", if self.audio_preferences.transcribe_meetings_after_stop {"After Stop: transcribe locally (on)"} else {"After Stop: save audio only"},self.audio_preferences.transcribe_meetings_after_stop)
                     .disabled(self.capture_stop.is_some()).on_click(cx.listener(|this,_,_,cx|{
                         this.audio_preferences.transcribe_meetings_after_stop = !this.audio_preferences.transcribe_meetings_after_stop;
+                        if !this.audio_preferences.transcribe_meetings_after_stop { this.audio_preferences.analyze_meetings_after_stop=false; }
                         let preferences=this.audio_preferences.clone();let service=this.audio_settings.clone();
                         this.task("Saving meeting transcription preference",async move{service.save(&preferences).await?;Ok(Update::Message("Meeting transcription preference saved".into()))},cx);
                     }))).child(caption("Uses the selected installed local ASR model. Audio is saved first; failed final transcription can be resumed."));
+                content=content.child(choice("auto-speaker-analysis",if self.audio_preferences.analyze_meetings_after_stop {"After Stop: prepare anonymous speakers (on)"}else{"After Stop: speaker analysis off"},self.audio_preferences.analyze_meetings_after_stop)
+                    .disabled(self.capture_stop.is_some()).on_click(cx.listener(|this,_,_,cx|{
+                        this.audio_preferences.analyze_meetings_after_stop = !this.audio_preferences.analyze_meetings_after_stop;
+                        if this.audio_preferences.analyze_meetings_after_stop {this.audio_preferences.transcribe_meetings_after_stop=true;}
+                        let preferences=this.audio_preferences.clone();let service=this.audio_settings.clone();
+                        this.task("Saving speaker analysis preference",async move{service.save(&preferences).await?;Ok(Update::Message("Speaker analysis preference saved".into()))},cx);
+                    }))).child(caption("Pins installed ASR and diarization models before capture. Prepares playable unknown voices; no identity comparison or enrollment."));
                 if self.devices["devices"]
                     .as_array()
                     .is_none_or(|devices| devices.is_empty())
@@ -1785,6 +1795,7 @@ impl Workbench {
             final_transcription: None,
         };
         let transcribe = self.audio_preferences.transcribe_meetings_after_stop;
+        let analyze_speakers = self.audio_preferences.analyze_meetings_after_stop;
         let stop = Arc::new(AtomicBool::new(false));
         self.capture_stop = Some(stop.clone());
         let meeting = self.meeting.clone();
@@ -1797,6 +1808,7 @@ impl Workbench {
                         parakeet_application::meeting::RecordMeetingInput {
                             capture: request,
                             transcribe_after_stop: transcribe,
+                            analyze_speakers,
                         },
                         stop,
                     )
@@ -2036,14 +2048,26 @@ fn main() -> anyhow::Result<()> {
     };
     let audio_inspection = Arc::new(AudioInspectionService::new(native.clone()));
     let capture = Arc::new(CaptureService::new(native.clone(), guarded_audio.clone()));
-    let meeting = Arc::new(parakeet_application::meeting::MeetingService::new(
-        capture.clone(),
+    let analysis = Arc::new(parakeet_application::analysis::MeetingAnalysisService::new(
         store.clone(),
         store.clone(),
-        models.clone(),
         processing.clone(),
-        ownership,
+        speakers.clone(),
+        models.clone(),
+        Arc::new(parakeet_infrastructure::audio::LocalAudioIdentity),
+        ownership.clone(),
     ));
+    let meeting = Arc::new(
+        parakeet_application::meeting::MeetingService::new(
+            capture.clone(),
+            store.clone(),
+            store.clone(),
+            models.clone(),
+            processing.clone(),
+            ownership,
+        )
+        .with_analysis(analysis.clone()),
+    );
     let audio_settings = Arc::new(AudioSettingsService::new(store.clone(), store.clone()));
     let audio_preferences = runtime.block_on(audio_settings.get())?;
     let dictation_state = Arc::new(Mutex::new(serde_json::json!({"state":"idle"})));
@@ -2168,6 +2192,7 @@ fn main() -> anyhow::Result<()> {
                             speakers,
                             models,
                             processing,
+                            analysis,
                             recovery,
                             pending_jobs: vec![],
                             storage,

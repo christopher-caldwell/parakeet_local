@@ -312,6 +312,25 @@ pub struct AudioPreferences {
     pub system_audio: bool,
     #[serde(default)]
     pub transcribe_meetings_after_stop: bool,
+    #[serde(default)]
+    pub analyze_meetings_after_stop: bool,
+}
+impl AudioPreferences {
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        if self
+            .microphone_uid
+            .as_ref()
+            .is_some_and(|uid| uid.trim().is_empty())
+        {
+            return Err(ValidationError("microphone UID cannot be blank".into()));
+        }
+        if self.analyze_meetings_after_stop && !self.transcribe_meetings_after_stop {
+            return Err(ValidationError(
+                "speaker analysis after Stop requires local transcription".into(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 pub mod reconciliation;

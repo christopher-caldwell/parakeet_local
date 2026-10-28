@@ -19,3 +19,5 @@ On an isolated application snapshot, the actual release CLI read all ten origina
 Private receipts are in `.local/repair-pass/`. The personal library has not yet been migrated or reprocessed by this pass; its schema-5 backup/state remains available. The new projection requires an explicit schema-6 migration before using ordinary library reads in this build. The following integrated-workflow pass will test and apply that transition with a backup.
 
 Next: a durable shared meeting-analysis use case coordinating ASR, per-source diarization, clean cluster candidates and compatible identity suggestions. It can be built with existing knowledge and fixtures. Without an explicitly selected matching policy, the workflow will retain anonymous candidates and Unknown instead of inventing a personal threshold.
+
+The integrated workflow pass subsequently completed the explicit personal schema 5→6 migration after backup and isolated rehearsal. All 15 pre-existing table hashes and original-source fingerprints remained unchanged; see [verification](verification.md#integrated-meeting-and-speaker-workflow).

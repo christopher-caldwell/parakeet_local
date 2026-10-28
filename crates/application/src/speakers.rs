@@ -273,6 +273,40 @@ impl SpeakerService {
         &self,
         input: SuggestSpeakerInput,
     ) -> Result<SpeakerSuggestion, SuggestSpeakerError> {
+        self.suggest_inner(input, None, None).await
+    }
+    pub(crate) async fn suggest_for_analysis(
+        &self,
+        input: SuggestSpeakerInput,
+        model: &crate::analysis::AnalysisModel,
+        id: &str,
+    ) -> Result<SpeakerSuggestion, SuggestSpeakerError> {
+        if let Some(existing) = self.queries.suggestion(id).await? {
+            if existing.recording_id == input.recording_id
+                && existing.track_id == input.track_id
+                && existing.start_ms == input.start_ms
+                && existing.end_ms == input.end_ms
+                && existing.source_model.as_ref() == Some(model)
+                && json!(existing.policy) == json!(input.policy)
+            {
+                return Ok(existing);
+            }
+            return Err(ValidationError(
+                "saved suggestion does not match analysis evidence".into(),
+            )
+            .into());
+        }
+        if self.models.readiness(&model.id).await?.revision != model.revision {
+            return Err(ValidationError("analysis embedding model revision changed".into()).into());
+        }
+        self.suggest_inner(input, Some(model), Some(id)).await
+    }
+    async fn suggest_inner(
+        &self,
+        input: SuggestSpeakerInput,
+        model: Option<&crate::analysis::AnalysisModel>,
+        id: Option<&str>,
+    ) -> Result<SpeakerSuggestion, SuggestSpeakerError> {
         let recording_id = input.recording_id.as_str();
         let track_id = input.track_id.as_str();
         let start_ms = input.start_ms;
@@ -300,7 +334,11 @@ impl SpeakerService {
                 track: t.clone(),
                 start_ms,
                 end_ms,
-                model: self.models.selection().await?.embedding,
+                model: if let Some(model) = model {
+                    model.id.clone()
+                } else {
+                    self.models.selection().await?.embedding
+                },
             })
             .await?;
         let decision = suggest(
@@ -312,13 +350,14 @@ impl SpeakerService {
             &policy,
         )?;
         let receipt = SpeakerSuggestion {
-            id: new_id(),
+            id: id.map(str::to_owned).unwrap_or_else(new_id),
             recording_id: recording_id.into(),
             track_id: track_id.into(),
             start_ms,
             end_ms,
             model: e.model,
             revision: e.revision,
+            source_model: model.cloned(),
             policy,
             decision,
             created_at: now(),
@@ -426,17 +465,31 @@ impl SpeakerService {
         &self,
         recording_id: &str,
     ) -> Result<Vec<EnrollmentCandidate>, EnrollmentCandidatesError> {
+        self.candidates_inner(recording_id, None).await
+    }
+    pub(crate) async fn candidates_for_analysis(
+        &self,
+        id: &str,
+        runs: &[String],
+    ) -> Result<Vec<EnrollmentCandidate>, EnrollmentCandidatesError> {
+        self.candidates_inner(id, Some(runs)).await
+    }
+    async fn candidates_inner(
+        &self,
+        recording_id: &str,
+        run_ids: Option<&[String]>,
+    ) -> Result<Vec<EnrollmentCandidate>, EnrollmentCandidatesError> {
         let d = self
             .library
             .detail(recording_id)
             .await?
             .ok_or_else(|| EnrollmentCandidatesError::NotFound(recording_id.into()))?;
         let mut latest = std::collections::BTreeMap::new();
-        for r in d
-            .runs
-            .iter()
-            .filter(|r| r.kind == "diarization" && r.status == "completed")
-        {
+        for r in d.runs.iter().filter(|r| {
+            r.kind == "diarization"
+                && r.status == "completed"
+                && run_ids.is_none_or(|ids| ids.contains(&r.id))
+        }) {
             if let Some(track) = r.configuration["track"]["id"].as_str() {
                 latest.insert(track.to_owned(), r);
             }
@@ -494,6 +547,9 @@ impl SpeakerService {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpeakerSuggestion {
+    /// Runtime catalog identity is distinct from the embedding vector-space identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_model: Option<crate::analysis::AnalysisModel>,
     pub id: String,
     pub recording_id: String,
     pub track_id: String,

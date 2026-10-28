@@ -572,3 +572,36 @@ fn benchmark_import_respects_the_same_exclusive_storage_gate_as_library_import()
     );
     drop(guard);
 }
+#[test]
+fn analysis_is_explicit_and_all_matching_thresholds_are_required() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("absent");
+    let (code, _) = run(&root, &["meetings", "analysis", "missing"]);
+    assert_ne!(code, 0);
+    assert!(!root.exists());
+    let (code, error) = run(
+        &root,
+        &["meetings", "analyze", "missing", "--minimum-score", "0.9"],
+    );
+    assert_eq!(code, 2);
+    assert_eq!(error["error"]["kind"], "invalid_arguments");
+    assert!(!root.exists());
+    assert_eq!(run(&root, &["db", "create"]).0, 0);
+    assert_eq!(run(&root, &["db", "migrate"]).0, 0);
+    let (code, preferences) = run(&root, &["capture", "settings"]);
+    assert_eq!(code, 0);
+    assert_eq!(preferences["data"]["analyze_meetings_after_stop"], false);
+    let (code, preferences) = run(
+        &root,
+        &["capture", "settings", "--analyze-after-stop", "true"],
+    );
+    assert_eq!(code, 0);
+    assert_eq!(preferences["data"]["transcribe_meetings_after_stop"], true);
+    assert_eq!(preferences["data"]["analyze_meetings_after_stop"], true);
+    let (code, preferences) = run(
+        &root,
+        &["capture", "settings", "--transcribe-after-stop", "false"],
+    );
+    assert_eq!(code, 0);
+    assert_eq!(preferences["data"]["analyze_meetings_after_stop"], false);
+}

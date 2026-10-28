@@ -119,7 +119,7 @@ impl ProcessingService {
         }
     }
     pub async fn run(&self, request: RunProcessingInput) -> Result<ProcessingRun, ProcessingError> {
-        self.run_inner(request, None, None, None).await
+        self.run_inner(request, None, None, None, None).await
     }
     pub(crate) async fn run_meeting(
         &self,
@@ -132,8 +132,19 @@ impl ProcessingService {
             None,
             Some((finalization_id, expected_revision)),
             None,
+            None,
         )
         .await
+    }
+    pub(crate) async fn run_analysis(
+        &self,
+        request: RunProcessingInput,
+        id: &str,
+        revision: &str,
+        group: Option<&PublicationGroup>,
+    ) -> Result<ProcessingRun, ProcessingError> {
+        self.run_inner(request, None, None, group, Some((id, revision)))
+            .await
     }
     async fn run_inner(
         &self,
@@ -141,6 +152,7 @@ impl ProcessingService {
         retry_of: Option<&ProcessingRun>,
         finalization: Option<(&str, &str)>,
         publication_group: Option<&PublicationGroup>,
+        analysis: Option<(&str, &str)>,
     ) -> Result<ProcessingRun, ProcessingError> {
         if request.model == "selected-asr" || request.model == "selected-diarization" {
             let selected = self.models.selection().await?;
@@ -204,6 +216,7 @@ impl ProcessingService {
         }
         if retry_of.is_some_and(|old| old.model_revision != model.revision)
             || finalization.is_some_and(|(_, revision)| revision != model.revision)
+            || analysis.is_some_and(|(_, revision)| revision != model.revision)
         {
             return Err(ProcessingError::Conflict("model revision changed; start an explicit new transcription instead of retrying old settings".into()));
         }
@@ -239,7 +252,7 @@ impl ProcessingService {
             status: "running".into(),
             started_at: now(),
             completed_at: None,
-            configuration: json!({"request":request,"track":track,"receipt":receipt(),"ownership_protocol":OWNERSHIP_PROTOCOL,"control_protocol":CONTROL_PROTOCOL,"cancellation_mode":self.engine.cancellation_mode(&request.model),"retry_of_run_id":retry_of.map(|r| &r.id),"meeting_finalization_id":finalization.map(|(id,_)|id),"publication_group":publication_group}),
+            configuration: json!({"request":request,"track":track,"receipt":receipt(),"ownership_protocol":OWNERSHIP_PROTOCOL,"control_protocol":CONTROL_PROTOCOL,"cancellation_mode":self.engine.cancellation_mode(&request.model),"retry_of_run_id":retry_of.map(|r| &r.id),"meeting_finalization_id":finalization.map(|(id,_)|id),"publication_group":publication_group,"meeting_analysis_id":analysis.map(|(id,_)|id)}),
             result: Value::Null,
             error: None,
         };
@@ -438,6 +451,9 @@ impl ProcessingService {
                 Some(&prior),
                 meeting_id.map(|id| (id, prior.model_revision.as_str())),
                 publication_group.as_ref(),
+                prior.configuration["meeting_analysis_id"]
+                    .as_str()
+                    .map(|id| (id, prior.model_revision.as_str())),
             )
             .await?)
     }
@@ -551,6 +567,7 @@ impl ProcessingService {
                     None,
                     None,
                     Some(&group),
+                    None,
                 )
                 .await
             {

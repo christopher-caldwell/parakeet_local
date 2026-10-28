@@ -1,0 +1,62 @@
+{
+  "date": "2026-10-27",
+  "scope": "integrated local meeting analysis; diagnostic outputs, not an accuracy benchmark",
+  "public_fixture": {
+    "dataset": "public jfk + VoxConverse whmpa; synthetic two-source fixture, not a real conversation",
+    "sources": 2,
+    "source_offsets_ms": [
+      0,
+      1250
+    ],
+    "completed_initial_runs": 4,
+    "total_runs_after_new_analysis": 6,
+    "clean_candidates": 1,
+    "identity_comparisons": 1,
+    "all_comparisons_unknown": true,
+    "verified_examples_unchanged": true,
+    "title_override_preserved": true,
+    "current_transcript_segments": 20,
+    "anonymous_wall_seconds": 3.941852250005468,
+    "idempotent_wall_seconds": 0.014820874996075872,
+    "new_analysis_and_matching_wall_seconds": 1.4392466670033173,
+    "parent_peak_rss_bytes": [
+      517799936,
+      427311104
+    ],
+    "model_accuracy_claim": false,
+    "new_hardware_claim": false
+  },
+  "retained_recording_diagnostic": {
+    "original_meetings_diagnosed": 1,
+    "recording_duration_ms": 764941,
+    "sources": 2,
+    "source_offsets_ms": [
+      0,
+      2884
+    ],
+    "source_runs_completed": 4,
+    "clean_candidate_count": 2,
+    "transcript_segments": 226,
+    "wall_seconds": 42.917453624999325,
+    "matching_requested": false,
+    "verified_examples_unchanged": true,
+    "title_override_preserved": true,
+    "accuracy_ground_truth_available": false,
+    "isolated_destination": true
+  },
+  "verification": {
+    "workspace_tests_passed": 120,
+    "simulated_inference_real_adapter_tests_added": 12,
+    "cli_contract_tests_added": 1,
+    "microphone_capture_tested": false,
+    "physical_keyboard_tested": false,
+    "M3_tested": false,
+    "remote_AI_used": false
+  },
+  "limitations": [
+    "Single observations; not repeat-trial throughput guarantees",
+    "CLI RSS excludes complete native helper/process-tree accounting",
+    "Personal outputs have no new verified speaker-turn ground truth",
+    "Candidate eligibility is heuristic, not measured acoustic confidence"
+  ]
+}

@@ -834,3 +834,5 @@ impl PlaybackService {
 pub mod storage;
 
 pub mod cleanup;
+
+pub mod analysis;

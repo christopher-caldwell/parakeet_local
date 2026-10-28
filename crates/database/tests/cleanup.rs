@@ -325,6 +325,7 @@ async fn fresh_policy_references_and_missing_sources_block_stale_reviews() {
             _ => {
                 use parakeet_application::meeting::MeetingFinalizationWrites;
                 let plan = parakeet_application::meeting::MeetingFinalization {
+                    speaker_analysis: None,
                     version: 1,
                     id: uuid::Uuid::new_v4().to_string(),
                     recording_id: "r".into(),

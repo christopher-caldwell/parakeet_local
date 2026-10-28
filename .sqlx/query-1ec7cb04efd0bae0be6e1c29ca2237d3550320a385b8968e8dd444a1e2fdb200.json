@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE recordings SET metadata=json_set(\n CASE WHEN json_extract(metadata,'$.meeting_analysis.id') IS NOT NULL\n AND json_extract(metadata,'$.meeting_analysis.id')!=json_extract(?3,'$.id')\n THEN json_insert(json_set(metadata,'$.analysis_history',json(coalesce(json_extract(metadata,'$.analysis_history'),'[]'))),'$.analysis_history[#]',json_extract(metadata,'$.meeting_analysis'))\n ELSE metadata END,\n '$.meeting_analysis',json(?3))\nWHERE id=?1 AND json_type(metadata)='object'\nAND json_extract(metadata,'$.meeting_analysis') IS json(?2)\n",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "1ec7cb04efd0bae0be6e1c29ca2237d3550320a385b8968e8dd444a1e2fdb200"
+}
