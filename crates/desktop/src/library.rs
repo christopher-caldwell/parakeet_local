@@ -1233,44 +1233,46 @@ impl Workbench {
                 .child(div().flex().flex_wrap().gap_2()
                     .child(primary("transcribe-source","Transcribe source").disabled(!track.available||self.pending>0).on_click(cx.listener(|this,_,_,cx|this.process(false,false,cx))))
                     .child(button("diarize-source","Detect speakers").disabled(!track.available||self.pending>0).on_click(cx.listener(|this,_,_,cx|this.process(true,false,cx))))
-                    .child(quiet("identify-voices","Name voices").on_click(cx.listener(|this,_,_,cx|this.open_voices(cx))))
-                    .child(quiet("review-source-clusters","Review voice groups").on_click(cx.listener(|this,_,_,cx|{this.speaker_mode=SpeakerMode::Clusters;this.navigate(Area::Speakers,cx);this.inspect_clusters(cx);}))))
+                    .child(button("identify-voices","Name voices").on_click(cx.listener(|this,_,_,cx|this.open_voices(cx))))
+                    .child(button("review-source-clusters","Review voice groups").on_click(cx.listener(|this,_,_,cx|{this.speaker_mode=SpeakerMode::Clusters;this.navigate(Area::Speakers,cx);this.inspect_clusters(cx);}))))
                 .child(caption("Processing creates a new result. Existing audio, title, and corrections are retained.")));
+            if self.show_status_details {
+                view = view.child(
+                    div()
+                        .mt_3()
+                        .p_4()
+                        .rounded_lg()
+                        .bg(rgb(PANEL))
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .child(
+                            div()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child("Listen to an interval"),
+                        )
+                        .child(caption(
+                            "Track-local milliseconds · choose up to 30 seconds",
+                        ))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_wrap()
+                                .items_center()
+                                .gap_2()
+                                .child(caption("Start"))
+                                .child(field(&self.start).w(px(110.)))
+                                .child(caption("End"))
+                                .child(field(&self.end).w(px(110.)))
+                                .child(
+                                    button("play-interval", "Play clip")
+                                        .on_click(cx.listener(|this, _, _, cx| this.play(cx))),
+                                ),
+                        ),
+                );
+            }
             view = view.child(
-                div()
-                    .mt_3()
-                    .p_4()
-                    .rounded_lg()
-                    .bg(rgb(PANEL))
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .child(
-                        div()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child("Listen to an interval"),
-                    )
-                    .child(caption(
-                        "Track-local milliseconds · choose up to 30 seconds",
-                    ))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_wrap()
-                            .items_center()
-                            .gap_2()
-                            .child(caption("Start"))
-                            .child(field(&self.start).w(px(110.)))
-                            .child(caption("End"))
-                            .child(field(&self.end).w(px(110.)))
-                            .child(
-                                button("play-interval", "Play clip")
-                                    .on_click(cx.listener(|this, _, _, cx| this.play(cx))),
-                            ),
-                    ),
-            );
-            view = view.child(
-                quiet(
+                button(
                     "audio-locations",
                     if self.show_location_tools {
                         "Hide file details"
@@ -1293,10 +1295,12 @@ impl Workbench {
                     .child(div().flex().flex_wrap().gap_2().child(button("check-replacement","Check replacement").on_click(cx.listener(|this,_,_,cx|this.relink_audio(true,cx))))
                         .child(button("relink-audio","Relink audio").on_click(cx.listener(|this,_,_,cx|this.relink_audio(false,cx))))));
             }
-            view=view.child(div().mt_3().p_4().rounded_lg().border_1().border_color(rgb(BORDER)).flex().flex_col().gap_2()
+            if self.show_status_details {
+                view=view.child(div().mt_3().p_4().rounded_lg().border_1().border_color(rgb(BORDER)).flex().flex_col().gap_2()
                 .child(div().font_weight(FontWeight::SEMIBOLD).child("Experimental word timing"))
                 .child(caption("Whisper can retain estimated word times for speaker review. These estimates are not verified alignments."))
                 .child(button("transcribe-estimated-words","Transcribe with word estimates").disabled(!track.available||self.pending>0).on_click(cx.listener(|this,_,_,cx|this.process(false,true,cx)))));
+            }
         }
         div()
             .id("recording-audio")
@@ -1384,12 +1388,7 @@ impl Workbench {
                 _ => WARNING,
             };
             view = view.child(
-                div()
-                    .p_4()
-                    .rounded_lg()
-                    .bg(rgb(PANEL))
-                    .flex()
-                    .flex_col()
+                panel()
                     .gap_2()
                     .child(
                         div()
@@ -1400,21 +1399,27 @@ impl Workbench {
                                 div()
                                     .flex_1()
                                     .font_weight(FontWeight::SEMIBOLD)
-                                    .child(run.model.clone()),
+                                    .child(ui::model_name(&run.model).to_owned()),
                             )
                             .child(pill(run.status.clone(), color)),
                     )
                     .child(caption(format!(
                         "{} · {}{}",
                         date_label(&run.started_at),
-                        run.kind,
+                        match run.kind.as_str() {
+                            "diarization" => "Speaker detection",
+                            "transcription" | "asr" => "Transcription",
+                            other => other,
+                        },
                         if run.configuration["human_edit"].is_object() {
                             " · Manual cluster edit"
                         } else {
                             ""
                         }
                     )))
-                    .child(caption(format!("Run {}", run.id)))
+                    .when(self.show_status_details, |card| {
+                        card.child(caption(format!("Run {}", run.id)))
+                    })
                     .when(run.result["metrics"]["resume"]["status"] == "reused", |row| {
                         let resume=&run.result["metrics"]["resume"];
                         row.child(caption(format!("Reused {} saved chunks · {} audio · {} new inference chunks",resume["reused_chunks"].as_u64().unwrap_or(0),time_label(resume["reused_audio_ms"].as_i64()),run.result["metrics"]["inference_chunks"].as_u64().unwrap_or(0))))

@@ -120,6 +120,18 @@ pub fn panel() -> Div {
         .flex_col()
         .gap_3()
 }
+/// A small bordered pill-button for picking one of several short names.
+pub fn chip(id: impl Into<ElementId>, label: impl Into<SharedString>, selected: bool) -> Button {
+    button_base(id, label)
+        .rounded_full()
+        .px_3()
+        .py_1()
+        .min_h(px(26.))
+        .border_color(rgb(if selected { ACCENT } else { BORDER }))
+        .bg(rgb(if selected { SELECTED } else { ELEVATED }))
+        .aria_selected(selected)
+        .hover(|s| s.bg(rgb(0x353b46)))
+}
 /// A titled block with an action at its right edge, aligned to the title.
 pub fn group_action(
     title: impl Into<SharedString>,

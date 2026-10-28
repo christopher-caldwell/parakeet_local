@@ -365,7 +365,7 @@ impl Workbench {
                 let id = person.id.clone();
                 let name = person.name.clone();
                 people = people.child(
-                    choice(
+                    chip(
                         ("train-person", people_key(&person.id)),
                         person.name.clone(),
                         self.train_person.as_ref() == Some(&person.id),
@@ -405,16 +405,18 @@ impl Workbench {
                                 }),
                             ),
                     )
-                    .child(quiet("train-skip", "Skip this voice").on_click(cx.listener(
-                        move |this, _, window, cx| {
-                            this.set_voices_skipped(vec![skip.clone()], true, cx);
-                            this.train_person = None;
-                            this.train_hint = None;
-                            this.person_name
-                                .update(cx, |input, cx| input.set_value("", window, cx));
-                            cx.notify();
-                        },
-                    )))
+                    .child(
+                        button("train-skip", "Skip this voice").on_click(cx.listener(
+                            move |this, _, window, cx| {
+                                this.set_voices_skipped(vec![skip.clone()], true, cx);
+                                this.train_person = None;
+                                this.train_hint = None;
+                                this.person_name
+                                    .update(cx, |input, cx| input.set_value("", window, cx));
+                                cx.notify();
+                            },
+                        )),
+                    )
                     .when(self.waiting_voices().len() > 1, |row| {
                         row.child(
                             quiet("train-skip-rest", "Skip all remaining voices").on_click(

@@ -907,7 +907,7 @@ impl Workbench {
         }
         view = view.child(rows);
         view.child(
-            quiet(
+            button(
                 "toggle-ai-routes",
                 if self.show_ai_routes {
                     "Hide advanced: AI cleanup of dictated text"
