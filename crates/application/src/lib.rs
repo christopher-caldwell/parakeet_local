@@ -58,8 +58,11 @@ operation_error!(ListRecordingsError,sources{Persistence:PersistenceError=>"pers
 operation_error!(ShowRecordingError,sources{Persistence:PersistenceError=>"persistence"},values{NotFound=>"not_found"});
 operation_error!(RenameRecordingError,sources{Invalid:ValidationError=>"invalid_input",Persistence:PersistenceError=>"persistence"},values{NotFound=>"not_found"});
 operation_error!(InspectTracksError,sources{Read:ShowRecordingError=>"nested",Source:CapabilityError=>"source"},values{});
-operation_error!(ExportRecordingError,sources{Read:ShowRecordingError=>"nested"},values{});
+operation_error!(ExportTextError,sources{Read:ShowRecordingError=>"nested"},values{});
+operation_error!(ExportMarkdownError,sources{Read:ShowRecordingError=>"nested"},values{});
+operation_error!(PlanImportError,sources{Invalid:ValidationError=>"invalid_input",Source:CapabilityError=>"source"},values{});
 operation_error!(DiscoverRecordingsError,sources{Source:CapabilityError=>"source"},values{});
+operation_error!(InspectMediaError,sources{Source:CapabilityError=>"source"},values{});
 operation_error!(MediaImportError,sources{Source:CapabilityError=>"source",Persistence:PersistenceError=>"persistence"},values{});
 operation_error!(ImportLegacyError,sources{Source:CapabilityError=>"source",Persistence:PersistenceError=>"persistence"},values{});
 #[derive(Debug, Clone)]
@@ -333,7 +336,7 @@ impl LibraryService {
         }
         Ok(())
     }
-    pub async fn export_markdown(&self, id: &str) -> Result<String, ExportRecordingError> {
+    pub async fn export_markdown(&self, id: &str) -> Result<String, ExportMarkdownError> {
         let d = self.show(id).await?;
         let mut text = format!(
             "# {}\n\nRecording: {}\n\n",
@@ -355,7 +358,7 @@ impl LibraryService {
         }
         Ok(text)
     }
-    pub async fn export_text(&self, id: &str) -> Result<String, ExportRecordingError> {
+    pub async fn export_text(&self, id: &str) -> Result<String, ExportTextError> {
         let detail = self.show(id).await?;
         Ok(detail
             .segments
@@ -525,7 +528,7 @@ impl DiscoveryService {
     pub fn new(source: Arc<dyn RecordingSource>) -> Self {
         Self { source }
     }
-    pub async fn plan_import(&self, path: &Path) -> Result<ImportReport, ImportRecordingsError> {
+    pub async fn plan_import(&self, path: &Path) -> Result<ImportReport, PlanImportError> {
         let discovery = inspect_import_source(self.source.as_ref(), path).await?;
         let mut report = ImportReport {
             imported: 0,
@@ -568,8 +571,8 @@ impl MediaService {
             queries,
         }
     }
-    pub async fn inspect(&self, url: &str) -> Result<Value, CapabilityError> {
-        self.media.inspect(url).await
+    pub async fn inspect(&self, url: &str) -> Result<Value, InspectMediaError> {
+        Ok(self.media.inspect(url).await?)
     }
     pub async fn import(&self, url: &str) -> Result<Recording, MediaImportError> {
         let bundle = self.media.download(url).await?;

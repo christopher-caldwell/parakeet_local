@@ -50,7 +50,8 @@ pub struct ScoreDiarizationInput {
     pub collar_ms: i64,
     pub score_overlap: bool,
 }
-operation_error!(ScoreEvaluationError,sources{Source:CapabilityError=>"source",Invalid:ValidationError=>"invalid_input"},values{});
+operation_error!(ScoreDiarizationError,sources{Source:CapabilityError=>"source",Invalid:ValidationError=>"invalid_input"},values{});
+operation_error!(ScoreSpeakerWordsError,sources{Source:CapabilityError=>"source",Invalid:ValidationError=>"invalid_input"},values{});
 pub struct ScoringService {
     reader: Arc<dyn ScoringInputReader>,
 }
@@ -61,7 +62,7 @@ impl ScoringService {
     pub async fn diarization(
         &self,
         input: ScoreDiarizationInput,
-    ) -> Result<parakeet_domain::evaluation::DiarizationScore, ScoreEvaluationError> {
+    ) -> Result<parakeet_domain::evaluation::DiarizationScore, ScoreDiarizationError> {
         let reference = self.reader.intervals(&input.reference).await?;
         let prediction = self.reader.intervals(&input.prediction).await?;
         Ok(parakeet_domain::evaluation::score_diarization(
@@ -74,7 +75,7 @@ impl ScoringService {
     pub async fn speaker_words(
         &self,
         input: ScoreSpeakerWordsInput,
-    ) -> Result<SpeakerWordsReport, ScoreEvaluationError> {
+    ) -> Result<SpeakerWordsReport, ScoreSpeakerWordsError> {
         let reference = self.reader.speaker_transcript(&input.reference).await?;
         let prediction = self.reader.speaker_transcript(&input.prediction).await?;
         let r = reference.transcript;

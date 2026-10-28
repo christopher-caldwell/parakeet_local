@@ -279,7 +279,7 @@ impl AudioCapture for NativeBridge {
     }
     async fn record(
         &self,
-        request: &CaptureRequest,
+        request: &CaptureRecordingInput,
         stop: Arc<AtomicBool>,
     ) -> Result<ImportBundle, CapabilityError> {
         tokio::fs::create_dir_all(&self.root)

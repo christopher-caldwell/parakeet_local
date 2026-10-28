@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT id, source_key, source_kind, source_title, title_override, created_at, duration_ms, metadata FROM recordings\nWHERE ?1 IS NULL OR instr(lower(COALESCE(title_override,source_title)),lower(?1))>0 OR id IN (SELECT recording_id FROM segments WHERE instr(lower(json_extract(data,'$.text')),lower(?1))>0)\nORDER BY created_at DESC,id\n",
+  "query": "SELECT id, source_key, source_kind, source_title, title_override, created_at, duration_ms, metadata FROM recordings\nWHERE ?1 IS NULL OR instr(lower(COALESCE(title_override,source_title)),lower(?1))>0\n OR id IN (\n SELECT s.recording_id FROM current_transcript_segments s\n -- Every correction publication stores the effective text snapshot, including\n -- inherited text on identity changes and the prior text on Undo.\n LEFT JOIN corrections c ON c.sequence=(SELECT MAX(n.sequence) FROM corrections n WHERE n.segment_id=s.id)\n WHERE instr(lower(coalesce(json_extract(c.data,'$.replacement_text'),json_extract(s.data,'$.text'))),lower(?1))>0\n )\nORDER BY created_at DESC,id\n",
   "describe": {
     "columns": [
       {
@@ -58,5 +58,5 @@
       false
     ]
   },
-  "hash": "63a9137a76eba471d0e2078b601e476dac4721aad3c62c4077f49413518fa09d"
+  "hash": "a0a1fc08fda60eaaab1fef32d6bcfb9893195ff0aa0538b2784a4fd466c83faa"
 }

@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 pub struct NemotronJob<'a> {
     pub runtime: &'a tokio::runtime::Handle,
     pub models: &'a ModelFiles,
-    pub request: &'a ProcessRequest,
+    pub request: &'a RunProcessingInput,
     pub track: &'a AudioTrack,
     pub run: &'a ProcessingRun,
     pub duration: i64,

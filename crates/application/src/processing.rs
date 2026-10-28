@@ -20,7 +20,7 @@ pub enum ProcessingError {
     Engine(#[from] CapabilityError),
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProcessRequest {
+pub struct RunProcessingInput {
     pub recording_id: String,
     pub track_id: String,
     pub model: String,
@@ -43,7 +43,7 @@ pub trait SpeechProcessing: Send + Sync {
     }
     async fn process_controlled(
         &self,
-        request: &ProcessRequest,
+        request: &RunProcessingInput,
         track: &AudioTrack,
         run: &ProcessingRun,
         _control: ProcessingControl,
@@ -52,7 +52,7 @@ pub trait SpeechProcessing: Send + Sync {
     }
     async fn process(
         &self,
-        request: &ProcessRequest,
+        request: &RunProcessingInput,
         track: &AudioTrack,
         run: &ProcessingRun,
     ) -> Result<EngineOutput, CapabilityError>;
@@ -84,6 +84,11 @@ pub trait RunWrites: Send + Sync {
         segments: &[TranscriptSegment],
     ) -> Result<(), PersistenceError>;
 }
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PublicationGroup {
+    pub id: String,
+    pub track_ids: Vec<String>,
+}
 pub struct ProcessingService {
     queries: Arc<dyn LibraryQueries>,
     writes: Arc<dyn RunWrites>,
@@ -113,23 +118,29 @@ impl ProcessingService {
             control_writes,
         }
     }
-    pub async fn run(&self, request: ProcessRequest) -> Result<ProcessingRun, ProcessingError> {
-        self.run_inner(request, None, None).await
+    pub async fn run(&self, request: RunProcessingInput) -> Result<ProcessingRun, ProcessingError> {
+        self.run_inner(request, None, None, None).await
     }
     pub(crate) async fn run_meeting(
         &self,
-        request: ProcessRequest,
+        request: RunProcessingInput,
         finalization_id: &str,
         expected_revision: &str,
     ) -> Result<ProcessingRun, ProcessingError> {
-        self.run_inner(request, None, Some((finalization_id, expected_revision)))
-            .await
+        self.run_inner(
+            request,
+            None,
+            Some((finalization_id, expected_revision)),
+            None,
+        )
+        .await
     }
     async fn run_inner(
         &self,
-        mut request: ProcessRequest,
+        mut request: RunProcessingInput,
         retry_of: Option<&ProcessingRun>,
         finalization: Option<(&str, &str)>,
+        publication_group: Option<&PublicationGroup>,
     ) -> Result<ProcessingRun, ProcessingError> {
         if request.model == "selected-asr" || request.model == "selected-diarization" {
             let selected = self.models.selection().await?;
@@ -202,6 +213,18 @@ impl ProcessingService {
             )
             .into());
         }
+        let meeting_group = if let Some((id, _)) = finalization {
+            Some(PublicationGroup {
+                id: id.into(),
+                track_ids: serde_json::from_value(
+                    d.recording.metadata["meeting_finalization"]["track_ids"].clone(),
+                )
+                .map_err(|e| ValidationError(format!("invalid expected meeting sources: {e}")))?,
+            })
+        } else {
+            None
+        };
+        let publication_group = publication_group.or(meeting_group.as_ref());
         let mut run = ProcessingRun {
             id: new_id(),
             recording_id: request.recording_id.clone(),
@@ -216,7 +239,7 @@ impl ProcessingService {
             status: "running".into(),
             started_at: now(),
             completed_at: None,
-            configuration: json!({"request":request,"track":track,"receipt":receipt(),"ownership_protocol":OWNERSHIP_PROTOCOL,"control_protocol":CONTROL_PROTOCOL,"cancellation_mode":self.engine.cancellation_mode(&request.model),"retry_of_run_id":retry_of.map(|r| &r.id),"meeting_finalization_id":finalization.map(|(id,_)|id)}),
+            configuration: json!({"request":request,"track":track,"receipt":receipt(),"ownership_protocol":OWNERSHIP_PROTOCOL,"control_protocol":CONTROL_PROTOCOL,"cancellation_mode":self.engine.cancellation_mode(&request.model),"retry_of_run_id":retry_of.map(|r| &r.id),"meeting_finalization_id":finalization.map(|(id,_)|id),"publication_group":publication_group}),
             result: Value::Null,
             error: None,
         };
@@ -390,7 +413,7 @@ impl ProcessingService {
         if !["failed", "interrupted"].contains(&prior.status.as_str()) {
             return Err(RetryProcessingError::Conflict("only failed or interrupted runs can be retried; recover an abandoned running job first".into()));
         }
-        let mut request: ProcessRequest = serde_json::from_value(prior.configuration["request"].clone())
+        let mut request: RunProcessingInput = serde_json::from_value(prior.configuration["request"].clone())
             .map_err(|_| RetryProcessingError::Invalid("this run has no reproducible speech request; cluster edits must be repeated explicitly".into()))?;
         request.model = prior.model.clone();
         if request.recording_id != prior.recording_id {
@@ -399,11 +422,22 @@ impl ProcessingService {
             ));
         }
         let meeting_id = prior.configuration["meeting_finalization_id"].as_str();
+        let publication_group: Option<PublicationGroup> = prior
+            .configuration
+            .get("publication_group")
+            .filter(|v| !v.is_null())
+            .cloned()
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|e| {
+                RetryProcessingError::Invalid(format!("invalid publication group: {e}"))
+            })?;
         Ok(self
             .run_inner(
                 request,
                 Some(&prior),
                 meeting_id.map(|id| (id, prior.model_revision.as_str())),
+                publication_group.as_ref(),
             )
             .await?)
     }
@@ -418,8 +452,12 @@ pub enum TranscribeRecordingError {
     NotFound(String),
     #[error("{0}")]
     Unavailable(String),
-    #[error("{0}")]
-    Incomplete(String),
+    #[error("recording {recording_id} transcription is incomplete; retained source results")]
+    Incomplete {
+        recording_id: String,
+        completed_run_ids: Vec<String>,
+        failures: Vec<SourceProcessingFailure>,
+    },
 }
 impl TranscribeRecordingError {
     pub fn kind(&self) -> &'static str {
@@ -429,7 +467,26 @@ impl TranscribeRecordingError {
             Self::Processing(_) => "nested",
             Self::NotFound(_) => "not_found",
             Self::Unavailable(_) => "source",
-            Self::Incomplete(_) => "processing",
+            Self::Incomplete { .. } => "processing",
+        }
+    }
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SourceProcessingFailure {
+    pub track_id: String,
+    pub error: String,
+}
+impl TranscribeRecordingError {
+    pub fn retained(&self) -> Option<Value> {
+        match self {
+            Self::Incomplete {
+                recording_id,
+                completed_run_ids,
+                failures,
+            } => Some(
+                json!({"recording_id":recording_id,"completed_run_ids":completed_run_ids,"failures":failures}),
+            ),
+            _ => None,
         }
     }
 }
@@ -462,28 +519,57 @@ impl ProcessingService {
             ));
         }
         let mut results = vec![];
-        let mut failures = vec![];
+        let mut failures: Vec<SourceProcessingFailure> = d
+            .tracks
+            .iter()
+            .filter(|t| t.kind != TrackKind::Playback && !t.available)
+            .map(|t| SourceProcessingFailure {
+                track_id: t.id.clone(),
+                error: "authoritative source unavailable".into(),
+            })
+            .collect();
+        let group = PublicationGroup {
+            id: new_id(),
+            track_ids: d
+                .tracks
+                .iter()
+                .filter(|t| t.kind != TrackKind::Playback)
+                .map(|t| t.id.clone())
+                .collect(),
+        };
         for track in tracks {
             match self
-                .run(ProcessRequest {
-                    recording_id: id.into(),
-                    track_id: track.id.clone(),
-                    model: model.into(),
-                    start_ms: 0,
-                    duration_ms: None,
-                    word_timestamps: false,
-                })
+                .run_inner(
+                    RunProcessingInput {
+                        recording_id: id.into(),
+                        track_id: track.id.clone(),
+                        model: model.into(),
+                        start_ms: 0,
+                        duration_ms: None,
+                        word_timestamps: false,
+                    },
+                    None,
+                    None,
+                    Some(&group),
+                )
                 .await
             {
                 Ok(run) => results.push(run),
                 Err(error @ ProcessingError::Cancelled(_)) => {
                     return Err(TranscribeRecordingError::Processing(error));
                 }
-                Err(error) => failures.push(json!({"track_id":track.id,"error":error.to_string()})),
+                Err(error) => failures.push(SourceProcessingFailure {
+                    track_id: track.id.clone(),
+                    error: error.to_string(),
+                }),
             }
         }
         if !failures.is_empty() {
-            return Err(TranscribeRecordingError::Incomplete(json!({"recording_id":id,"completed_run_ids":results.iter().map(|r|r.id.as_str()).collect::<Vec<_>>(),"failures":failures,"evidence":"all source results remain in recording history"}).to_string()));
+            return Err(TranscribeRecordingError::Incomplete {
+                recording_id: id.into(),
+                completed_run_ids: results.iter().map(|r| r.id.clone()).collect(),
+                failures,
+            });
         }
         Ok(results)
     }

@@ -1,5 +1,5 @@
 use super::*;
-use crate::processing::{ProcessRequest, ProcessingService};
+use crate::processing::{ProcessingService, RunProcessingInput};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EvaluationEntry {
     pub id: String,
@@ -93,7 +93,7 @@ impl EvaluationService {
             let track = &bundle.tracks[0];
             let hash = self.artifacts.fingerprint(Path::new(&entry.audio)).await?;
             for model in &suite.models {
-                let request = ProcessRequest {
+                let request = RunProcessingInput {
                     recording_id: bundle.recording.id.clone(),
                     track_id: track.id.clone(),
                     model: model.clone(),

@@ -144,6 +144,11 @@ operation_error!(InspectStorageError,sources{Persistence:PersistenceError=>"pers
 operation_error!(ReadRetentionPolicyError,sources{Persistence:PersistenceError=>"persistence"},values{});
 operation_error!(SaveRetentionPolicyError,sources{Persistence:PersistenceError=>"persistence",Invalid:ValidationError=>"invalid_input"},values{Conflict=>"conflict"});
 operation_error!(PreviewRetentionError,sources{Persistence:PersistenceError=>"persistence",Inspection:CapabilityError=>"storage",Invalid:ValidationError=>"invalid_input"},values{});
+#[derive(Debug, Clone)]
+pub struct SaveRetentionPolicyInput {
+    pub policy: RetentionPolicy,
+    pub expected_revision: u64,
+}
 pub struct StorageService {
     queries: Arc<dyn StorageQueries>,
     writes: Arc<dyn StoragePolicyWrites>,
@@ -166,9 +171,12 @@ impl StorageService {
     }
     pub async fn save_policy(
         &self,
-        policy: RetentionPolicy,
-        expected_revision: u64,
+        input: SaveRetentionPolicyInput,
     ) -> Result<RetentionPolicySnapshot, SaveRetentionPolicyError> {
+        let SaveRetentionPolicyInput {
+            policy,
+            expected_revision,
+        } = input;
         policy.validate()?;
         if expected_revision >= i64::MAX as u64 {
             return Err(ValidationError("policy revision is out of range".into()).into());

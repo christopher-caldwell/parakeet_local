@@ -28,7 +28,7 @@ async fn real_model_reuse_verification_and_idle_expiry() {
     let bundle = MacParakeetArtifacts.import_file(&audio).await.unwrap();
     let track = &bundle.tracks[0];
     let engine = LocalSpeech::new(models.clone(), PathBuf::from("unused-native-helper"));
-    let request = ProcessRequest {
+    let request = RunProcessingInput {
         recording_id: bundle.recording.id.clone(),
         track_id: track.id.clone(),
         model: "whisper-base.en".into(),

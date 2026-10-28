@@ -1,9 +1,9 @@
 //! Durable post-capture work. Raw audio is imported before any inference begins.
 use super::*;
 use crate::{
-    capture::{CaptureRequest, CaptureService},
+    capture::{CaptureRecordingInput, CaptureService},
     jobs::ProcessingOwnership,
-    processing::{ProcessRequest, ProcessingService},
+    processing::{ProcessingService, RunProcessingInput},
 };
 use std::sync::atomic::AtomicBool;
 
@@ -153,6 +153,17 @@ pub struct RecordedMeeting {
     pub recording_id: String,
     pub finalization: Option<MeetingFinalization>,
 }
+operation_error!(ListPendingMeetingsError,sources{Persistence:PersistenceError=>"persistence",Invalid:ValidationError=>"invalid_input"},values{});
+#[derive(Debug, Clone)]
+pub struct RecordMeetingInput {
+    pub capture: CaptureRecordingInput,
+    pub transcribe_after_stop: bool,
+}
+#[derive(Debug, Clone)]
+pub struct FinalizeMeetingInput {
+    pub id: String,
+    pub model: Option<String>,
+}
 pub struct MeetingService {
     capture: Arc<CaptureService>,
     queries: Arc<dyn LibraryQueries>,
@@ -205,10 +216,13 @@ impl MeetingService {
     }
     pub async fn record(
         &self,
-        mut request: CaptureRequest,
-        transcribe_after_stop: bool,
+        input: RecordMeetingInput,
         stop: Arc<AtomicBool>,
     ) -> Result<RecordedMeeting, RecordMeetingError> {
+        let RecordMeetingInput {
+            capture: mut request,
+            transcribe_after_stop,
+        } = input;
         request
             .validate()
             .map_err(crate::capture::CaptureRecordingError::Invalid)?;
@@ -220,12 +234,17 @@ impl MeetingService {
         let bundle = self.capture.record(request, stop).await?;
         let recording_id = bundle.recording.id;
         let finalization = if transcribe_after_stop {
-            Some(self.finalize(&recording_id, None).await.map_err(|source| {
-                RecordMeetingError::Finalization {
+            Some(
+                self.finalize(crate::meeting::FinalizeMeetingInput {
+                    id: recording_id.to_string(),
+                    model: None,
+                })
+                .await
+                .map_err(|source| RecordMeetingError::Finalization {
                     recording_id: recording_id.clone(),
                     source,
-                }
-            })?)
+                })?,
+            )
         } else {
             None
         };
@@ -234,7 +253,7 @@ impl MeetingService {
             finalization,
         })
     }
-    pub async fn pending(&self) -> Result<Vec<MeetingFinalization>, FinalizeMeetingError> {
+    pub async fn pending(&self) -> Result<Vec<MeetingFinalization>, ListPendingMeetingsError> {
         let mut result = vec![];
         for recording in self.queries.list(None).await? {
             if let Some(plan) = Self::read_plan(&recording)?
@@ -245,9 +264,7 @@ impl MeetingService {
         }
         Ok(result)
     }
-    fn read_plan(
-        recording: &Recording,
-    ) -> Result<Option<MeetingFinalization>, FinalizeMeetingError> {
+    fn read_plan(recording: &Recording) -> Result<Option<MeetingFinalization>, ValidationError> {
         let Some(value) = recording
             .metadata
             .get("meeting_finalization")
@@ -259,9 +276,9 @@ impl MeetingService {
             .map_err(|e| ValidationError(format!("invalid saved finalization: {e}")))?;
         plan.validate()?;
         if plan.recording_id != recording.id {
-            return Err(
-                ValidationError("saved finalization belongs to another recording".into()).into(),
-            );
+            return Err(ValidationError(
+                "saved finalization belongs to another recording".into(),
+            ));
         }
         Ok(Some(plan))
     }
@@ -285,9 +302,10 @@ impl MeetingService {
     /// Completed correlated source runs are reused after a checkpoint interruption.
     pub async fn finalize(
         &self,
-        id: &str,
-        model: Option<&str>,
+        input: FinalizeMeetingInput,
     ) -> Result<MeetingFinalization, FinalizeMeetingError> {
+        let id = input.id.as_str();
+        let model = input.model.as_deref();
         let mut detail = self
             .queries
             .detail(id)
@@ -428,7 +446,7 @@ impl MeetingService {
                     match self
                         .processing
                         .run_meeting(
-                            ProcessRequest {
+                            RunProcessingInput {
                                 recording_id: id.into(),
                                 track_id: track_id.clone(),
                                 model: plan.model.clone(),

@@ -5,10 +5,12 @@ pub struct MacParakeetCatalog;
 #[async_trait::async_trait]
 impl LegacyCatalog for MacParakeetCatalog {
     async fn read(&self, path: &Path) -> Result<Vec<LegacySourceRecord>, CapabilityError> {
-        let pool = open_read_only(path).await.map_err(CapabilityError::new)?;
+        let pool = raw_read_only(path).await.map_err(CapabilityError::new)?;
         // Source compatibility exception: our build schema does not contain third-party tables.
+        // Source schema and rows share one read snapshot, including live WAL state.
+        let mut tx = pool.begin().await.map_err(CapabilityError::new)?;
         let columns: Vec<String> = sqlx::query("PRAGMA table_info(transcriptions)")
-            .fetch_all(&pool)
+            .fetch_all(&mut *tx)
             .await
             .map_err(CapabilityError::new)?
             .iter()
@@ -53,14 +55,16 @@ impl LegacyCatalog for MacParakeetCatalog {
             .collect::<Vec<_>>()
             .join(",");
         let query = include_str!("catalog.sql").replace("{{projection}}", &projection);
-        let mut tx = pool.begin().await.map_err(CapabilityError::new)?;
         let rows = sqlx::query(&query)
             .fetch_all(&mut *tx)
             .await
             .map_err(CapabilityError::new)?;
         let mut out = vec![];
         for row in rows {
-            let raw: Vec<u8> = row.try_get("id").map_err(CapabilityError::new)?;
+            let raw: Vec<u8> = row
+                .try_get("id")
+                .or_else(|_| row.try_get::<String, _>("id").map(String::into_bytes))
+                .map_err(CapabilityError::new)?;
             let id = if raw.len() == 16 {
                 uuid::Uuid::from_slice(&raw)
                     .map_err(CapabilityError::new)?

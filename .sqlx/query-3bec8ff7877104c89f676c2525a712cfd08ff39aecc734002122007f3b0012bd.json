@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT data FROM current_transcript_segments WHERE recording_id=?1\nORDER BY start_ms IS NULL,start_ms,ordinal,id\n",
+  "describe": {
+    "columns": [
+      {
+        "name": "data",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "3bec8ff7877104c89f676c2525a712cfd08ff39aecc734002122007f3b0012bd"
+}

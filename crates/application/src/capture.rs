@@ -1,7 +1,7 @@
 use super::*;
 use std::sync::atomic::AtomicBool;
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CaptureRequest {
+pub struct CaptureRecordingInput {
     pub microphone_uid: Option<String>,
     pub system_audio: bool,
     pub title: String,
@@ -9,7 +9,7 @@ pub struct CaptureRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub final_transcription: Option<crate::meeting::MeetingFinalization>,
 }
-impl CaptureRequest {
+impl CaptureRecordingInput {
     pub fn validate(&self) -> Result<(), ValidationError> {
         Recording::validate_title(&self.title)?;
         if let Some(plan) = &self.final_transcription {
@@ -42,7 +42,7 @@ pub trait AudioCapture: Send + Sync {
     async fn permissions(&self) -> Result<Value, CapabilityError>;
     async fn record(
         &self,
-        request: &CaptureRequest,
+        request: &CaptureRecordingInput,
         stop: Arc<AtomicBool>,
     ) -> Result<ImportBundle, CapabilityError>;
     async fn recoverable(&self) -> Result<Value, CapabilityError>;
@@ -82,7 +82,7 @@ impl CaptureService {
     }
     pub async fn record(
         &self,
-        request: CaptureRequest,
+        request: CaptureRecordingInput,
         stop: Arc<AtomicBool>,
     ) -> Result<ImportBundle, CaptureRecordingError> {
         request.validate()?;

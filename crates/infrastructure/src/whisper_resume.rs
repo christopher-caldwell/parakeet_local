@@ -1,6 +1,8 @@
 //! Private, versioned checkpoints. Incompatible evidence causes a recorded full
 //! restart; it can never be transplanted into a different source or model.
-use parakeet_application::{CapabilityError, processing::ProcessRequest, processing_control::*};
+use parakeet_application::{
+    CapabilityError, processing::RunProcessingInput, processing_control::*,
+};
 use parakeet_domain::{AudioTrack, ProcessingRun, TranscriptSegment, stable_id};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -83,7 +85,7 @@ struct Envelope {
 #[derive(Clone, Serialize, Deserialize)]
 struct Chunk {
     runtime: String,
-    request: ProcessRequest,
+    request: RunProcessingInput,
     track: AudioTrack,
     run_id: String,
     model_revision: String,
@@ -97,7 +99,7 @@ struct Chunk {
     raw: Vec<Value>,
 }
 pub struct ChunkEvidence<'a> {
-    pub request: &'a ProcessRequest,
+    pub request: &'a RunProcessingInput,
     pub track: &'a AudioTrack,
     pub run: &'a ProcessingRun,
     pub source: &'a SourceIdentity,
@@ -164,7 +166,7 @@ pub fn retain_chunk(root: &Path, e: ChunkEvidence<'_>) -> Result<(), CapabilityE
 }
 pub struct ResumeInput<'a> {
     pub root: &'a Path,
-    pub request: &'a ProcessRequest,
+    pub request: &'a RunProcessingInput,
     pub track: &'a AudioTrack,
     pub run: &'a ProcessingRun,
     pub source: &'a SourceIdentity,
@@ -400,7 +402,7 @@ mod tests {
     use super::*;
     struct Fixture {
         tmp: tempfile::TempDir,
-        request: ProcessRequest,
+        request: RunProcessingInput,
         track: AudioTrack,
         old: ProcessingRun,
         source: SourceIdentity,
@@ -426,7 +428,7 @@ mod tests {
             let source = identify_source(&track, &ProcessingControl::default()).unwrap();
             Self {
                 tmp,
-                request: ProcessRequest {
+                request: RunProcessingInput {
                     recording_id: "recording".into(),
                     track_id: "track".into(),
                     model: "fixture".into(),

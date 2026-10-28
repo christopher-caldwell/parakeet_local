@@ -51,7 +51,7 @@ impl SpeechProcessing for LocalSpeech {
     }
     async fn process(
         &self,
-        request: &ProcessRequest,
+        request: &RunProcessingInput,
         track: &AudioTrack,
         run: &ProcessingRun,
     ) -> Result<EngineOutput, CapabilityError> {
@@ -60,7 +60,7 @@ impl SpeechProcessing for LocalSpeech {
     }
     async fn process_controlled(
         &self,
-        request: &ProcessRequest,
+        request: &RunProcessingInput,
         track: &AudioTrack,
         run: &ProcessingRun,
         control: ProcessingControl,

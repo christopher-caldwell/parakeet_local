@@ -67,7 +67,7 @@ pub trait SpeakerWrites: Send + Sync {
     ) -> Result<bool, PersistenceError>;
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Enrollment {
+pub struct EnrollSpeakerInput {
     pub profile_id: String,
     pub recording_id: String,
     pub track_id: String,
@@ -178,11 +178,11 @@ impl SpeakerService {
     }
     pub async fn enroll(
         &self,
-        input: Enrollment,
+        input: EnrollSpeakerInput,
     ) -> Result<VoiceExampleSummary, EnrollSpeakerError> {
         if !input.confirmed {
             return Err(EnrollSpeakerError::ConfirmationRequired(
-                "Enrollment requires explicit identity confirmation after listening".into(),
+                "EnrollSpeakerInput requires explicit identity confirmation after listening".into(),
             ));
         }
         if input.start_ms < 0

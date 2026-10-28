@@ -126,22 +126,55 @@ fn recovery(f: &Fixture, r: &CleanupReview) -> PathBuf {
 async fn reviewed_staging_restores_exact_bytes_without_touching_source_titles_or_results() {
     let f = fixture().await;
     let before = f.store.detail("r").await.unwrap().unwrap();
-    assert!(f.service.review(None, 128).await.unwrap().is_none());
-    let review = f.service.review(aged(), 128).await.unwrap().unwrap();
+    assert!(
+        f.service
+            .review(parakeet_application::cleanup::ReviewCleanupInput {
+                policy: None,
+                limit: 128
+            })
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let review = f
+        .service
+        .review(parakeet_application::cleanup::ReviewCleanupInput {
+            policy: aged(),
+            limit: 128,
+        })
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(review.files.len(), 1);
     assert_eq!(review.state, CleanupState::Reviewed);
     assert!(matches!(
-        f.service.apply(&review.id, &review.digest, false).await,
-        Err(CleanupError::Confirmation(_))
+        f.service
+            .apply(parakeet_application::cleanup::ApplyCleanupInput {
+                id: review.id.to_string(),
+                review_digest: review.digest.to_string(),
+                confirmed: false
+            })
+            .await,
+        Err(ApplyCleanupError::Confirmation(_))
     ));
     assert!(matches!(
-        f.service.apply(&review.id, "wrong", true).await,
-        Err(CleanupError::Conflict(_))
+        f.service
+            .apply(parakeet_application::cleanup::ApplyCleanupInput {
+                id: review.id.to_string(),
+                review_digest: ("wrong").to_string(),
+                confirmed: true
+            })
+            .await,
+        Err(ApplyCleanupError::Conflict(_))
     ));
     assert!(f.root.join(&f.relative).exists());
     let staged = f
         .service
-        .apply(&review.id, &review.digest, true)
+        .apply(parakeet_application::cleanup::ApplyCleanupInput {
+            id: review.id.to_string(),
+            review_digest: review.digest.to_string(),
+            confirmed: true,
+        })
         .await
         .unwrap();
     assert_eq!(staged.state, CleanupState::Staged);
@@ -153,7 +186,11 @@ async fn reviewed_staging_restores_exact_bytes_without_touching_source_titles_or
     );
     assert_eq!(
         f.service
-            .apply(&review.id, &review.digest, true)
+            .apply(parakeet_application::cleanup::ApplyCleanupInput {
+                id: review.id.to_string(),
+                review_digest: review.digest.to_string(),
+                confirmed: true
+            })
             .await
             .unwrap()
             .state,
@@ -210,7 +247,15 @@ async fn fresh_policy_references_and_missing_sources_block_stale_reviews() {
         "speaker",
     ] {
         let f = fixture().await;
-        let review = f.service.review(aged(), 128).await.unwrap().unwrap();
+        let review = f
+            .service
+            .review(parakeet_application::cleanup::ReviewCleanupInput {
+                policy: aged(),
+                limit: 128,
+            })
+            .await
+            .unwrap()
+            .unwrap();
         match reason {
             "policy" => {
                 f.store
@@ -300,8 +345,14 @@ async fn fresh_policy_references_and_missing_sources_block_stale_reviews() {
         }
         assert!(
             matches!(
-                f.service.apply(&review.id, &review.digest, true).await,
-                Err(CleanupError::Conflict(_))
+                f.service
+                    .apply(parakeet_application::cleanup::ApplyCleanupInput {
+                        id: review.id.to_string(),
+                        review_digest: review.digest.to_string(),
+                        confirmed: true
+                    })
+                    .await,
+                Err(ApplyCleanupError::Conflict(_))
             ),
             "{reason}"
         );
@@ -320,7 +371,15 @@ async fn changed_hash_symlink_parent_hardlink_and_live_owners_never_move_reviewe
         "run-owner",
     ] {
         let f = fixture().await;
-        let review = f.service.review(aged(), 128).await.unwrap().unwrap();
+        let review = f
+            .service
+            .review(parakeet_application::cleanup::ReviewCleanupInput {
+                policy: aged(),
+                limit: 128,
+            })
+            .await
+            .unwrap()
+            .unwrap();
         let mut model_lease = None;
         let mut run_lease = None;
         match reason {
@@ -346,7 +405,15 @@ async fn changed_hash_symlink_parent_hardlink_and_live_owners_never_move_reviewe
                 .unwrap()
             }
         }
-        match f.service.apply(&review.id, &review.digest, true).await {
+        match f
+            .service
+            .apply(parakeet_application::cleanup::ApplyCleanupInput {
+                id: review.id.to_string(),
+                review_digest: review.digest.to_string(),
+                confirmed: true,
+            })
+            .await
+        {
             Err(_) => {}
             Ok(r) => {
                 assert_eq!(r.state, CleanupState::NeedsAttention);
@@ -360,12 +427,24 @@ async fn changed_hash_symlink_parent_hardlink_and_live_owners_never_move_reviewe
 #[tokio::test]
 async fn restore_refuses_overwrite_and_recovers_durable_partial_intent() {
     let f = fixture().await;
-    let mut review = f.service.review(aged(), 128).await.unwrap().unwrap();
+    let mut review = f
+        .service
+        .review(parakeet_application::cleanup::ReviewCleanupInput {
+            policy: aged(),
+            limit: 128,
+        })
+        .await
+        .unwrap()
+        .unwrap();
     let second = f.root.join(format!("models/work/{}/audio.f32", f.run));
     std::fs::write(&second, b"second file").unwrap();
     // A later file cannot sneak into an existing review.
     f.service
-        .apply(&review.id, &review.digest, true)
+        .apply(parakeet_application::cleanup::ApplyCleanupInput {
+            id: review.id.to_string(),
+            review_digest: review.digest.to_string(),
+            confirmed: true,
+        })
         .await
         .unwrap();
     assert!(second.exists());
@@ -416,7 +495,15 @@ async fn gate_serializes_reference_publication_and_stale_prepared_import_fails()
     let t = f.store.detail("r").await.unwrap().unwrap().tracks.remove(0);
     assert!(writes.replace_locator(&t, &t).await.is_err());
     drop(held);
-    let review = f.service.review(aged(), 128).await.unwrap().unwrap();
+    let review = f
+        .service
+        .review(parakeet_application::cleanup::ReviewCleanupInput {
+            policy: aged(),
+            limit: 128,
+        })
+        .await
+        .unwrap()
+        .unwrap();
     let mut b = ImportBundle {
         recording: f.store.detail("r").await.unwrap().unwrap().recording,
         tracks: vec![t],
@@ -430,7 +517,11 @@ async fn gate_serializes_reference_publication_and_stale_prepared_import_fails()
     b.tracks[0].recording_id = "prepared".into();
     b.tracks[0].path = f.root.join(&f.relative).to_str().unwrap().into();
     f.service
-        .apply(&review.id, &review.digest, true)
+        .apply(parakeet_application::cleanup::ApplyCleanupInput {
+            id: review.id.to_string(),
+            review_digest: review.digest.to_string(),
+            confirmed: true,
+        })
         .await
         .unwrap();
     assert!(writes.import(&b).await.is_err());
@@ -465,7 +556,10 @@ async fn cleanup_uses_one_connection_per_unit_and_drops_uncommitted_work() {
     );
     let review = tokio::time::timeout(
         std::time::Duration::from_secs(5),
-        service.review(aged(), 128),
+        service.review(parakeet_application::cleanup::ReviewCleanupInput {
+            policy: aged(),
+            limit: 128,
+        }),
     )
     .await
     .unwrap()
@@ -487,7 +581,11 @@ async fn cleanup_uses_one_connection_per_unit_and_drops_uncommitted_work() {
     );
     let staged = tokio::time::timeout(
         std::time::Duration::from_secs(5),
-        service.apply(&review.id, &review.digest, true),
+        service.apply(parakeet_application::cleanup::ApplyCleanupInput {
+            id: review.id.to_string(),
+            review_digest: review.digest.to_string(),
+            confirmed: true,
+        }),
     )
     .await
     .unwrap()
@@ -561,7 +659,15 @@ async fn caller_cancellation_retains_owned_driver_unit_and_leases_until_settleme
         }
     }
     let f = fixture().await;
-    let review = f.service.review(aged(), 128).await.unwrap().unwrap();
+    let review = f
+        .service
+        .review(parakeet_application::cleanup::ReviewCleanupInput {
+            policy: aged(),
+            limit: 128,
+        })
+        .await
+        .unwrap()
+        .unwrap();
     let moved = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
     let service = CleanupService::new(
@@ -577,7 +683,15 @@ async fn caller_cancellation_retains_owned_driver_unit_and_leases_until_settleme
         }),
     );
     let (id, digest) = (review.id.clone(), review.digest.clone());
-    let task = tokio::spawn(async move { service.apply(&id, &digest, true).await });
+    let task = tokio::spawn(async move {
+        service
+            .apply(parakeet_application::cleanup::ApplyCleanupInput {
+                id: id.to_string(),
+                review_digest: digest.to_string(),
+                confirmed: true,
+            })
+            .await
+    });
     tokio::time::timeout(std::time::Duration::from_secs(5), moved.notified())
         .await
         .unwrap();
@@ -640,7 +754,15 @@ async fn caller_cancellation_retains_owned_driver_unit_and_leases_until_settleme
 #[tokio::test]
 async fn recovery_links_and_wrong_roots_are_refused_without_following_them() {
     let f = fixture().await;
-    let review = f.service.review(aged(), 128).await.unwrap().unwrap();
+    let review = f
+        .service
+        .review(parakeet_application::cleanup::ReviewCleanupInput {
+            policy: aged(),
+            limit: 128,
+        })
+        .await
+        .unwrap()
+        .unwrap();
     let other = f.root.join("other-root");
     std::fs::create_dir(&other).unwrap();
     let service = CleanupService::new(
@@ -656,11 +778,21 @@ async fn recovery_links_and_wrong_roots_are_refused_without_following_them() {
         ),
     );
     assert!(matches!(
-        service.apply(&review.id, &review.digest, true).await,
-        Err(CleanupError::Conflict(_))
+        service
+            .apply(parakeet_application::cleanup::ApplyCleanupInput {
+                id: review.id.to_string(),
+                review_digest: review.digest.to_string(),
+                confirmed: true
+            })
+            .await,
+        Err(ApplyCleanupError::Conflict(_))
     ));
     f.service
-        .apply(&review.id, &review.digest, true)
+        .apply(parakeet_application::cleanup::ApplyCleanupInput {
+            id: review.id.to_string(),
+            review_digest: review.digest.to_string(),
+            confirmed: true,
+        })
         .await
         .unwrap();
     let directory = recovery(&f, &review).parent().unwrap().to_path_buf();

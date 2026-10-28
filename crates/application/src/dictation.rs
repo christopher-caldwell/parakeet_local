@@ -1,6 +1,6 @@
 use super::*;
 use crate::{
-    capture::{CaptureRequest, CaptureService},
+    capture::{CaptureRecordingInput, CaptureService},
     processing::ProcessingService,
     settings::{SettingsService, TransformResult},
 };
@@ -10,11 +10,24 @@ use std::sync::atomic::{AtomicBool, Ordering};
 pub struct DictationControl {
     pub stop: Arc<AtomicBool>,
     pub cancelled: Arc<AtomicBool>,
+    cancelled_notice: Arc<tokio::sync::Notify>,
 }
 impl DictationControl {
     pub fn cancel(&self) {
         self.cancelled.store(true, Ordering::SeqCst);
         self.stop.store(true, Ordering::SeqCst);
+        self.cancelled_notice.notify_waiters();
+    }
+    async fn wait_cancelled(&self) {
+        loop {
+            let noticed = self.cancelled_notice.notified();
+            tokio::pin!(noticed);
+            noticed.as_mut().enable();
+            if self.cancelled.load(Ordering::SeqCst) {
+                return;
+            }
+            noticed.await;
+        }
     }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -112,7 +125,7 @@ impl DictationService {
         let bundle = self
             .capture
             .record(
-                CaptureRequest {
+                CaptureRecordingInput {
                     microphone_uid: Some(microphone_uid),
                     system_audio: false,
                     title: format!("Dictation {}", now()),
@@ -164,20 +177,11 @@ impl DictationService {
                 if runs.iter().flat_map(|r|r.result["raw"].as_array().into_iter().flatten()).any(|segment|segment["evidence"]["uncertain_speech"]==true){
                     return Err(CapabilityError::message("Recognition includes low-energy or uncertain speech; raw text retained for review instead of automatic insertion"));
                 }
-                let TransformResult {
-                    enhanced,
-                    route,
-                    failure,
-                    ..
-                } = self
-                    .settings
-                    .transform(crate::settings::TransformTextInput {
-                        bundle_id: receipt.target.bundle_id.clone(),
-                        raw: receipt.raw.clone(),
-                        dry_run: false,
-                    })
-                    .await
-                    .map_err(CapabilityError::new)?;
+                let transformed = tokio::select! {biased;
+                    _=control.wait_cancelled()=>{receipt.status="cancelled".into();return Ok(());},
+                    result=self.settings.transform(crate::settings::TransformTextInput {bundle_id:receipt.target.bundle_id.clone(),raw:receipt.raw.clone(),dry_run:false})=>result.map_err(CapabilityError::new)?,
+                };
+                let TransformResult {enhanced,route,failure,..}=transformed;
                 receipt.enhanced = enhanced;
                 receipt.route = route;
                 if let Some(failure) = failure {
@@ -190,7 +194,10 @@ impl DictationService {
                     return Ok(());
                 }
                 let text = receipt.enhanced.as_deref().unwrap_or(&receipt.raw);
-                receipt.insertion=Some(self.insertion.insert(&receipt.target, text).await?);
+                receipt.insertion=Some(tokio::select! {biased;
+                    _=control.wait_cancelled()=>return Err(CapabilityError::message("Insertion cancelled while delivery was in progress; inspect the original target before retrying. Raw text retained.")),
+                    result=self.insertion.insert(&receipt.target,text)=>result?,
+                });
                 receipt.status = "inserted".into();
                 Ok::<_, CapabilityError>(())
             }
@@ -233,6 +240,23 @@ pub trait GlobalShortcuts: Send + Sync {
 pub trait DictationObserver: Send + Sync {
     fn event(&self, event: Value);
 }
+// Dropping the listener (including caller abort) cancels its active session.
+// The owned dictation task can settle retained audio/text, but cannot proceed to insertion.
+struct ActiveDictation {
+    control: DictationControl,
+    task: tokio::task::JoinHandle<Result<DictationReceipt, DictateSpeechError>>,
+}
+impl Drop for ActiveDictation {
+    fn drop(&mut self) {
+        self.control.cancel();
+    }
+}
+impl ActiveDictation {
+    async fn cancel_and_wait(mut self) {
+        self.control.cancel();
+        let _ = (&mut self.task).await;
+    }
+}
 operation_error!(ListenForDictationError,sources{Settings:crate::settings::ListShortcutsError=>"nested",Source:CapabilityError=>"source"},values{NoBindings=>"invalid_input"});
 pub struct DictationListener {
     shortcuts: Arc<dyn GlobalShortcuts>,
@@ -272,30 +296,26 @@ impl DictationListener {
         let mut events = self.shortcuts.listen(&bindings).await?;
         let mut gesture = gestures::HoldGesture::default();
         let began = std::time::Instant::now();
-        let mut current: Option<(
-            DictationControl,
-            tokio::task::JoinHandle<Result<DictationReceipt, DictateSpeechError>>,
-        )> = None;
+        let mut current: Option<ActiveDictation> = None;
         self.observer.event(json!({"state":"waiting"}));
         loop {
             if stop.load(Ordering::SeqCst) {
-                if let Some((control, task)) = current.take() {
-                    control.cancel();
-                    let _ = task.await;
+                if let Some(active) = current.take() {
+                    active.cancel_and_wait().await;
                 }
                 return Ok(());
             }
             tokio::select! {
-             event=events.next_event()=>{let Some(event)=event?else{if let Some((control,task))=current.take(){control.cancel();let _=task.await;}return Err(CapabilityError::message("native shortcut stream ended").into());};
+             event=events.next_event()=>{let event=match event {Ok(Some(event))=>event,other=>{if let Some(active)=current.take(){active.cancel_and_wait().await;}return Err(other.err().unwrap_or_else(||CapabilityError::message("native shortcut stream ended")).into());}};
               match event{
-               ShortcutEvent::Down{binding,target}=>{if current.is_none()&& let gestures::GestureEffect::Start(target)=gesture.down(&binding,target,began.elapsed().as_millis() as u64){let control=DictationControl::default();let job_control=control.clone();let service=self.dictation.clone();let uid=microphone_uid.clone();let task=tokio::spawn(async move{service.dictate(DictateSpeechInput{microphone_uid:uid,target},job_control).await});current=Some((control,task));self.observer.event(json!({"state":"starting","owner":binding}));}},
-               ShortcutEvent::Up{binding}=>{if matches!(gesture.up(&binding),gestures::GestureEffect::Finish(_))&& let Some((control,_))=&current{control.stop.store(true,Ordering::SeqCst);self.observer.event(json!({"state":"transcribing"}));}},
-               ShortcutEvent::Cancel{reason}=>{gesture.cancel();if let Some((control,_))=&current{control.cancel();}self.observer.event(json!({"state":"cancelled","reason":reason}));}
+               ShortcutEvent::Down{binding,target}=>{if current.is_none()&& let gestures::GestureEffect::Start(target)=gesture.down(&binding,target,began.elapsed().as_millis() as u64){let control=DictationControl::default();let job_control=control.clone();let service=self.dictation.clone();let uid=microphone_uid.clone();let task=tokio::spawn(async move{service.dictate(DictateSpeechInput{microphone_uid:uid,target},job_control).await});current=Some(ActiveDictation {control,task});self.observer.event(json!({"state":"starting","owner":binding}));}},
+               ShortcutEvent::Up{binding}=>{if matches!(gesture.up(&binding),gestures::GestureEffect::Finish(_))&& let Some(ActiveDictation {control,..})=&current{control.stop.store(true,Ordering::SeqCst);self.observer.event(json!({"state":"transcribing"}));}},
+               ShortcutEvent::Cancel{reason}=>{gesture.cancel();if let Some(ActiveDictation {control,..})=&current{control.cancel();}self.observer.event(json!({"state":"cancelled","reason":reason}));}
               }
              },
-             result=async{match current.as_mut(){Some((_,task))=>task.await,None=>std::future::pending().await}}=>{current=None;gesture.cancel();match result{Ok(Ok(receipt))=>self.observer.event(json!({"state":receipt.status,"receipt":receipt})),Ok(Err(error))=>self.observer.event(json!({"state":"failed","message":error.to_string()})),Err(error)=>self.observer.event(json!({"state":"failed","message":error.to_string()}))}},
-             _=tokio::time::sleep(std::time::Duration::from_millis(100))=>{if current.as_ref().is_some_and(|(control,_)|!control.stop.load(Ordering::SeqCst)){let capture=self.dictation.capture_status();if capture["microphone"]["first_buffer_ready"]==true || (capture["event"]=="first_buffer" && capture["source"]=="microphone"){self.observer.event(json!({"state":"listening","capture":capture}));}}
-              if matches!(gesture.tick(began.elapsed().as_millis() as u64),gestures::GestureEffect::Cancel){if let Some((control,_))=&current{control.cancel();}self.observer.event(json!({"state":"cancelled","reason":"lost_release_timeout"}));}}
+             result=async{match current.as_mut(){Some(ActiveDictation {task,..})=>task.await,None=>std::future::pending().await}}=>{current=None;gesture.cancel();match result{Ok(Ok(receipt))=>self.observer.event(json!({"state":receipt.status,"receipt":receipt})),Ok(Err(error))=>self.observer.event(json!({"state":"failed","message":error.to_string()})),Err(error)=>self.observer.event(json!({"state":"failed","message":error.to_string()}))}},
+             _=tokio::time::sleep(std::time::Duration::from_millis(100))=>{if current.as_ref().is_some_and(|ActiveDictation {control,..}|!control.stop.load(Ordering::SeqCst)){let capture=self.dictation.capture_status();if capture["microphone"]["first_buffer_ready"]==true || (capture["event"]=="first_buffer" && capture["source"]=="microphone"){self.observer.event(json!({"state":"listening","capture":capture}));}}
+              if matches!(gesture.tick(began.elapsed().as_millis() as u64),gestures::GestureEffect::Cancel){if let Some(ActiveDictation {control,..})=&current{control.cancel();}self.observer.event(json!({"state":"cancelled","reason":"lost_release_timeout"}));}}
             }
         }
     }

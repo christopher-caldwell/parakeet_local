@@ -112,7 +112,54 @@ pub trait CleanupAccess: Send + Sync {
 pub trait CleanupFiles: Send + Sync {
     async fn acquire(&self, run_ids: &[String]) -> Result<Box<dyn CleanupAccess>, CapabilityError>;
 }
-operation_error!(CleanupError,sources{Persistence:PersistenceError=>"persistence",Files:CapabilityError=>"storage",Invalid:ValidationError=>"invalid_input"},values{NotFound=>"not_found",Conflict=>"conflict",Confirmation=>"confirmation_required"});
+operation_error!(ListCleanupReviewsError,sources{Persistence:PersistenceError=>"persistence"},values{});
+operation_error!(ShowCleanupReviewError,sources{Persistence:PersistenceError=>"persistence"},values{NotFound=>"not_found"});
+operation_error!(ReviewCleanupError,sources{Persistence:PersistenceError=>"persistence",Files:CapabilityError=>"storage",Invalid:ValidationError=>"invalid_input"},values{Conflict=>"conflict"});
+operation_error!(ApplyCleanupError,sources{Persistence:PersistenceError=>"persistence",Files:CapabilityError=>"storage"},values{NotFound=>"not_found",Conflict=>"conflict",Confirmation=>"confirmation_required"});
+operation_error!(RestoreCleanupError,sources{Persistence:PersistenceError=>"persistence",Files:CapabilityError=>"storage"},values{NotFound=>"not_found",Conflict=>"conflict"});
+#[derive(Debug, thiserror::Error)]
+enum CleanupFailure {
+    #[error(transparent)]
+    Persistence(#[from] PersistenceError),
+    #[error(transparent)]
+    Files(#[from] CapabilityError),
+    #[error("{0}")]
+    NotFound(String),
+    #[error("{0}")]
+    Conflict(String),
+}
+impl From<CleanupFailure> for ApplyCleanupError {
+    fn from(e: CleanupFailure) -> Self {
+        match e {
+            CleanupFailure::Persistence(e) => Self::Persistence(e),
+            CleanupFailure::Files(e) => Self::Files(e),
+            CleanupFailure::NotFound(e) => Self::NotFound(e),
+            CleanupFailure::Conflict(e) => Self::Conflict(e),
+        }
+    }
+}
+impl From<CleanupFailure> for RestoreCleanupError {
+    fn from(e: CleanupFailure) -> Self {
+        match e {
+            CleanupFailure::Persistence(e) => Self::Persistence(e),
+            CleanupFailure::Files(e) => Self::Files(e),
+            CleanupFailure::NotFound(e) => Self::NotFound(e),
+            CleanupFailure::Conflict(e) => Self::Conflict(e),
+        }
+    }
+}
+#[derive(Debug, Clone)]
+pub struct ReviewCleanupInput {
+    pub policy: Option<RetentionPolicy>,
+    pub limit: usize,
+}
+#[derive(Debug, Clone)]
+pub struct ApplyCleanupInput {
+    pub id: String,
+    pub review_digest: String,
+    pub confirmed: bool,
+}
+
 pub struct CleanupService<T: CleanupTransactions, S: CleanupStore<T::Unit>> {
     transactions: Arc<T>,
     store: Arc<S>,
@@ -126,20 +173,20 @@ impl<T: CleanupTransactions + 'static, S: CleanupStore<T::Unit> + 'static> Clean
             files,
         }
     }
-    pub async fn list(&self) -> Result<Vec<CleanupReview>, CleanupError> {
+    pub async fn list(&self) -> Result<Vec<CleanupReview>, ListCleanupReviewsError> {
         Ok(self.store.cleanup_reviews().await?)
     }
-    pub async fn show(&self, id: &str) -> Result<CleanupReview, CleanupError> {
+    pub async fn show(&self, id: &str) -> Result<CleanupReview, ShowCleanupReviewError> {
         self.store
             .cleanup_review(id)
             .await?
-            .ok_or_else(|| CleanupError::NotFound("cleanup review not found".into()))
+            .ok_or_else(|| ShowCleanupReviewError::NotFound("cleanup review not found".into()))
     }
     pub async fn review(
         &self,
-        policy: Option<RetentionPolicy>,
-        limit: usize,
-    ) -> Result<Option<CleanupReview>, CleanupError> {
+        input: ReviewCleanupInput,
+    ) -> Result<Option<CleanupReview>, ReviewCleanupError> {
+        let ReviewCleanupInput { policy, limit } = input;
         if !(1..=MAX_FILES).contains(&limit) {
             return Err(ValidationError("review limit must be 1..128".into()).into());
         }
@@ -178,7 +225,7 @@ impl<T: CleanupTransactions + 'static, S: CleanupStore<T::Unit> + 'static> Clean
                 .await?;
             bytes = bytes.saturating_add(identified.bytes);
             if bytes > MAX_BYTES {
-                return Err(CleanupError::Conflict(
+                return Err(ReviewCleanupError::Conflict(
                     "files grew during review; retry".into(),
                 ));
             }
@@ -208,19 +255,21 @@ impl<T: CleanupTransactions + 'static, S: CleanupStore<T::Unit> + 'static> Clean
     }
     pub async fn apply(
         &self,
-        id: &str,
-        digest: &str,
-        confirmed: bool,
-    ) -> Result<CleanupReview, CleanupError> {
-        if !confirmed {
-            return Err(CleanupError::Confirmation("review the exact file list, then supply --confirm and its --review-digest; staging does not reclaim disk space".into()));
+        input: ApplyCleanupInput,
+    ) -> Result<CleanupReview, ApplyCleanupError> {
+        if !input.confirmed {
+            return Err(ApplyCleanupError::Confirmation("review the exact file list, then supply --confirm and its --review-digest; staging does not reclaim disk space".into()));
         }
-        self.execute(id, Some(digest)).await
+        Ok(self.execute(&input.id, Some(&input.review_digest)).await?)
     }
-    pub async fn restore(&self, id: &str) -> Result<CleanupReview, CleanupError> {
-        self.execute(id, None).await
+    pub async fn restore(&self, id: &str) -> Result<CleanupReview, RestoreCleanupError> {
+        Ok(self.execute(id, None).await?)
     }
-    async fn execute(&self, id: &str, digest: Option<&str>) -> Result<CleanupReview, CleanupError> {
+    async fn execute(
+        &self,
+        id: &str,
+        digest: Option<&str>,
+    ) -> Result<CleanupReview, CleanupFailure> {
         // The driver owns its unit and leases through filesystem worker exit and
         // settlement, even when the awaiting UI/CLI task is dropped.
         let service = Self {
@@ -238,8 +287,12 @@ impl<T: CleanupTransactions + 'static, S: CleanupStore<T::Unit> + 'static> Clean
         &self,
         id: &str,
         digest: Option<&str>,
-    ) -> Result<CleanupReview, CleanupError> {
-        let initial = self.show(id).await?;
+    ) -> Result<CleanupReview, CleanupFailure> {
+        let initial = self
+            .store
+            .cleanup_review(id)
+            .await?
+            .ok_or_else(|| CleanupFailure::NotFound("cleanup review not found".into()))?;
         let run_ids: Vec<_> = initial
             .files
             .iter()
@@ -253,18 +306,18 @@ impl<T: CleanupTransactions + 'static, S: CleanupStore<T::Unit> + 'static> Clean
             .store
             .load(&mut unit, id)
             .await?
-            .ok_or_else(|| CleanupError::NotFound("cleanup review not found".into()))?;
+            .ok_or_else(|| CleanupFailure::NotFound("cleanup review not found".into()))?;
         if review.scope != access.scope()
             || review.digest != review.computed_digest().map_err(PersistenceError::new)?
         {
-            return Err(CleanupError::Conflict(
+            return Err(CleanupFailure::Conflict(
                 "review scope or evidence changed".into(),
             ));
         }
         let restore = digest.is_none();
         if let Some(digest) = digest {
             if digest != review.digest {
-                return Err(CleanupError::Conflict(
+                return Err(CleanupFailure::Conflict(
                     "review digest does not match".into(),
                 ));
             }
@@ -272,7 +325,7 @@ impl<T: CleanupTransactions + 'static, S: CleanupStore<T::Unit> + 'static> Clean
                 return Ok(review);
             }
             if review.state != CleanupState::Reviewed {
-                return Err(CleanupError::Conflict(
+                return Err(CleanupFailure::Conflict(
                     "review cannot be applied again; inspect and restore retained files".into(),
                 ));
             }
@@ -283,7 +336,7 @@ impl<T: CleanupTransactions + 'static, S: CleanupStore<T::Unit> + 'static> Clean
                 return Ok(review);
             }
             if review.state == CleanupState::Reviewed {
-                return Err(CleanupError::Conflict(
+                return Err(CleanupFailure::Conflict(
                     "this review has not moved any files".into(),
                 ));
             }
@@ -347,7 +400,7 @@ fn validate(
     review: &CleanupReview,
     context: &CleanupContext,
     observation: &StorageObservation,
-) -> Result<(), CleanupError> {
+) -> Result<(), CleanupFailure> {
     if review.files.is_empty()
         || review.files.len() > MAX_FILES
         || review
@@ -357,14 +410,14 @@ fn validate(
             .try_fold(0u64, u64::checked_add)
             .is_none_or(|n| n > MAX_BYTES)
     {
-        return Err(CleanupError::Conflict(
+        return Err(CleanupFailure::Conflict(
             "invalid reviewed file bounds".into(),
         ));
     }
     if context.policy.revision != review.saved_policy.revision
         || context.policy.policy != review.saved_policy.policy
     {
-        return Err(CleanupError::Conflict(
+        return Err(CleanupFailure::Conflict(
             "retention policy changed; create a new review".into(),
         ));
     }
@@ -376,7 +429,10 @@ fn validate(
             .iter()
             .find(|o| o.relative_path == file.relative_path)
             .ok_or_else(|| {
-                CleanupError::Conflict(format!("reviewed file is missing: {}", file.relative_path))
+                CleanupFailure::Conflict(format!(
+                    "reviewed file is missing: {}",
+                    file.relative_path
+                ))
             })?;
         if observed.run_id.as_deref() != Some(&file.run_id)
             || observed.device != file.device
@@ -392,7 +448,7 @@ fn validate(
                 .get(file.run_id.as_str())
                 .is_none_or(|r| blocked.contains(&r.recording_id))
         {
-            return Err(CleanupError::Conflict(format!(
+            return Err(CleanupFailure::Conflict(format!(
                 "file is changed or protected: {}",
                 file.relative_path
             )));

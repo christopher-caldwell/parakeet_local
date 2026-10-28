@@ -24,7 +24,10 @@ impl Workbench {
             "Finishing transcription from saved source audio",
             async move {
                 let warning = service
-                    .finalize(&id, None)
+                    .finalize(parakeet_application::meeting::FinalizeMeetingInput {
+                        id: id.to_string(),
+                        model: None,
+                    })
                     .await
                     .err()
                     .map(|e| e.to_string());

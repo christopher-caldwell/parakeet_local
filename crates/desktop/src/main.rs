@@ -553,7 +553,7 @@ impl Workbench {
         let id = d.recording.id.clone();
         let service = self.processing.clone();
         let lib = self.library.clone();
-        let request = ProcessRequest {
+        let request = RunProcessingInput {
             recording_id: id.clone(),
             track_id: track,
             model: if diarize {
@@ -793,7 +793,7 @@ impl Render for Workbench {
                                 };
                                 let service = this.speakers.clone();
                                 let profile_id = profile.clone();
-                                let input = Enrollment {
+                                let input = EnrollSpeakerInput {
                                     profile_id: profile,
                                     recording_id: d.recording.id.clone(),
                                     track_id: track,
@@ -1777,7 +1777,7 @@ impl Workbench {
         } else {
             None
         };
-        let request = CaptureRequest {
+        let request = CaptureRecordingInput {
             microphone_uid,
             system_audio,
             title: format!("Meeting {}", now()),
@@ -1792,7 +1792,16 @@ impl Workbench {
         self.task(
             "Recording — waiting for first buffers",
             async move {
-                let (id, warning) = match meeting.record(request, transcribe, stop).await {
+                let (id, warning) = match meeting
+                    .record(
+                        parakeet_application::meeting::RecordMeetingInput {
+                            capture: request,
+                            transcribe_after_stop: transcribe,
+                        },
+                        stop,
+                    )
+                    .await
+                {
                     Ok(report) => (Some(report.recording_id), None),
                     Err(error) => (
                         error.retained_recording_id().map(str::to_owned),

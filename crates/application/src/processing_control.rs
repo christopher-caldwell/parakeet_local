@@ -144,24 +144,8 @@ impl ProcessingControl {
         p
     }
 }
-#[derive(Debug, thiserror::Error)]
-pub enum ControlProcessingError {
-    #[error(transparent)]
-    Persistence(#[from] PersistenceError),
-    #[error("processing run not found: {0}")]
-    NotFound(String),
-    #[error("processing control conflict: {0}")]
-    Conflict(String),
-}
-impl ControlProcessingError {
-    pub fn kind(&self) -> &'static str {
-        match self {
-            Self::Persistence(_) => "persistence",
-            Self::NotFound(_) => "not_found",
-            Self::Conflict(_) => "conflict",
-        }
-    }
-}
+operation_error!(ShowProcessingRunError,sources{Persistence:PersistenceError=>"persistence"},values{NotFound=>"not_found"});
+operation_error!(CancelProcessingRunError,sources{Persistence:PersistenceError=>"persistence"},values{NotFound=>"not_found",Conflict=>"conflict"});
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CancellationReceipt {
     pub run_id: String,
@@ -176,14 +160,18 @@ impl ProcessingControlService {
     pub fn new(queries: Arc<dyn ProcessingQueries>, writes: Arc<dyn RunControlWrites>) -> Self {
         Self { queries, writes }
     }
-    pub async fn show(&self, id: &str) -> Result<ProcessingRun, ControlProcessingError> {
+    pub async fn show(&self, id: &str) -> Result<ProcessingRun, ShowProcessingRunError> {
         self.queries
             .run(id)
             .await?
-            .ok_or_else(|| ControlProcessingError::NotFound(id.into()))
+            .ok_or_else(|| ShowProcessingRunError::NotFound(id.into()))
     }
-    pub async fn cancel(&self, id: &str) -> Result<CancellationReceipt, ControlProcessingError> {
-        let run = self.show(id).await?;
+    pub async fn cancel(&self, id: &str) -> Result<CancellationReceipt, CancelProcessingRunError> {
+        let run = self
+            .queries
+            .run(id)
+            .await?
+            .ok_or_else(|| CancelProcessingRunError::NotFound(id.into()))?;
         if run.status != "running" {
             return Ok(CancellationReceipt {
                 run_id: id.into(),
@@ -192,14 +180,14 @@ impl ProcessingControlService {
             });
         }
         if run.configuration["control_protocol"] != CONTROL_PROTOCOL {
-            return Err(ControlProcessingError::Conflict("this older run has no cancellation protocol; inspect ownership rather than terminating an arbitrary process".into()));
+            return Err(CancelProcessingRunError::Conflict("this older run has no cancellation protocol; inspect ownership rather than terminating an arbitrary process".into()));
         }
         let requested = self.writes.request_cancellation(id, &now()).await?;
         let state = self
             .queries
             .control_state(id)
             .await?
-            .ok_or_else(|| ControlProcessingError::NotFound(id.into()))?;
+            .ok_or_else(|| CancelProcessingRunError::NotFound(id.into()))?;
         Ok(CancellationReceipt {
             run_id: id.into(),
             requested,

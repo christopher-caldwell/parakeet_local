@@ -275,7 +275,7 @@ impl parakeet_application::processing::VoiceEmbeddings for FixtureEngine {
 impl parakeet_application::processing::SpeechProcessing for FixtureEngine {
     async fn process(
         &self,
-        _: &parakeet_application::processing::ProcessRequest,
+        _: &parakeet_application::processing::RunProcessingInput,
         _: &AudioTrack,
         _: &ProcessingRun,
     ) -> Result<parakeet_application::processing::EngineOutput, parakeet_application::CapabilityError>
@@ -314,7 +314,7 @@ async fn invalid_model_output_settles_failed_without_publishing_segments() {
         store.clone(),
     );
     let unsupported = service
-        .run(ProcessRequest {
+        .run(RunProcessingInput {
             recording_id: "r".into(),
             track_id: "track".into(),
             model: "fixture".into(),
@@ -328,7 +328,7 @@ async fn invalid_model_output_settles_failed_without_publishing_segments() {
     assert!(store.detail("r").await.unwrap().unwrap().runs.is_empty());
     assert!(
         service
-            .run(ProcessRequest {
+            .run(RunProcessingInput {
                 recording_id: "r".into(),
                 track_id: "track".into(),
                 model: "fixture".into(),
@@ -663,7 +663,7 @@ impl parakeet_application::capture::AudioCapture for FixtureCapture {
     }
     async fn record(
         &self,
-        _: &parakeet_application::capture::CaptureRequest,
+        _: &parakeet_application::capture::CaptureRecordingInput,
         _: std::sync::Arc<std::sync::atomic::AtomicBool>,
     ) -> Result<ImportBundle, parakeet_application::CapabilityError> {
         let mut b = bundle();
@@ -720,7 +720,7 @@ struct UncertainEngine;
 impl parakeet_application::processing::SpeechProcessing for UncertainEngine {
     async fn process(
         &self,
-        _: &parakeet_application::processing::ProcessRequest,
+        _: &parakeet_application::processing::RunProcessingInput,
         _: &AudioTrack,
         _: &ProcessingRun,
     ) -> Result<parakeet_application::processing::EngineOutput, parakeet_application::CapabilityError>
@@ -1108,7 +1108,7 @@ struct MeetingEngine {
 impl parakeet_application::processing::SpeechProcessing for MeetingEngine {
     async fn process(
         &self,
-        _: &parakeet_application::processing::ProcessRequest,
+        _: &parakeet_application::processing::RunProcessingInput,
         track: &AudioTrack,
         _: &ProcessingRun,
     ) -> Result<parakeet_application::processing::EngineOutput, parakeet_application::CapabilityError>
@@ -1173,14 +1173,16 @@ async fn meeting_capture_saves_a_durable_plan_and_finalization_is_idempotent() {
     let service = meeting_service(&tmp, store.clone(), engine.clone(), store.clone());
     let report = service
         .record(
-            parakeet_application::capture::CaptureRequest {
-                microphone_uid: None,
-                system_audio: true,
-                title: "Fixture capture".into(),
-                maximum_seconds: 1,
-                final_transcription: None,
+            parakeet_application::meeting::RecordMeetingInput {
+                capture: parakeet_application::capture::CaptureRecordingInput {
+                    microphone_uid: None,
+                    system_audio: true,
+                    title: "Fixture capture".into(),
+                    maximum_seconds: 1,
+                    final_transcription: None,
+                },
+                transcribe_after_stop: true,
             },
-            true,
             Arc::new(AtomicBool::new(false)),
         )
         .await
@@ -1189,7 +1191,16 @@ async fn meeting_capture_saves_a_durable_plan_and_finalization_is_idempotent() {
     assert_eq!(first.status, "completed");
     assert_eq!(first.track_ids, vec!["track"]);
     assert!(service.pending().await.unwrap().is_empty());
-    assert_eq!(service.finalize("r", None).await.unwrap(), first);
+    assert_eq!(
+        service
+            .finalize(parakeet_application::meeting::FinalizeMeetingInput {
+                id: ("r").to_string(),
+                model: None
+            })
+            .await
+            .unwrap(),
+        first
+    );
     assert_eq!(engine.calls.lock().unwrap().len(), 1);
     let d = store.detail("r").await.unwrap().unwrap();
     assert_eq!(d.recording.metadata["read_only"], true);
@@ -1198,7 +1209,10 @@ async fn meeting_capture_saves_a_durable_plan_and_finalization_is_idempotent() {
     assert_eq!(d.runs[0].configuration["meeting_finalization_id"], first.id);
     assert!(
         service
-            .finalize("r", Some("different-model"))
+            .finalize(parakeet_application::meeting::FinalizeMeetingInput {
+                id: ("r").to_string(),
+                model: Some(str::to_owned("different-model"))
+            })
             .await
             .is_err()
     );
@@ -1243,7 +1257,13 @@ async fn meeting_partial_failure_resumes_only_failed_sources_and_keeps_title() {
     let engine = Arc::new(MeetingEngine::default());
     *engine.fail_once.lock().unwrap() = Some("second".into());
     let service = meeting_service(&tmp, store.clone(), engine.clone(), store.clone());
-    let error = service.finalize("r", None).await.unwrap_err();
+    let error = service
+        .finalize(parakeet_application::meeting::FinalizeMeetingInput {
+            id: ("r").to_string(),
+            model: None,
+        })
+        .await
+        .unwrap_err();
     let retained = error.retained().unwrap();
     assert_eq!(retained["recording_id"], "r");
     let pending = service.pending().await.unwrap().remove(0);
@@ -1252,7 +1272,13 @@ async fn meeting_partial_failure_resumes_only_failed_sources_and_keeps_title() {
     assert_eq!(pending.failures.len(), 1);
     assert_eq!(pending.track_ids.len(), 2);
     store.rename("r", "User title survives").await.unwrap();
-    let done = service.finalize("r", None).await.unwrap();
+    let done = service
+        .finalize(parakeet_application::meeting::FinalizeMeetingInput {
+            id: ("r").to_string(),
+            model: None,
+        })
+        .await
+        .unwrap();
     assert_eq!(done.status, "completed");
     assert_eq!(done.attempts, 2);
     let calls = engine.calls.lock().unwrap().clone();
@@ -1315,7 +1341,15 @@ async fn meeting_checkpoint_loss_reuses_durable_run_and_refuses_an_active_owner(
         writes: std::sync::atomic::AtomicUsize::new(0),
     });
     let service = meeting_service(&tmp, store.clone(), engine.clone(), writes);
-    assert!(service.finalize("r", None).await.is_err());
+    assert!(
+        service
+            .finalize(parakeet_application::meeting::FinalizeMeetingInput {
+                id: ("r").to_string(),
+                model: None
+            })
+            .await
+            .is_err()
+    );
     let plan = service.pending().await.unwrap().remove(0);
     assert_eq!(plan.status, "running");
     assert!(plan.completed.is_empty());
@@ -1325,11 +1359,22 @@ async fn meeting_checkpoint_loss_reuses_durable_run_and_refuses_an_active_owner(
     .unwrap();
     let lease = ownership.try_acquire(&plan.id).await.unwrap().unwrap();
     assert!(matches!(
-        service.finalize("r", None).await,
+        service
+            .finalize(parakeet_application::meeting::FinalizeMeetingInput {
+                id: ("r").to_string(),
+                model: None
+            })
+            .await,
         Err(parakeet_application::meeting::FinalizeMeetingError::Conflict(_))
     ));
     drop(lease);
-    let done = service.finalize("r", None).await.unwrap();
+    let done = service
+        .finalize(parakeet_application::meeting::FinalizeMeetingInput {
+            id: ("r").to_string(),
+            model: None,
+        })
+        .await
+        .unwrap();
     assert_eq!(done.completed.len(), 1);
     assert_eq!(engine.calls.lock().unwrap().len(), 1);
     let mut forged = done.clone();
@@ -1341,7 +1386,12 @@ async fn meeting_checkpoint_loss_reuses_durable_run_and_refuses_an_active_owner(
             .unwrap()
     );
     assert!(matches!(
-        service.finalize("r", None).await,
+        service
+            .finalize(parakeet_application::meeting::FinalizeMeetingInput {
+                id: ("r").to_string(),
+                model: None
+            })
+            .await,
         Err(parakeet_application::meeting::FinalizeMeetingError::Conflict(_))
     ));
     assert!(
@@ -1365,7 +1415,13 @@ async fn meeting_missing_source_is_failure_even_when_playback_exists() {
     let store = Arc::new(store);
     let engine = Arc::new(MeetingEngine::default());
     let service = meeting_service(&tmp, store.clone(), engine.clone(), store.clone());
-    let error = service.finalize("r", None).await.unwrap_err();
+    let error = service
+        .finalize(parakeet_application::meeting::FinalizeMeetingInput {
+            id: ("r").to_string(),
+            model: None,
+        })
+        .await
+        .unwrap_err();
     let retained = error.retained().unwrap();
     assert_eq!(retained["finalization"]["status"], "failed");
     assert_eq!(retained["finalization"]["failures"][0]["track_id"], "track");
@@ -1450,7 +1506,13 @@ async fn meeting_revision_change_between_preflight_and_run_is_refused() {
         processing,
         ownership,
     );
-    let error = service.finalize("r", None).await.unwrap_err();
+    let error = service
+        .finalize(parakeet_application::meeting::FinalizeMeetingInput {
+            id: ("r").to_string(),
+            model: None,
+        })
+        .await
+        .unwrap_err();
     assert_eq!(
         error.retained().unwrap()["finalization"]["model_revision"],
         "test"
@@ -1469,7 +1531,7 @@ struct GatedControlEngine {
 impl parakeet_application::processing::SpeechProcessing for GatedControlEngine {
     async fn process(
         &self,
-        _: &parakeet_application::processing::ProcessRequest,
+        _: &parakeet_application::processing::RunProcessingInput,
         _: &AudioTrack,
         _: &ProcessingRun,
     ) -> Result<parakeet_application::processing::EngineOutput, parakeet_application::CapabilityError>
@@ -1478,7 +1540,7 @@ impl parakeet_application::processing::SpeechProcessing for GatedControlEngine {
     }
     async fn process_controlled(
         &self,
-        _: &parakeet_application::processing::ProcessRequest,
+        _: &parakeet_application::processing::RunProcessingInput,
         track: &AudioTrack,
         run: &ProcessingRun,
         control: parakeet_application::processing_control::ProcessingControl,
@@ -1537,8 +1599,8 @@ fn controlled_service(
         control,
     ))
 }
-fn controlled_request() -> parakeet_application::processing::ProcessRequest {
-    parakeet_application::processing::ProcessRequest {
+fn controlled_request() -> parakeet_application::processing::RunProcessingInput {
+    parakeet_application::processing::RunProcessingInput {
         recording_id: "r".into(),
         track_id: "track".into(),
         model: "fixture".into(),
@@ -1683,7 +1745,7 @@ async fn progress_is_monotonic_and_old_runs_refuse_cancellation() {
     let service = ProcessingControlService::new(store.clone(), store.clone());
     assert!(matches!(
         service.cancel(&r.id).await,
-        Err(ControlProcessingError::Conflict(_))
+        Err(CancelProcessingRunError::Conflict(_))
     ));
     r.id = uuid::Uuid::new_v4().to_string();
     r.configuration["control_protocol"] = json!(CONTROL_PROTOCOL);
@@ -1821,7 +1883,15 @@ async fn cancellation_stops_remaining_sources_in_both_recording_workflows() {
         );
         let waiter = tokio::spawn(async move {
             if meeting {
-                assert!(service.finalize("r", None).await.is_err());
+                assert!(
+                    service
+                        .finalize(parakeet_application::meeting::FinalizeMeetingInput {
+                            id: ("r").to_string(),
+                            model: None
+                        })
+                        .await
+                        .is_err()
+                );
             } else {
                 let error = processing
                     .recording(TranscribeRecordingInput {
@@ -1892,36 +1962,47 @@ async fn storage_policy_defaults_is_versioned_and_read_only_preview_does_not_ini
     let p = RetentionPolicy {
         completed_scratch_after_days: Some(30),
     };
-    let saved = service.save_policy(p, 0).await.unwrap();
+    let saved = service
+        .save_policy(parakeet_application::storage::SaveRetentionPolicyInput {
+            policy: p,
+            expected_revision: 0,
+        })
+        .await
+        .unwrap();
     assert_eq!(saved.revision, 1);
     let (a, b) = tokio::join!(
-        service.save_policy(
-            RetentionPolicy {
+        service.save_policy(parakeet_application::storage::SaveRetentionPolicyInput {
+            policy: RetentionPolicy {
                 completed_scratch_after_days: Some(7)
             },
-            1
-        ),
-        service.save_policy(
-            RetentionPolicy {
+            expected_revision: 1
+        }),
+        service.save_policy(parakeet_application::storage::SaveRetentionPolicyInput {
+            policy: RetentionPolicy {
                 completed_scratch_after_days: Some(90)
             },
-            1
-        )
+            expected_revision: 1
+        })
     );
     assert_ne!(a.is_ok(), b.is_ok());
     assert_eq!(service.policy().await.unwrap().revision, 2);
     assert!(matches!(
-        service.save_policy(RetentionPolicy::default(), 1).await,
+        service
+            .save_policy(parakeet_application::storage::SaveRetentionPolicyInput {
+                policy: RetentionPolicy::default(),
+                expected_revision: 1
+            })
+            .await,
         Err(SaveRetentionPolicyError::Conflict(_))
     ));
     assert!(
         service
-            .save_policy(
-                RetentionPolicy {
+            .save_policy(parakeet_application::storage::SaveRetentionPolicyInput {
+                policy: RetentionPolicy {
                     completed_scratch_after_days: Some(0)
                 },
-                2
-            )
+                expected_revision: 2
+            })
             .await
             .is_err()
     );
@@ -2183,4 +2264,491 @@ async fn storage_accounting_separates_database_override_and_referenced_external_
     assert!(report.complete);
     assert_eq!(std::fs::read(outside).unwrap(), b"external source bytes");
     assert_eq!(std::fs::read_dir(root).unwrap().count(), 1);
+}
+
+#[tokio::test]
+async fn regression_excerpt_must_not_hide_existing_complete_transcript() {
+    let (_tmp, s) = database().await;
+    s.import(&bundle()).await.unwrap();
+    let mut run = ProcessingRun {
+        id: "full".into(),
+        recording_id: "r".into(),
+        kind: "transcription".into(),
+        model: "fixture".into(),
+        model_revision: "v1".into(),
+        status: "running".into(),
+        started_at: "2020-01-01T00:00:00Z".into(),
+        completed_at: None,
+        configuration: json!({"track":{"id":"track"},"request":{"start_ms":0,"duration_ms":null}}),
+        result: json!({}),
+        error: None,
+    };
+    s.start(&run).await.unwrap();
+    run.status = "completed".into();
+    run.completed_at = Some("2020-01-01T00:00:01Z".into());
+    let mut first = bundle().segments.remove(0);
+    first.id = "full-first".into();
+    first.run_id = "full".into();
+    first.track_id = Some("track".into());
+    first.start_ms = Some(0);
+    first.end_ms = Some(1000);
+    let mut last = first.clone();
+    last.id = "full-last".into();
+    last.start_ms = Some(9000);
+    last.end_ms = Some(10000);
+    last.ordinal = 1;
+    s.finish(&run, &[first.clone(), last.clone()])
+        .await
+        .unwrap();
+    assert_eq!(s.detail("r").await.unwrap().unwrap().segments.len(), 2);
+    run.id = "excerpt".into();
+    run.status = "running".into();
+    run.completed_at = None;
+    run.configuration["request"] = json!({"start_ms":5000,"duration_ms":1000});
+    s.start(&run).await.unwrap();
+    run.status = "completed".into();
+    run.completed_at = Some("2020-01-01T00:00:02Z".into());
+    let mut excerpt = first;
+    excerpt.id = "excerpt-only".into();
+    excerpt.run_id = "excerpt".into();
+    excerpt.start_ms = Some(5000);
+    excerpt.end_ms = Some(6000);
+    s.finish(&run, &[excerpt]).await.unwrap();
+    let visible = s.detail("r").await.unwrap().unwrap().segments;
+    assert!(
+        s.segment("full-last").await.unwrap().is_some(),
+        "original evidence still exists"
+    );
+    assert!(
+        visible.iter().any(|s| s.id == "full-last"),
+        "a bounded excerpt replaced the entire current transcript: {:?}",
+        visible.iter().map(|s| &s.id).collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test]
+async fn regression_library_search_must_find_corrected_current_text() {
+    let (_tmp, s) = database().await;
+    s.import(&bundle()).await.unwrap();
+    s.correct(
+        &Correction {
+            id: "corrected".into(),
+            segment_id: "segment".into(),
+            profile_id: None,
+            replacement_text: Some("zebra-corrected-token".into()),
+            action: "text".into(),
+            created_at: "now".into(),
+        },
+        0,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        s.list(Some("zebra-corrected-token")).await.unwrap().len(),
+        1,
+        "current corrected transcript is invisible to library search"
+    );
+}
+
+struct ReviewGoodEngine;
+#[async_trait::async_trait]
+impl parakeet_application::processing::SpeechProcessing for ReviewGoodEngine {
+    async fn process(
+        &self,
+        _: &parakeet_application::processing::RunProcessingInput,
+        track: &AudioTrack,
+        run: &ProcessingRun,
+    ) -> Result<parakeet_application::processing::EngineOutput, parakeet_application::CapabilityError>
+    {
+        let mut segment = bundle().segments.remove(0);
+        segment.id = format!("{}-segment", run.id);
+        segment.recording_id = run.recording_id.clone();
+        segment.run_id = run.id.clone();
+        segment.track_id = Some(track.id.clone());
+        Ok(parakeet_application::processing::EngineOutput {
+            segments: vec![segment],
+            intervals: vec![],
+            raw: json!([{"text":"synthetic fixture"}]),
+            metrics: json!({"review_adapter":true}),
+        })
+    }
+}
+#[tokio::test]
+async fn regression_full_transcription_must_report_missing_authoritative_source() {
+    use std::sync::Arc;
+    let (tmp, s) = database().await;
+    let mut b = bundle();
+    b.tracks[0].available = true;
+    let mut missing = b.tracks[0].clone();
+    missing.id = "missing-mic".into();
+    missing.kind = TrackKind::Microphone;
+    missing.available = false;
+    b.tracks.push(missing);
+    s.import(&b).await.unwrap();
+    let s = Arc::new(s);
+    let service = controlled_service(
+        &tmp,
+        s.clone(),
+        Arc::new(ReviewGoodEngine),
+        s.clone(),
+        s.clone(),
+    );
+    let result = service
+        .recording(parakeet_application::processing::TranscribeRecordingInput {
+            id: "r".into(),
+            model: "fixture".into(),
+        })
+        .await;
+    assert!(
+        result.is_err(),
+        "full-transcription returned success with one authoritative source silently excluded"
+    );
+}
+
+#[tokio::test]
+async fn regression_shortcut_stream_failure_must_cancel_active_capture() {
+    use parakeet_application::{capture::*, dictation::*, settings::*, *};
+    use parakeet_domain::gestures::{InsertionTarget, Shortcut};
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    };
+    struct Capture {
+        started: Arc<tokio::sync::Notify>,
+        stop: Arc<Mutex<Option<Arc<AtomicBool>>>>,
+    }
+    #[async_trait::async_trait]
+    impl AudioCapture for Capture {
+        fn current_status(&self) -> serde_json::Value {
+            json!({})
+        }
+        async fn devices(&self) -> Result<serde_json::Value, CapabilityError> {
+            Ok(json!([]))
+        }
+        async fn permissions(&self) -> Result<serde_json::Value, CapabilityError> {
+            Ok(json!({}))
+        }
+        async fn recoverable(&self) -> Result<serde_json::Value, CapabilityError> {
+            Ok(json!([]))
+        }
+        async fn recover(&self, _: &std::path::Path) -> Result<ImportBundle, CapabilityError> {
+            Err(CapabilityError::message("unused review capability"))
+        }
+        async fn record(
+            &self,
+            _: &CaptureRecordingInput,
+            stop: Arc<AtomicBool>,
+        ) -> Result<ImportBundle, CapabilityError> {
+            *self.stop.lock().unwrap() = Some(stop.clone());
+            self.started.notify_one();
+            while !stop.load(Ordering::SeqCst) {
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+            Err(CapabilityError::message(
+                "review capture stopped without audio or insertion",
+            ))
+        }
+    }
+    struct Stream {
+        phase: u8,
+        mode: &'static str,
+        started: Arc<tokio::sync::Notify>,
+    }
+    #[async_trait::async_trait]
+    impl ShortcutStream for Stream {
+        async fn next_event(&mut self) -> Result<Option<ShortcutEvent>, CapabilityError> {
+            if self.phase == 0 {
+                self.phase = 1;
+                return Ok(Some(ShortcutEvent::Down {
+                    binding: "f6".into(),
+                    target: InsertionTarget {
+                        bundle_id: "review.synthetic".into(),
+                        process_id: 1,
+                        element_token: "synthetic".into(),
+                    },
+                }));
+            }
+            self.started.notified().await;
+            match self.mode {
+                "error" => Err(CapabilityError::message(
+                    "synthetic native shortcut pipe failure",
+                )),
+                "eof" => Ok(None),
+                _ => std::future::pending().await,
+            }
+        }
+    }
+    struct Keys(Arc<tokio::sync::Notify>, &'static str);
+    #[async_trait::async_trait]
+    impl GlobalShortcuts for Keys {
+        async fn listen(&self, _: &[Shortcut]) -> Result<Box<dyn ShortcutStream>, CapabilityError> {
+            Ok(Box::new(Stream {
+                phase: 0,
+                mode: self.1,
+                started: self.0.clone(),
+            }))
+        }
+    }
+    struct NoExternalActions;
+    #[async_trait::async_trait]
+    impl TextInsertion for NoExternalActions {
+        async fn insert(
+            &self,
+            _: &InsertionTarget,
+            _: &str,
+        ) -> Result<InsertionReport, CapabilityError> {
+            panic!("review never inserts into a real application")
+        }
+    }
+    #[async_trait::async_trait]
+    impl TextTransformation for NoExternalActions {
+        async fn transform(&self, _: &PromptProfile, _: &str) -> Result<String, CapabilityError> {
+            panic!("review never invokes AI")
+        }
+    }
+    impl DictationObserver for NoExternalActions {
+        fn event(&self, _: serde_json::Value) {}
+    }
+    for mode in ["error", "eof", "stop", "caller_abort"] {
+        let (tmp, s) = database().await;
+        let s = Arc::new(s);
+        let settings = Arc::new(SettingsService::new(
+            s.clone(),
+            s.clone(),
+            Arc::new(NoExternalActions),
+        ));
+        settings
+            .save_shortcuts(&[Shortcut {
+                id: "f6".into(),
+                key: "f6".into(),
+                modifiers: vec![],
+                enabled: true,
+            }])
+            .await
+            .unwrap();
+        let started = Arc::new(tokio::sync::Notify::new());
+        let stop = Arc::new(Mutex::new(None));
+        let dictation = Arc::new(DictationService::new(
+            Arc::new(CaptureService::new(
+                Arc::new(Capture {
+                    started: started.clone(),
+                    stop: stop.clone(),
+                }),
+                s.clone(),
+            )),
+            controlled_service(
+                &tmp,
+                s.clone(),
+                Arc::new(ReviewGoodEngine),
+                s.clone(),
+                s.clone(),
+            ),
+            settings.clone(),
+            Arc::new(NoExternalActions),
+            s,
+        ));
+        let listener = DictationListener::new(
+            Arc::new(Keys(started, mode)),
+            settings,
+            dictation,
+            Arc::new(NoExternalActions),
+        );
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let task = tokio::spawn({
+            let shutdown = shutdown.clone();
+            async move { listener.run("synthetic-mic".into(), shutdown).await }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while stop.lock().unwrap().is_none() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        if mode == "stop" {
+            shutdown.store(true, Ordering::SeqCst);
+        }
+        if mode == "caller_abort" {
+            task.abort();
+        }
+        let result = tokio::time::timeout(std::time::Duration::from_secs(3), task)
+            .await
+            .unwrap();
+        match mode {
+            "caller_abort" => assert!(result.unwrap_err().is_cancelled()),
+            "stop" => assert!(result.unwrap().is_ok()),
+            _ => assert!(result.unwrap().is_err()),
+        }
+        let control = stop.lock().unwrap().clone().unwrap();
+        assert!(
+            control.load(Ordering::SeqCst),
+            "{mode}: active dictation must be cancelled before listener exit"
+        );
+    }
+}
+
+#[tokio::test]
+async fn source_catalog_reads_foreign_legacy_and_live_wal_without_changing_source() {
+    use parakeet_application::LegacyCatalog;
+    use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
+    for text_uuid in [false, true] {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("source.db");
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                SqliteConnectOptions::new()
+                    .filename(&path)
+                    .create_if_missing(true)
+                    .journal_mode(SqliteJournalMode::Wal),
+            )
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE transcriptions(id BLOB PRIMARY KEY,fileName TEXT,createdAt TEXT,titleOverride TEXT)").execute(&pool).await.unwrap();
+        let uuid = "11111111-1111-4111-8111-111111111111";
+        if text_uuid {
+            sqlx::query(
+                "INSERT INTO transcriptions VALUES(?1,'original title','2020-01-01','User title')",
+            )
+            .bind(uuid)
+            .execute(&pool)
+            .await
+            .unwrap();
+        } else {
+            sqlx::query(
+                "INSERT INTO transcriptions VALUES(?1,'original title','2020-01-01','User title')",
+            )
+            .bind(uuid::Uuid::parse_str(uuid).unwrap().as_bytes().as_slice())
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        // Keep the writer alive and its committed changes in WAL, not a copied main file.
+        let before_db = std::fs::read(&path).unwrap();
+        let wal = path.with_file_name("source.db-wal");
+        let before_wal = std::fs::read(&wal).unwrap();
+        let rows = parakeet_database::MacParakeetCatalog
+            .read(&path)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].source_id, uuid);
+        assert_eq!(rows[0].title, "User title");
+        assert_eq!(std::fs::read(&path).unwrap(), before_db);
+        assert_eq!(std::fs::read(&wal).unwrap(), before_wal);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("PRAGMA application_id")
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            0
+        );
+        assert!(
+            parakeet_database::open_existing(&path).await.is_err(),
+            "destination ownership guard remains strict"
+        );
+        pool.close().await;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("unsupported.db");
+    let pool = SqlitePoolOptions::new()
+        .connect_with(
+            SqliteConnectOptions::new()
+                .filename(&path)
+                .create_if_missing(true),
+        )
+        .await
+        .unwrap();
+    sqlx::query("CREATE TABLE transcriptions(unrelated TEXT)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(
+        parakeet_database::MacParakeetCatalog
+            .read(&path)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("columns missing")
+    );
+}
+
+#[tokio::test]
+async fn coordinated_transcription_publishes_all_sources_together_and_search_ignores_history() {
+    let (_tmp, s) = database().await;
+    let mut b = bundle();
+    b.tracks[0].available = true;
+    s.import(&b).await.unwrap();
+    let mut run = ProcessingRun {
+        id: "batch-a".into(),
+        recording_id: "r".into(),
+        kind: "transcription".into(),
+        model: "fixture".into(),
+        model_revision: "v1".into(),
+        status: "running".into(),
+        started_at: "now".into(),
+        completed_at: None,
+        configuration: json!({"track":{"id":"track"},"request":{"start_ms":0},"publication_group":{"id":"batch","track_ids":["track","second"]}}),
+        result: json!({}),
+        error: None,
+    };
+    let mut segment = b.segments[0].clone();
+    segment.id = "new-a".into();
+    segment.run_id = run.id.clone();
+    segment.text = "new batch token".into();
+    s.start(&run).await.unwrap();
+    run.status = "completed".into();
+    run.completed_at = Some("now".into());
+    s.finish(&run, &[segment.clone()]).await.unwrap();
+    assert_eq!(
+        s.detail("r").await.unwrap().unwrap().segments[0].id,
+        "segment",
+        "unfinished group must keep baseline"
+    );
+    assert!(s.list(Some("new batch token")).await.unwrap().is_empty());
+    run.id = "batch-b".into();
+    run.status = "running".into();
+    run.configuration["track"]["id"] = json!("second");
+    s.start(&run).await.unwrap();
+    segment.id = "new-b".into();
+    segment.run_id = run.id.clone();
+    run.status = "completed".into();
+    s.finish(&run, &[segment]).await.unwrap();
+    assert_eq!(s.detail("r").await.unwrap().unwrap().segments.len(), 2);
+    assert!(s.list(Some("Original evidence")).await.unwrap().is_empty());
+    // Correction snapshots and Undo agree with the Domain resolver's current text.
+    s.correct(
+        &Correction {
+            id: "edit-1".into(),
+            segment_id: "new-a".into(),
+            profile_id: None,
+            replacement_text: Some("changed unique text".into()),
+            action: "text".into(),
+            created_at: "now".into(),
+        },
+        0,
+    )
+    .await
+    .unwrap();
+    assert_eq!(s.list(Some("changed unique text")).await.unwrap().len(), 1);
+    s.correct(
+        &Correction {
+            id: "undo-1".into(),
+            segment_id: "new-a".into(),
+            profile_id: None,
+            replacement_text: None,
+            action: "undo".into(),
+            created_at: "now".into(),
+        },
+        1,
+    )
+    .await
+    .unwrap();
+    assert!(
+        s.list(Some("changed unique text"))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(s.list(Some("new batch token")).await.unwrap().len(), 1);
 }

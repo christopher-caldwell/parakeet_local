@@ -187,7 +187,7 @@ impl Workbench {
                             async move {
                                 Ok(Update::StoragePolicySaved(
                                     service
-                                        .save_policy(policy, revision)
+                                        .save_policy(parakeet_application::storage::SaveRetentionPolicyInput{policy,expected_revision:revision})
                                         .await
                                         .map_err(|e| e.to_string()),
                                 ))
@@ -310,11 +310,17 @@ impl Workbench {
             async move {
                 let result = async {
                     let review = if let Some(digest) = digest {
-                        service.apply(&id, &digest, true).await
+                        service
+                            .apply(parakeet_application::cleanup::ApplyCleanupInput {
+                                id: id.to_string(),
+                                review_digest: digest.to_string(),
+                                confirmed: true,
+                            })
+                            .await
+                            .map_err(|e| e.to_string())?
                     } else {
-                        service.restore(&id).await
-                    }
-                    .map_err(|e| e.to_string())?;
+                        service.restore(&id).await.map_err(|e| e.to_string())?
+                    };
                     Ok((
                         service.list().await.map_err(|e| e.to_string())?,
                         Some(review),
@@ -350,7 +356,10 @@ impl Workbench {
                         async move {
                             let result = async {
                                 let review = service
-                                    .review(policy, 40)
+                                    .review(parakeet_application::cleanup::ReviewCleanupInput {
+                                        policy,
+                                        limit: 40,
+                                    })
                                     .await
                                     .map_err(|e| e.to_string())?;
                                 Ok((service.list().await.map_err(|e| e.to_string())?, review))

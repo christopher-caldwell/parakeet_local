@@ -304,8 +304,8 @@ struct ProcessArgs {
     word_timestamps: bool,
 }
 impl ProcessArgs {
-    fn request(self) -> ProcessRequest {
-        ProcessRequest {
+    fn request(self) -> RunProcessingInput {
+        RunProcessingInput {
             recording_id: self.meeting_id,
             track_id: self.track,
             model: self.model,
@@ -886,7 +886,7 @@ async fn execute(cli: Cli) -> anyhow::Result<Value> {
                     completed_scratch_days,
                     limit,
                 } => value(
-                    serde_json::json!({"review":cleanup.review(completed_scratch_days.map(|days| parakeet_domain::storage::RetentionPolicy {completed_scratch_after_days:Some(days)}),limit).await?,"reclaimed_bytes":0}),
+                    serde_json::json!({"review":cleanup.review(parakeet_application::cleanup::ReviewCleanupInput{policy:completed_scratch_days.map(|days| parakeet_domain::storage::RetentionPolicy {completed_scratch_after_days:Some(days)}),limit}).await?,"reclaimed_bytes":0}),
                 ),
                 Cleanup::List => value(cleanup.list().await?),
                 Cleanup::Show { id } => value(cleanup.show(&id).await?),
@@ -894,7 +894,15 @@ async fn execute(cli: Cli) -> anyhow::Result<Value> {
                     id,
                     review_digest,
                     confirm,
-                } => cleanup_value(cleanup.apply(&id, &review_digest, confirm).await?),
+                } => cleanup_value(
+                    cleanup
+                        .apply(parakeet_application::cleanup::ApplyCleanupInput {
+                            id: id.to_string(),
+                            review_digest: review_digest.to_string(),
+                            confirmed: confirm,
+                        })
+                        .await?,
+                ),
                 Cleanup::Restore { id } => cleanup_value(cleanup.restore(&id).await?),
             },
             Storage::Usage => value(storage.usage().await?),
@@ -919,12 +927,12 @@ async fn execute(cli: Cli) -> anyhow::Result<Value> {
                 expected_revision,
             } => value(
                 storage
-                    .save_policy(
-                        parakeet_domain::storage::RetentionPolicy {
+                    .save_policy(parakeet_application::storage::SaveRetentionPolicyInput {
+                        policy: parakeet_domain::storage::RetentionPolicy {
                             completed_scratch_after_days: completed_scratch_days,
                         },
                         expected_revision,
-                    )
+                    })
                     .await?,
             ),
         },
@@ -950,9 +958,14 @@ async fn execute(cli: Cli) -> anyhow::Result<Value> {
             Jobs::Retry { id } => value(processing.retry(&id).await?),
         },
         Command::Meetings { command } => match command {
-            Meetings::Finalize { id, model } => {
-                value(meeting.finalize(&id, model.as_deref()).await?)
-            }
+            Meetings::Finalize { id, model } => value(
+                meeting
+                    .finalize(parakeet_application::meeting::FinalizeMeetingInput {
+                        id: id.to_string(),
+                        model: model.as_deref().map(str::to_owned),
+                    })
+                    .await?,
+            ),
             Meetings::PendingTranscriptions => value(meeting.pending().await?),
             Meetings::Fingerprint { id, track } => value(
                 locations
@@ -1162,14 +1175,16 @@ async fn execute(cli: Cli) -> anyhow::Result<Value> {
         } => value(
             meeting
                 .record(
-                    parakeet_application::capture::CaptureRequest {
-                        microphone_uid,
-                        system_audio: system,
-                        title,
-                        maximum_seconds: seconds,
-                        final_transcription: None,
+                    parakeet_application::meeting::RecordMeetingInput {
+                        capture: parakeet_application::capture::CaptureRecordingInput {
+                            microphone_uid,
+                            system_audio: system,
+                            title,
+                            maximum_seconds: seconds,
+                            final_transcription: None,
+                        },
+                        transcribe_after_stop: transcribe,
                     },
-                    transcribe,
                     Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 )
                 .await?,
@@ -1222,7 +1237,7 @@ async fn execute(cli: Cli) -> anyhow::Result<Value> {
                 duration_ms,
             } => value(
                 processing
-                    .run(ProcessRequest {
+                    .run(RunProcessingInput {
                         recording_id: meeting_id,
                         track_id: track,
                         model: "selected-diarization".into(),
@@ -1241,7 +1256,7 @@ async fn execute(cli: Cli) -> anyhow::Result<Value> {
                 confirmed,
             } => value(
                 speakers
-                    .enroll(Enrollment {
+                    .enroll(EnrollSpeakerInput {
                         profile_id: profile,
                         recording_id: meeting,
                         track_id: track,
@@ -1449,7 +1464,7 @@ async fn execute(cli: Cli) -> anyhow::Result<Value> {
                 root: root.join("evaluations"),
             }),
             source,
-            store,
+            guarded_audio,
             processing,
         )
         .run(&suite)
@@ -1485,20 +1500,29 @@ fn kind(error: &anyhow::Error) -> &'static str {
     for cause in error.chain() {
         macro_rules! classify {($($type:ty),*)=>{$(if let Some(error)=cause.downcast_ref::<$type>(){let kind=error.kind();if kind!="nested"{return kind;}})*};}
         classify!(
-            parakeet_application::cleanup::CleanupError,
+            parakeet_application::cleanup::ListCleanupReviewsError,
+            parakeet_application::cleanup::ShowCleanupReviewError,
+            parakeet_application::cleanup::ReviewCleanupError,
+            parakeet_application::cleanup::ApplyCleanupError,
+            parakeet_application::cleanup::RestoreCleanupError,
             parakeet_application::storage::InspectStorageError,
             parakeet_application::storage::ReadRetentionPolicyError,
             parakeet_application::storage::SaveRetentionPolicyError,
             parakeet_application::storage::PreviewRetentionError,
             ImportRecordingsError,
-            parakeet_application::scoring::ScoreEvaluationError,
+            InspectMediaError,
+            parakeet_application::meeting::ListPendingMeetingsError,
+            parakeet_application::scoring::ScoreDiarizationError,
+            parakeet_application::scoring::ScoreSpeakerWordsError,
             parakeet_application::audio_locations::FingerprintAudioError,
             parakeet_application::audio_locations::RelinkAudioError,
             ListRecordingsError,
             ShowRecordingError,
             RenameRecordingError,
             InspectTracksError,
-            ExportRecordingError,
+            ExportMarkdownError,
+            ExportTextError,
+            PlanImportError,
             DiscoverRecordingsError,
             MediaImportError,
             TranscribeMediaError,
@@ -1561,7 +1585,12 @@ fn kind(error: &anyhow::Error) -> &'static str {
             return e.kind();
         }
         if let Some(e) =
-            cause.downcast_ref::<parakeet_application::processing_control::ControlProcessingError>()
+            cause.downcast_ref::<parakeet_application::processing_control::ShowProcessingRunError>()
+        {
+            return e.kind();
+        }
+        if let Some(e) = cause
+            .downcast_ref::<parakeet_application::processing_control::CancelProcessingRunError>()
         {
             return e.kind();
         }
@@ -1616,6 +1645,7 @@ async fn main() {
                         .downcast_ref::<IncompleteCleanup>()
                         .map(|e| json!(e.0))
                 })
+                .or_else(|| error.chain().find_map(|e|e.downcast_ref::<parakeet_application::processing::TranscribeRecordingError>().and_then(|e|e.retained())))
                 .or_else(|| {
                     error.chain().find_map(|e| {
                         e.downcast_ref::<parakeet_application::meeting::FinalizeMeetingError>()
