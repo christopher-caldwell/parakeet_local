@@ -7,6 +7,18 @@ pub struct Shortcut {
     pub modifiers: Vec<String>,
     pub enabled: bool,
 }
+/// Keys held on their own as the shortcut (e.g. Right Option), distinguishing left from right.
+pub const MODIFIER_ONLY_KEYS: [&str; 9] = [
+    "rightoption",
+    "leftoption",
+    "rightcommand",
+    "leftcommand",
+    "rightcontrol",
+    "leftcontrol",
+    "rightshift",
+    "leftshift",
+    "fn",
+];
 impl Shortcut {
     pub fn validate(&self) -> Result<(), crate::ValidationError> {
         if self.id.is_empty()
@@ -21,12 +33,28 @@ impl Shortcut {
             ));
         }
         let key = self.key.to_lowercase();
-        let supported = [
+        let special = [
             "home", "end", "pageup", "pagedown", "space", "escape", "f1", "f2", "f3", "f4", "f5",
             "f6", "f7", "f8", "f9", "f10", "f11", "f12",
         ];
-        if !supported.contains(&key.as_str()) {
-            return Err(crate::ValidationError("native shortcuts currently support Home/End/PageUp/PageDown/Space/Escape and F1–F12".into()));
+        let typing = key.len() == 1 && key.chars().all(|c| c.is_ascii_alphanumeric());
+        let modifier_only = MODIFIER_ONLY_KEYS.contains(&key.as_str());
+        if !special.contains(&key.as_str()) && !typing && !modifier_only {
+            return Err(crate::ValidationError(format!(
+                "unsupported key; use Home/End/PageUp/PageDown/Space/Escape, F1–F12, a letter or digit with a modifier, or a modifier alone ({})",
+                MODIFIER_ONLY_KEYS.join(", ")
+            )));
+        }
+        // A bare letter or digit would hijack typing everywhere.
+        if typing && self.modifiers.is_empty() {
+            return Err(crate::ValidationError(
+                "a letter or digit shortcut needs at least one modifier".into(),
+            ));
+        }
+        if modifier_only && !self.modifiers.is_empty() {
+            return Err(crate::ValidationError(
+                "a modifier-only shortcut cannot also have modifiers".into(),
+            ));
         }
         if self
             .modifiers
@@ -116,6 +144,39 @@ mod tests {
             process_id: 1,
             element_token: "focus".into(),
         }
+    }
+    fn shortcut(key: &str, modifiers: &[&str]) -> Shortcut {
+        Shortcut {
+            id: key.into(),
+            key: key.into(),
+            modifiers: modifiers.iter().map(|m| m.to_string()).collect(),
+            enabled: true,
+        }
+    }
+    #[test]
+    fn keys_for_a_laptop_and_an_external_keyboard_validate() {
+        assert!(shortcut("home", &[]).validate().is_ok());
+        assert!(shortcut("rightoption", &[]).validate().is_ok());
+        assert!(shortcut("fn", &[]).validate().is_ok());
+        assert!(shortcut("d", &["ctrl", "alt"]).validate().is_ok());
+        assert!(shortcut("7", &["cmd", "shift"]).validate().is_ok());
+        // Bare typing keys, modifier-only with extra modifiers, and unknown keys are refused.
+        assert!(shortcut("d", &[]).validate().is_err());
+        assert!(shortcut("rightoption", &["cmd"]).validate().is_err());
+        assert!(shortcut("volumeup", &[]).validate().is_err());
+    }
+    #[test]
+    fn modifier_only_holds_own_their_release_and_conflicts_are_detected() {
+        let mut g = HoldGesture::default();
+        let left = shortcut("leftoption", &[]);
+        let right = shortcut("rightoption", &[]);
+        assert!(!left.conflicts(&right));
+        assert!(left.conflicts(&shortcut("leftoption", &[])));
+        // Same state machine as any other key: only the owner's release ends the hold.
+        assert_eq!(g.down("left", target(), 0), GestureEffect::Start(target()));
+        assert_eq!(g.down("right", target(), 1), GestureEffect::None);
+        assert_eq!(g.up("right"), GestureEffect::None);
+        assert_eq!(g.up("left"), GestureEffect::Finish(target()));
     }
     #[test]
     fn ownership_repeat_and_target_are_stable() {

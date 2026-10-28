@@ -202,16 +202,26 @@ func record(_ o: [String: Any]) async throws -> [String: Any] {
 struct Binding: Decodable {let id:String;let key:String;let modifiers:[String];let enabled:Bool}
 final class Hotkeys {
     var port: CFMachPort?;var bindings:[Binding]=[];var down:[Int64:String]=[:]
-    let keycodes:[String:Int64]=["home":115,"end":119,"pageup":116,"pagedown":121,"f1":122,"f2":120,"f3":99,"f4":118,"f5":96,"f6":97,"f7":98,"f8":100,"f9":101,"f10":109,"f11":103,"f12":111,"space":49,"escape":53]
+    let keycodes:[String:Int64]=["home":115,"end":119,"pageup":116,"pagedown":121,"f1":122,"f2":120,"f3":99,"f4":118,"f5":96,"f6":97,"f7":98,"f8":100,"f9":101,"f10":109,"f11":103,"f12":111,"space":49,"escape":53,"a":0,"s":1,"d":2,"f":3,"h":4,"g":5,"z":6,"x":7,"c":8,"v":9,"b":11,"q":12,"w":13,"e":14,"r":15,"y":16,"t":17,"1":18,"2":19,"3":20,"4":21,"6":22,"5":23,"9":25,"7":26,"8":28,"0":29,"o":31,"u":32,"i":34,"p":35,"l":37,"j":38,"k":40,"n":45,"m":46]
+    /// Modifiers held alone: keycode and the device-dependent flag bit that tells left from right.
+    let modifierKeys:[String:(code:Int64,bit:UInt64)]=["leftcontrol":(59,0x1),"leftshift":(56,0x2),"rightshift":(60,0x4),"leftcommand":(55,0x8),"rightcommand":(54,0x10),"leftoption":(58,0x20),"rightoption":(61,0x40),"rightcontrol":(62,0x2000),"fn":(63,0x800000)]
     func run(path:String) throws {
         bindings=try JSONDecoder().decode([Binding].self,from:Data(contentsOf:URL(fileURLWithPath:path))).filter(\.enabled)
-        for b in bindings{guard keycodes[b.key.lowercased()] != nil else{throw failure("Unsupported native shortcut key: "+b.key)}}
-        let mask=CGEventMask(1<<CGEventType.keyDown.rawValue | 1<<CGEventType.keyUp.rawValue)
+        for b in bindings{guard keycodes[b.key.lowercased()] != nil || modifierKeys[b.key.lowercased()] != nil else{throw failure("Unsupported native shortcut key: "+b.key)}}
+        let mask=CGEventMask(1<<CGEventType.keyDown.rawValue | 1<<CGEventType.keyUp.rawValue | 1<<CGEventType.flagsChanged.rawValue)
         let pointer=Unmanaged.passUnretained(self).toOpaque()
         port=CGEvent.tapCreate(tap:.cgSessionEventTap,place:.headInsertEventTap,options:.defaultTap,eventsOfInterest:mask,callback:{_,type,event,pointer in
             guard let pointer=pointer else{return Unmanaged.passUnretained(event)};let this=Unmanaged<Hotkeys>.fromOpaque(pointer).takeUnretainedValue()
             if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {this.down.removeAll();emit(["event":"cancel","reason":"event_tap_disabled"]);if let port=this.port{CGEvent.tapEnable(tap:port,enable:true)};return Unmanaged.passUnretained(event)}
             let code=event.getIntegerValueField(.keyboardEventKeycode)
+            if type == .flagsChanged {
+                // Modifier-only holds: pressed when this modifier's own bit is set, released when it clears.
+                guard let binding=this.bindings.first(where:{this.modifierKeys[$0.key.lowercased()]?.code==code}),let key=this.modifierKeys[binding.key.lowercased()] else{return Unmanaged.passUnretained(event)}
+                if event.flags.rawValue & key.bit != 0 {
+                    if this.down[code]==nil{this.down[code]=binding.id;do{emit(["event":"down","binding":binding.id,"target":try target()])}catch{emit(["event":"cancel","reason":error.localizedDescription])}}
+                } else if let owner=this.down.removeValue(forKey:code){emit(["event":"up","binding":owner])}
+                return Unmanaged.passUnretained(event)
+            }
             if type == .keyUp, let owner=this.down.removeValue(forKey:code){emit(["event":"up","binding":owner]);return nil}
             if type == .keyDown && code == 53 && !this.down.isEmpty { this.down.removeAll();emit(["event":"cancel","reason":"escape"]);return nil }
             if type == .keyDown {
