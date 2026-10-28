@@ -2,7 +2,12 @@
 set -eu
 mkdir -p target/native
 parakeet_output="target/native/.parakeet-model-runtime-build-$$"
-trap 'rm -f "$parakeet_output"' EXIT HUP INT TERM
-swiftc -swift-version 5 -parse-as-library -D Diarizer -O native/fluidaudio/*.swift native/asr.swift native/model-runtime.swift -framework CoreML -framework Accelerate -framework AVFoundation -o "$parakeet_output"
+parakeet_log="$parakeet_output.log"
+trap 'rm -f "$parakeet_output" "$parakeet_log"' EXIT HUP INT TERM
+# The vendored FluidAudio code triggers many deprecation warnings; show compiler output only on failure.
+if ! swiftc -swift-version 5 -parse-as-library -D Diarizer -O native/fluidaudio/*.swift native/asr.swift native/model-runtime.swift -framework CoreML -framework Accelerate -framework AVFoundation -o "$parakeet_output" >"$parakeet_log" 2>&1; then
+  cat "$parakeet_log" >&2
+  exit 1
+fi
 
 mv -f "$parakeet_output" target/native/parakeet-model-runtime

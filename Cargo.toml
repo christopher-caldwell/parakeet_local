@@ -31,3 +31,7 @@ gpui-pre-apple = { path = "vendor/gpui-apple" }
 
 [profile.dev.package.sha2]
 opt-level = 3
+
+# The toolchain's rust-objcopy cannot find libLLVM, so stripping debug info only prints a warning.
+[profile.release]
+strip = "none"
