@@ -1,0 +1,98 @@
+{
+ "id": "long-clip-chunking-comparison",
+ "date": "2026-10-28",
+ "model": "whisper-small.en",
+ "data": "LibriSpeech dev-clean long concatenations (benchmarks/prepare_long_asr.py); set 1 speakers 1272,1462,2035; set 2 speakers 1673,1988,1993,2078",
+ "method": "Same suite through each build; WER from the benchmark runner (english_case_punctuation normalization, so 'mister' vs 'mr' counts as an error in every variant).",
+ "variants": {
+  "old_60s_windows": {
+   "set1": {
+    "wer": [
+     0.0664,
+     0.0388,
+     0.0372
+    ],
+    "errors": 95,
+    "words": 1991
+   },
+   "set2": {
+    "wer": [
+     0.0317,
+     0.0358,
+     0.0237,
+     0.0425
+    ],
+    "errors": 137,
+    "words": 4148
+   },
+   "overall_wer": 0.0378
+  },
+  "speech_aligned_25s": {
+   "set1": {
+    "wer": [
+     0.1032,
+     0.0345,
+     0.0307
+    ],
+    "errors": 113,
+    "words": 1991
+   },
+   "set2": {
+    "wer": [
+     0.0162,
+     0.0346,
+     0.0294,
+     0.0508
+    ],
+    "errors": 130,
+    "words": 4148
+   },
+   "overall_wer": 0.0396
+  },
+  "speech_aligned_15s": {
+   "set1": {
+    "wer": [
+     0.0723,
+     0.0417,
+     0.0291
+    ],
+    "errors": 96,
+    "words": 1991
+   },
+   "set2": {
+    "wer": [
+     0.0333,
+     0.0358,
+     0.0294,
+     0.055
+    ],
+    "errors": 157,
+    "words": 4148
+   },
+   "overall_wer": 0.0412
+  },
+  "speech_aligned_25s_with_sparse_redecode": {
+   "set1": {
+    "wer": [
+     0.0782,
+     0.0345,
+     0.0307
+    ],
+    "errors": 96,
+    "words": 1991
+   },
+   "set2": {
+    "wer": [
+     0.0162,
+     0.0346,
+     0.0294,
+     0.0508
+    ],
+    "errors": 130,
+    "words": 4148
+   },
+   "overall_wer": 0.0368
+  }
+ },
+ "finding": "No accuracy gain over the old windows is established. 25 s chunks skipped one 23-word sentence in 7 clips; a words-per-second check with a half-split re-decode recovered it. 15 s chunks avoided the skip but scored worse on set 2. Differences outside that skip are within noise for this sample size."
+}

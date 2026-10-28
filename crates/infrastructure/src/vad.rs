@@ -151,6 +151,15 @@ pub fn plan_chunks(samples: &[f32], is_final: bool) -> (Vec<Chunk>, usize) {
         .collect();
     (chunks, consumed.min(samples.len()))
 }
+/// Sample index of the quietest frame in the middle third of `samples`, where a chunk can be
+/// halved without cutting a word.
+pub fn quietest_cut(samples: &[f32]) -> usize {
+    let rms = frame_rms(samples);
+    let (from, to) = (rms.len() / 3, rms.len() * 2 / 3);
+    (from..to.max(from + 1))
+        .min_by(|a, b| rms[*a].total_cmp(&rms[*b]))
+        .map_or(samples.len() / 2, |frame| frame * FRAME)
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -165,6 +174,14 @@ mod tests {
     }
     fn silence(seconds: f32) -> Vec<f32> {
         vec![0.0005; (seconds * SAMPLE_RATE as f32) as usize]
+    }
+    #[test]
+    fn quietest_cut_lands_in_the_pause() {
+        let mut audio = tone(4., 0.3);
+        audio.extend(silence(0.6));
+        audio.extend(tone(4., 0.3));
+        let cut = quietest_cut(&audio) as f32 / SAMPLE_RATE as f32;
+        assert!((4.0..4.6).contains(&cut), "{cut}");
     }
     #[test]
     fn silence_and_low_noise_produce_no_chunks() {

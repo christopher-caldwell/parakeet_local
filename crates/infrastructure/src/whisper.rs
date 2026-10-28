@@ -26,6 +26,9 @@ pub(crate) struct WhisperJob<'a> {
 }
 /// Decoded in blocks so a long recording never sits in memory whole.
 const BLOCK_MS: i64 = 600_000;
+/// Conversational speech runs well above this; less in a long chunk means words were skipped.
+const SPARSE_WORDS_PER_SECOND: f64 = 1.2;
+const SPARSE_MIN_SPEECH_SECONDS: f64 = 6.;
 
 pub(crate) fn transcribe(job: WhisperJob<'_>) -> Result<EngineOutput, CapabilityError> {
     let WhisperJob {
@@ -113,20 +116,52 @@ pub(crate) fn transcribe(job: WhisperJob<'_>) -> Result<EngineOutput, Capability
             let chunk_start = position + chunk.start as i64 / 16;
             let pcm = &samples[chunk.start..chunk.end];
             speech_seconds += chunk.speech as f64 / vad::SAMPLE_RATE as f64;
-            transcribe_chunk(
-                context,
-                req,
-                track,
-                run,
-                control,
-                pcm,
-                chunk_start,
-                duration,
-                chunks_done,
-                offset,
-                &mut segments,
-                &mut raw,
-            )?;
+            let mark = (segments.len(), raw.len());
+            let decode = |pcm: &[f32], start: i64, segments: &mut Vec<_>, raw: &mut Vec<_>| {
+                transcribe_chunk(
+                    context,
+                    req,
+                    track,
+                    run,
+                    control,
+                    pcm,
+                    start,
+                    duration,
+                    chunks_done,
+                    offset,
+                    segments,
+                    raw,
+                )
+            };
+            decode(pcm, chunk_start, &mut segments, &mut raw)?;
+            // Whisper sometimes silently skips a sentence inside a long chunk. Speech this sparse
+            // is re-decoded in halves, keeping whichever pass recovered more words.
+            let speech = chunk.speech as f64 / vad::SAMPLE_RATE as f64;
+            let words = |segments: &[TranscriptSegment]| {
+                segments
+                    .iter()
+                    .map(|s| s.text.split_whitespace().count())
+                    .sum::<usize>()
+            };
+            if speech >= SPARSE_MIN_SPEECH_SECONDS
+                && (words(&segments[mark.0..]) as f64) < speech * SPARSE_WORDS_PER_SECOND
+            {
+                let first = (segments.split_off(mark.0), raw.split_off(mark.1));
+                let cut = vad::quietest_cut(pcm);
+                decode(&pcm[..cut], chunk_start, &mut segments, &mut raw)?;
+                decode(
+                    &pcm[cut..],
+                    chunk_start + cut as i64 / 16,
+                    &mut segments,
+                    &mut raw,
+                )?;
+                if words(&segments[mark.0..]) <= words(&first.0) {
+                    segments.truncate(mark.0);
+                    raw.truncate(mark.1);
+                    segments.extend(first.0);
+                    raw.extend(first.1);
+                }
+            }
             chunks_done += 1;
             control.publish(
                 ProcessingStage::Transcribing,

@@ -214,7 +214,7 @@ Evidence is stated by category; "unit" means no real model or hardware.
 | Imported-label clip proposals (SPK-3) | SQLite-adapter, synthetic labels |
 | Calibration, adoptable policy, opt-in suggestions inline (SPK-6) | unit on synthetic embeddings; no personal calibration run |
 | Re-embed, notes, history (SPK-7, SPK-10) | SQLite-adapter; no GUI for notes/history |
-| Speech-aligned Whisper chunks, no chunk resume (SIMP-2, ASR-2, ASR-3) | unit VAD; real-model-tested on public silence, noise, tone (no text published) and 38 s of public meeting speech (118 words, RTF 0.08 in a debug build); no WER comparison with the old windows |
+| Speech-aligned Whisper chunks, no chunk resume (SIMP-2, ASR-2, ASR-3) | unit VAD; real-model-tested on public silence, noise, tone (no text published) and 38 s of public meeting speech (118 words, RTF 0.08 in a debug build); WER against the old 60 s windows on 7 long public clips is in [the chunking comparison](../benchmarks/results/2026-10-28-long-clip-chunking.json): parity (3.7% vs 3.8%), no accuracy gain; a sparse-chunk re-decode recovers a sentence Whisper skipped in one 25 s chunk |
 | Me/Them/Unknown (SEP-6), fuzzy duplicates, bleed detection (SEP-1 detection) | unit; synthetic two-track bleed incl. double-talk and offsets; decoded-WAV integration test; not run on a real meeting |
 | Drift never drops audio (BUG-5) | compiled-helper self-test at ±200 ppm over one simulated hour |
 | Mic reconnect (CAP-2) | compiled; logic not hardware-tested |

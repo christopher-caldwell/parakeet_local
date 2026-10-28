@@ -45,6 +45,15 @@ The VoxConverse filter yields 16 entries, including the earlier three. Set the c
 
 The opt-in Rust cache probe requires `PARAKEET_MODEL_PROBE_ROOT` and `PARAKEET_MODEL_PROBE_AUDIO` as **absolute paths** to disposable model copies and a public audio file. Run `scripts/cargo test -p parakeet-infrastructure --test model_cache -- --ignored --nocapture`. It temporarily removes/restores the copy's verification receipt, checks stable output and waits 75 seconds for idle eviction. Do not point it at a live personal model root. It performs no downloads. Ordinary workspace tests skip this environment-dependent probe; its separate execution is recorded in verification.
 
+## Long-clip chunking
+
+```sh
+python3 benchmarks/prepare_long_asr.py .local/public/librispeech/dev-clean.tar.gz .local/long-asr 1272 1462 2035
+target/release/parakeet --data-root .local/long-asr-root benchmark run .local/long-asr/suite.json
+```
+
+Single utterances never reach chunking; these multi-minute joins do. [Result](results/2026-10-28-long-clip-chunking.json): parity with the old fixed windows, not a gain.
+
 ## Speaker-attributed word diagnostics
 
 `benchmark score-speakers REFERENCE.json PREDICTION.json` computes anonymous-stream cpWER through the shared application service without database initialization. [Input/protocol and limitations](../docs/speaker-word-evaluation.md) are explicit. For external scorer verification, deliberately install `meeteval==0.4.3` in an isolated Python environment and run `python benchmarks/check_speaker_wer.py --output .local/speaker-wer-oracle.json` using that interpreter. The fixed seed generates 250 cases; no speech/network inference is involved.
