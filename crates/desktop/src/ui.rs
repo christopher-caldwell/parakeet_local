@@ -141,6 +141,7 @@ impl AssetSource for Icons {
 
 pub fn model_name(id: &str) -> &str {
     match id {
+        "parakeet-tdt-0.6b-v2" => "Parakeet TDT v2 · English",
         "whisper-base.en" => "Whisper Base · English",
         "whisper-small.en" => "Whisper Small · English",
         "whisper-medium.en" => "Whisper Medium · English",

@@ -4,6 +4,7 @@ Weights are deliberately installed from pinned HTTPS model revisions, hashed aga
 
 | Registry ID | Runtime | Pinned weights revision | Installed bytes in this run |
 |---|---|---|---:|
+| parakeet-tdt-0.6b-v2 | FluidAudio v0.9.1 ASR subset / Core ML (CPU + Neural Engine) | ee09c569f73759e6d44c9bd16766f477b2b36d39 | 464,413,247 |
 | whisper-base.en | whisper-rs 0.16.0 / whisper.cpp Metal | 5359861c739e955e79d9a303bcbc70fb988958b1 | 147,964,211 |
 | whisper-small.en | same runtime | same revision | 487,614,201 |
 | whisper-medium.en | same runtime | same revision | 1,533,774,781 |
@@ -13,6 +14,8 @@ Weights are deliberately installed from pinned HTTPS model revisions, hashed aga
 | speakrs-community-1-cpu | speakrs 0.7.0 native CPU | same revision | 32,692,756 |
 | nemotron3-fast128 | selected FluidAudio source subset / Core ML CPU+GPU | 1b0b133f6f8820292010afd776d8f9fbc9fca17e | 199,096,435 |
 | nemotron3-offline | same runtime, offline preset | same revision | approximately 199 MB |
+
+**Default speech model: Parakeet TDT v2** (English). On the public benchmarks it was the most accurate model tried and ran about 100 times faster than real time ([comparison](../benchmarks/results/2026-10-28-parakeet-tdt.json)). It reads the same speech-aligned chunks as Whisper through the native helper. Whisper stays selectable.
 
 Whisper converts mono 16 kHz PCM in independent speech-aligned chunks of up to 25 seconds, cut inside silence, with no context carryover. Model comparison: [whisper-models](../benchmarks/results/2026-10-28-whisper-models.json). Segment timings are model estimates, not word alignments. Explicit `--word-timestamps` additionally preserves experimental Whisper token estimates and derived anonymous word evidence; it remains off by default. Invalid timing stays untimed. See [speaker-word evaluation](speaker-word-evaluation.md). There is no overlapping chunk concatenation to deduplicate. Text, source, no-speech evidence, chunk energy, configuration and raw output are retained separately from speaker reconciliation. Unknown source origins or inconsistent capture timelines keep track-local timing in evidence rather than inventing meeting times. English-only model variants are currently offered.
 

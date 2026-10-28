@@ -17,6 +17,7 @@ use tokio::process::Command;
 
 pub const WHISPER_REV: &str = "5359861c739e955e79d9a303bcbc70fb988958b1";
 pub const SPEAKRS_REV: &str = "67f963b6a1d94fcd4678948237b3cc8bd69bf1d8";
+pub const PARAKEET_TDT_REV: &str = "ee09c569f73759e6d44c9bd16766f477b2b36d39";
 pub const NEMOTRON_REV: &str = "1b0b133f6f8820292010afd776d8f9fbc9fca17e";
 pub const SPEAKRS_ID: &str = "speakrs-community-1-coreml";
 #[derive(Clone)]
@@ -122,7 +123,7 @@ impl ModelFiles {
             && cache
                 .as_ref()
                 .is_some_and(|c| c["revision"] == revision && c["files"] == fingerprints);
-        let mut detail = json!({"runtime":if category=="asr"{"whisper-rs 0.16.0 / whisper.cpp"}else if id.starts_with("nemotron3-"){"FluidAudio Nemotron subset 1b0ed50d / CoreML CPU+GPU"}else if id.ends_with("-cpu"){"speakrs 0.7.0 / native CPU"}else{"speakrs 0.7.0 / CoreML"},"offline_processing":true,"required_files":files.len(),"verification_basis":if full{"sha256_against_pinned_catalog"}else{"cached_sha256_plus_file_size_and_mtime"},"provides_voice_embeddings":id==SPEAKRS_ID||id=="speakrs-community-1-cpu","speaker_capacity":if id.starts_with("nemotron3-"){Some(8)}else{None}});
+        let mut detail = json!({"runtime":if id.starts_with("parakeet-tdt-"){"FluidAudio 0.9.1 ASR subset / CoreML CPU+ANE"}else if category=="asr"{"whisper-rs 0.16.0 / whisper.cpp"}else if id.starts_with("nemotron3-"){"FluidAudio Nemotron subset 1b0ed50d / CoreML CPU+GPU"}else if id.ends_with("-cpu"){"speakrs 0.7.0 / native CPU"}else{"speakrs 0.7.0 / CoreML"},"offline_processing":true,"required_files":files.len(),"verification_basis":if full{"sha256_against_pinned_catalog"}else{"cached_sha256_plus_file_size_and_mtime"},"provides_voice_embeddings":id==SPEAKRS_ID||id=="speakrs-community-1-cpu","speaker_capacity":if id.starts_with("nemotron3-"){Some(8)}else{None}});
         if full {
             // A failed explicit check must invalidate an older verification receipt.
             match std::fs::remove_file(directory.join("verified.json")) {
@@ -199,6 +200,35 @@ fn catalog(
             "MIT",
             "ggerganov/whisper.cpp",
             vec!["ggml-small.en.bin".into()],
+        )),
+        "parakeet-tdt-0.6b-v2" => Ok((
+            "asr",
+            PARAKEET_TDT_REV,
+            "CC-BY-4.0 (NVIDIA Parakeet TDT 0.6B v2 weights; FluidInference Core ML conversion)",
+            "FluidInference/parakeet-tdt-0.6b-v2-coreml",
+            vec![
+                "Decoder.mlmodelc/analytics/coremldata.bin".into(),
+                "Decoder.mlmodelc/coremldata.bin".into(),
+                "Decoder.mlmodelc/metadata.json".into(),
+                "Decoder.mlmodelc/model.mil".into(),
+                "Decoder.mlmodelc/weights/weight.bin".into(),
+                "Encoder.mlmodelc/analytics/coremldata.bin".into(),
+                "Encoder.mlmodelc/coremldata.bin".into(),
+                "Encoder.mlmodelc/metadata.json".into(),
+                "Encoder.mlmodelc/model.mil".into(),
+                "Encoder.mlmodelc/weights/weight.bin".into(),
+                "JointDecision.mlmodelc/analytics/coremldata.bin".into(),
+                "JointDecision.mlmodelc/coremldata.bin".into(),
+                "JointDecision.mlmodelc/metadata.json".into(),
+                "JointDecision.mlmodelc/model.mil".into(),
+                "JointDecision.mlmodelc/weights/weight.bin".into(),
+                "Preprocessor.mlmodelc/analytics/coremldata.bin".into(),
+                "Preprocessor.mlmodelc/coremldata.bin".into(),
+                "Preprocessor.mlmodelc/metadata.json".into(),
+                "Preprocessor.mlmodelc/model.mil".into(),
+                "Preprocessor.mlmodelc/weights/weight.bin".into(),
+                "parakeet_vocab.json".into(),
+            ],
         )),
         "whisper-medium.en" | "whisper-large-v3" | "whisper-large-v3-turbo" => Ok((
             "asr",
@@ -345,6 +375,7 @@ impl LocalModels for ModelFiles {
         let own = self.clone();
         tokio::task::spawn_blocking(move || {
             [
+                "parakeet-tdt-0.6b-v2",
                 "whisper-base.en",
                 "whisper-small.en",
                 "whisper-medium.en",

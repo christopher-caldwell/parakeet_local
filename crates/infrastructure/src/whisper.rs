@@ -209,7 +209,7 @@ pub(crate) fn transcribe(job: WhisperJob<'_>) -> Result<EngineOutput, Capability
 /// Why `text` is Whisper noise rather than speech: a bracketed sound annotation such as
 /// `[BLANK_AUDIO]` or `(air whooshing)`, or a caption sign-off it learned from video subtitles.
 /// Ordinary phrases like "thank you" are speech and are never matched.
-fn non_speech_text(text: &str) -> Option<&'static str> {
+pub(crate) fn non_speech_text(text: &str) -> Option<&'static str> {
     let text = text.trim();
     let wrapped = |open: char, close: char| {
         text.starts_with(open) && text.ends_with(close) && !text[1..].contains(open)

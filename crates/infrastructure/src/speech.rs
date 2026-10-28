@@ -45,7 +45,7 @@ impl SpeechProcessing for LocalSpeech {
     fn cancellation_mode(&self, model: &str) -> &'static str {
         if model.starts_with("whisper-") {
             "cooperative_callback"
-        } else if model.starts_with("nemotron3-") {
+        } else if model.starts_with("nemotron3-") || model.starts_with("parakeet-tdt-") {
             "terminate_owned_child"
         } else {
             "at_engine_boundary"
@@ -89,6 +89,9 @@ impl SpeechProcessing for LocalSpeech {
     output.metrics["speaker_slots_available"]=json!(NEMOTRON_SPEAKER_SLOTS);
     output.metrics["speaker_slots_saturated"]=json!(used>=NEMOTRON_SPEAKER_SLOTS);
     return Ok(output);
+   }
+   if req.model.starts_with("parakeet-tdt-"){
+    return crate::native_models::parakeet(crate::native_models::ParakeetJob{runtime:&runtime,models:&models,request:&req,track:&track,run:&run,duration,started,executable:&model_runtime,control:&control});
    }
    if req.model.starts_with("whisper-"){
     control.publish(ProcessingStage::LoadingModel,0,Some(duration),0,None);

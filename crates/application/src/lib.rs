@@ -441,7 +441,7 @@ fn default_embedding_choice() -> String {
 impl Default for ModelSelection {
     fn default() -> Self {
         Self {
-            asr: "whisper-base.en".into(),
+            asr: "parakeet-tdt-0.6b-v2".into(),
             diarization: "nemotron3-fast128".into(),
             embedding: default_embedding_choice(),
         }
