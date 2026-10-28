@@ -300,15 +300,7 @@ impl LibraryService {
             .into_iter()
             .collect();
         let mut latest = std::collections::BTreeMap::<String, Vec<SpeakerInterval>>::new();
-        for run in d
-            .runs
-            .iter()
-            .filter(|r| r.kind == "diarization" && r.status == "completed")
-        {
-            let track = run.configuration["track"]["id"]
-                .as_str()
-                .unwrap_or("unknown")
-                .to_owned();
+        for (track, run) in current_diarization_runs(&d.runs) {
             if let Ok(intervals) = serde_json::from_value(run.result["intervals"].clone()) {
                 latest.insert(track, intervals);
             }

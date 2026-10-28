@@ -189,6 +189,58 @@ pub struct ProcessingRun {
     pub result: Value,
     pub error: Option<String>,
 }
+impl ProcessingRun {
+    /// A diarization run that covered the whole source (not a bounded experiment).
+    fn covers_whole_source(&self) -> bool {
+        let request = &self.configuration["request"];
+        request["start_ms"].as_i64() == Some(0) && request["duration_ms"].is_null()
+    }
+}
+/// The diarization run that currently defines speaker attribution for each track:
+/// the latest completed full-source run, or the latest human cluster edit derived
+/// from it. Bounded experiments and edits of superseded runs never become current.
+pub fn current_diarization_runs<'a>(
+    runs: &'a [ProcessingRun],
+) -> std::collections::BTreeMap<String, &'a ProcessingRun> {
+    let done = |r: &&'a ProcessingRun| r.kind == "diarization" && r.status == "completed";
+    let by_id: std::collections::HashMap<&'a str, &'a ProcessingRun> = runs
+        .iter()
+        .filter(done)
+        .map(|r| (r.id.as_str(), r))
+        .collect();
+    let root = |mut run: &'a ProcessingRun| -> Option<String> {
+        for _ in 0..runs.len() + 1 {
+            match run.configuration["human_edit_source_run"].as_str() {
+                None => return run.covers_whole_source().then(|| run.id.clone()),
+                Some(parent) => run = by_id.get(parent).copied()?,
+            }
+        }
+        None
+    };
+    let mut full = std::collections::BTreeMap::<String, &'a ProcessingRun>::new();
+    for run in runs.iter().filter(done) {
+        let Some(track) = run.configuration["track"]["id"].as_str() else {
+            continue;
+        };
+        if run.configuration["human_edit_source_run"].is_null() && run.covers_whole_source() {
+            full.insert(track.to_owned(), run);
+        }
+    }
+    let mut current = full.clone();
+    for run in runs.iter().filter(done) {
+        let Some(track) = run.configuration["track"]["id"].as_str() else {
+            continue;
+        };
+        if run.configuration["human_edit_source_run"].is_string()
+            && full
+                .get(track)
+                .is_some_and(|f| root(run).as_deref() == Some(f.id.as_str()))
+        {
+            current.insert(track.to_owned(), run);
+        }
+    }
+    current
+}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpeakerProfile {
     pub id: String,
@@ -338,3 +390,59 @@ pub mod reconciliation;
 pub mod cluster_edits;
 
 pub mod storage;
+
+#[cfg(test)]
+mod current_diarization_tests {
+    use super::*;
+    use serde_json::json;
+    fn run(id: &str, config: Value) -> ProcessingRun {
+        ProcessingRun {
+            id: id.into(),
+            recording_id: "r".into(),
+            kind: "diarization".into(),
+            model: "m".into(),
+            model_revision: "1".into(),
+            status: "completed".into(),
+            started_at: String::new(),
+            completed_at: None,
+            configuration: config,
+            result: json!({}),
+            error: None,
+        }
+    }
+    fn full(id: &str) -> ProcessingRun {
+        run(
+            id,
+            json!({"track":{"id":"t"},"request":{"start_ms":0,"duration_ms":null}}),
+        )
+    }
+    fn bounded(id: &str) -> ProcessingRun {
+        run(
+            id,
+            json!({"track":{"id":"t"},"request":{"start_ms":5000,"duration_ms":60000}}),
+        )
+    }
+    fn edit(id: &str, source: &str) -> ProcessingRun {
+        run(
+            id,
+            json!({"track":{"id":"t"},"human_edit_source_run":source}),
+        )
+    }
+    fn current(runs: &[ProcessingRun]) -> String {
+        current_diarization_runs(runs)["t"].id.clone()
+    }
+    #[test]
+    fn bounded_experiment_never_replaces_full_run() {
+        assert_eq!(current(&[full("f"), bounded("b")]), "f");
+        assert!(current_diarization_runs(&[bounded("b")]).is_empty());
+    }
+    #[test]
+    fn edit_of_current_full_run_wins_over_later_bounded_run() {
+        assert_eq!(current(&[full("f"), edit("e", "f"), bounded("b")]), "e");
+        assert_eq!(current(&[full("f"), edit("e", "f"), edit("u", "e")]), "u");
+    }
+    #[test]
+    fn new_full_run_supersedes_edits_of_older_run() {
+        assert_eq!(current(&[full("f1"), edit("e", "f1"), full("f2")]), "f2");
+    }
+}

@@ -2761,10 +2761,12 @@ async fn stale_schema_is_refused_without_migrating() {
     assert!(open_existing(&p).await.is_err());
     migrate(&p).await.unwrap();
     let pool = open_existing(&p).await.unwrap();
-    sqlx::query("DELETE FROM _sqlx_migrations WHERE version=(SELECT MAX(version) FROM _sqlx_migrations)")
-        .execute(&pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "DELETE FROM _sqlx_migrations WHERE version=(SELECT MAX(version) FROM _sqlx_migrations)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
     pool.close().await;
     let error = open_existing(&p).await.unwrap_err().to_string();
     assert!(error.contains("db migrate"), "{error}");

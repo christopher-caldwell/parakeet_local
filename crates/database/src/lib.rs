@@ -56,11 +56,10 @@ pub async fn open_existing(path: &Path) -> Result<SqlitePool, sqlx::Error> {
 /// Refuse a library whose applied migrations differ from the embedded ones; never migrates.
 async fn check_schema(path: &Path) -> Result<(), sqlx::Error> {
     let pool = raw_read_only(path).await?;
-    let applied: Result<i64, sqlx::Error> = sqlx::query_scalar(
-        "SELECT COALESCE(MAX(version),0) FROM _sqlx_migrations WHERE success=1",
-    )
-    .fetch_one(&pool)
-    .await;
+    let applied: Result<i64, sqlx::Error> =
+        sqlx::query_scalar("SELECT COALESCE(MAX(version),0) FROM _sqlx_migrations WHERE success=1")
+            .fetch_one(&pool)
+            .await;
     pool.close().await;
     let applied = applied.unwrap_or(0);
     let expected = sqlx::migrate!("./migrations")

@@ -484,16 +484,10 @@ impl SpeakerService {
             .detail(recording_id)
             .await?
             .ok_or_else(|| EnrollmentCandidatesError::NotFound(recording_id.into()))?;
-        let mut latest = std::collections::BTreeMap::new();
-        for r in d.runs.iter().filter(|r| {
-            r.kind == "diarization"
-                && r.status == "completed"
-                && run_ids.is_none_or(|ids| ids.contains(&r.id))
-        }) {
-            if let Some(track) = r.configuration["track"]["id"].as_str() {
-                latest.insert(track.to_owned(), r);
-            }
-        }
+        let latest = current_diarization_runs(&d.runs)
+            .into_iter()
+            .filter(|(_, r)| run_ids.is_none_or(|ids| ids.contains(&r.id)))
+            .collect::<std::collections::BTreeMap<_, _>>();
         let mut selected =
             std::collections::BTreeMap::<(String, String), EnrollmentCandidate>::new();
         for (track_id, run) in latest {
