@@ -210,7 +210,25 @@ fn parse_folder(folder: &Path) -> Result<ImportBundle, CapabilityError> {
                 .as_str()
                 .map(str::to_owned)
                 .unwrap_or_else(|| ordinal.to_string());
-            segments.push(TranscriptSegment{id:stable_id("segment",&format!("{id}:{external}:{ordinal}")),recording_id:id.clone(),run_id:run_id.clone(),track_id:None,ordinal,start_ms:start,end_ms:end,text:text.into(),speaker_claim:s["speakerLabel"].as_str().or_else(||s["speakerId"].as_str()).map(str::to_owned),evidence:json!({"origin":"imported_unverified","source_segment":s,"source_attribution":"unknown"})});
+            // MacParakeet speaker ids are source-prefixed ("microphone", "system", "system:N").
+            // The mapped track is imported, unverified evidence of the source, not an identity.
+            let imported_kind = match s["speakerId"].as_str() {
+                Some("microphone") => Some(TrackKind::Microphone),
+                Some(id) if id == "system" || id.starts_with("system:") => Some(TrackKind::System),
+                _ => None,
+            };
+            let imported_track = imported_kind.as_ref().and_then(|kind| {
+                tracks
+                    .iter()
+                    .find(|t| &t.kind == kind)
+                    .map(|t| t.id.clone())
+            });
+            let source_attribution = match &imported_kind {
+                Some(TrackKind::Microphone) => "imported_microphone",
+                Some(_) => "imported_system",
+                None => "unknown",
+            };
+            segments.push(TranscriptSegment{id:stable_id("segment",&format!("{id}:{external}:{ordinal}")),recording_id:id.clone(),run_id:run_id.clone(),track_id:imported_track,ordinal,start_ms:start,end_ms:end,text:text.into(),speaker_claim:s["speakerLabel"].as_str().or_else(||s["speakerId"].as_str()).map(str::to_owned),evidence:json!({"origin":"imported_unverified","source_segment":s,"source_attribution":source_attribution})});
         }
     }
     if segments.is_empty()
@@ -525,6 +543,36 @@ mod tests {
         assert_eq!(d.audit().missing_source_audio, 1);
         assert_eq!(b.segments[1].speaker_claim.as_deref(), Some("Me"));
         assert_eq!(b.segments[1].track_id, None);
+    }
+    #[test]
+    fn imported_source_prefixed_speaker_ids_map_to_unverified_tracks() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("manifest.json"),
+            r#"{"schemaVersion":1,"meeting":{"id":"s","title":"T","createdAt":"2026-01-01"}}"#,
+        )
+        .unwrap();
+        std::fs::write(tmp.path().join("transcript.json"),r#"{"transcriptSegments":[{"text":"a","startMs":0,"endMs":1,"speakerId":"microphone","speakerLabel":"Alex"},{"text":"b","startMs":2,"endMs":3,"speakerId":"system:2","speakerLabel":"Others 2"},{"text":"c","startMs":4,"endMs":5,"speakerLabel":"x"}]}"#).unwrap();
+        std::fs::write(tmp.path().join("meeting-recording-metadata.json"), "{}").unwrap();
+        let b = parse_folder(tmp.path()).unwrap();
+        let mic = b
+            .tracks
+            .iter()
+            .find(|t| t.kind == TrackKind::Microphone)
+            .unwrap();
+        let sys = b
+            .tracks
+            .iter()
+            .find(|t| t.kind == TrackKind::System)
+            .unwrap();
+        assert_eq!(b.segments[0].track_id.as_deref(), Some(mic.id.as_str()));
+        assert_eq!(b.segments[1].track_id.as_deref(), Some(sys.id.as_str()));
+        assert_eq!(b.segments[2].track_id, None);
+        assert_eq!(
+            b.segments[0].evidence["source_attribution"],
+            "imported_microphone"
+        );
+        assert_eq!(b.segments[0].evidence["origin"], "imported_unverified");
     }
     #[test]
     fn malformed_manifest_is_reported() {
