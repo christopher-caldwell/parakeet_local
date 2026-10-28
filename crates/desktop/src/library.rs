@@ -838,6 +838,9 @@ impl Workbench {
                     .when(imported, |row| {
                         row.child(pill("Imported · unverified", MUTED))
                     })
+                    .when(suggested, |row| {
+                        row.child(pill("Suggested · not confirmed", ACCENT))
+                    })
                     .child(caption(source))
                     .child(
                         quiet(
