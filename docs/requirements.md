@@ -13,8 +13,19 @@ The product authority is the user's original brief, "MacParakeet Clone — Produ
 - **Dictation is transcribe-then-paste.** Typing as the owner speaks is not required. Live transcript preview is out of scope.
 - **No MacParakeet import and no feature parity.** Only add what the owner cares about.
 - **Raw recordings are kept seven days, then replaced by a verified lossless copy**, so a wrong transcript or speaker label can still be redone from the original.
-- **Maturity stages:** proof of concept, usable, stable, replacement. Headphones are the normal setup, so microphone bleed is a lower priority unless "Me" turns out wrong. Words invented while the microphone is muted or silent are a defect to measure and fix.
+- **Maturity stages** (gates below): proof of concept, usable, stable, replacement. Headphones are the normal setup, so microphone bleed is a lower priority unless "Me" turns out wrong. Words invented while the microphone is muted or silent are a defect to measure and fix.
 - The default speech model is the most accurate one measured on the benchmarks in `benchmarks/results/`, not the one assumed to be best.
+
+## Maturity gates
+
+Each gate is passed by doing the owner's real workflow, not by tests alone. Work that does not block the current gate waits.
+
+| Gate | Passed when | Screens that gate it |
+|---|---|---|
+| **Proof of concept** (reached) | One real meeting goes end to end: accurate transcript, speakers detected, voices named, names recognized. Accuracy is measured on the owner's own audio. | none |
+| **Usable** (current) | The owner records a real meeting, dictates, reads and corrects a transcript, and names voices, all from the app with no terminal and no help. A muted or silent microphone produces no invented words. Errors say what to do. | Record a meeting, Dictation, Privacy (permissions), Library transcript, Name voices |
+| **Stable** | A few weeks of daily use without lost audio or silent failures: the 7-day lossless archive is verified, interrupted work resumes, recognition criteria are calibrated and the owner has seen the numbers. | Background jobs, Storage, Processing, error states |
+| **Replacement** | The owner stops opening MacParakeet. Only the features the owner cares about exist. | everything, as used |
 
 ## Me, Them and Unknown (B§7, B§9, B§26)
 
