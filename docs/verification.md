@@ -217,3 +217,31 @@ The release CLI inspected ten actual source records without changing the origina
 Backed-up personal schema 5→6 migration passed an isolated rehearsal, preserved all 15 existing table hashes, 18 recordings, exact three confirmed samples, selected models and 48 original artifact fingerprints/JSON hashes. Keep all/revision 0 and both automatic after-Stop options remain off. No personal cleanup or remote AI occurred. Private receipts are in `.local/integrated-pass/`; portable numeric results omit content/identities.
 
 Next: job scheduling and explicit dictation priority; current knowledge and fixtures suffice. Physical capture/keyboard/editor, Bluetooth/M3 and additional personal-quality validation remain separate user/hardware checkpoints.
+
+## Design-alignment pass (branch `feat/design-alignment`)
+
+Earlier entries above are historical. Where they describe behavior this pass changed (a correction not creating examples, record-only meetings by default, Whisper chunk resume, fixed 60 s Whisper windows, drop-on-drift capture), the code and the current docs win.
+
+Evidence is stated by category; "unit" means no real model or hardware.
+
+| Change | Evidence |
+|---|---|
+| Stale library schema refused at open (BUG-2) | SQLite-adapter test |
+| Full-source diarization is current; bounded runs never replace it (BUG-1) | unit + SQLite-adapter |
+| Centroid scoring, scoring method recorded (SPK-4) | unit |
+| Meetings transcribe after Stop by default; record-only fallback without a verified model (MTG-1) | SQLite-adapter + CLI contract |
+| Imported labels shown as unverified claims; imported source tracks (BUG-6, SEP-3) | unit; not seen in the GUI |
+| Silent source warning (CAP-1) | unit on artifact metadata; no hardware |
+| Lease files removed on release (BUG-3) | unit |
+| Pooled cluster speech, no candidate truncation (SPK-5) | unit |
+| Name a whole cluster; confirmed actions admit reversible examples (SPK-1, SPK-2) | SQLite-adapter; GUI compiled, not exercised |
+| Imported-label clip proposals (SPK-3) | SQLite-adapter, synthetic labels |
+| Calibration, adoptable policy, opt-in suggestions inline (SPK-6) | unit on synthetic embeddings; no personal calibration run |
+| Re-embed, notes, history (SPK-7, SPK-10) | SQLite-adapter; no GUI for notes/history |
+| Speech-aligned Whisper chunks, no chunk resume (SIMP-2, ASR-2, ASR-3) | unit VAD; real-model-tested on public silence, noise, tone (no text published) and 38 s of public meeting speech (118 words, RTF 0.08 in a debug build); no WER comparison with the old windows |
+| Me/Them/Unknown (SEP-6), fuzzy duplicates, bleed detection (SEP-1 detection) | unit; synthetic two-track bleed incl. double-talk and offsets; decoded-WAV integration test; not run on a real meeting |
+| Drift never drops audio (BUG-5) | compiled-helper self-test at ±200 ppm over one simulated hour |
+| Mic reconnect (CAP-2) | compiled; logic not hardware-tested |
+| Permission requests (CAP-4), modifier-only and letter shortcuts (DIC-3) | unit for validation; hardware not tested |
+
+Limits of this pass: SEP-1's cancelled-microphone transcription (ASR on echo-cancelled audio) is not built; only bleed detection withholds "Me". The energy VAD removes silence and stationary noise, not speech-like noise. Clock-drift correction is recorded, not applied: a device clock 200 ppm fast leaves about 0.7 s of mic-to-system skew per hour. No UI performance harness was re-run after the UI changes.
