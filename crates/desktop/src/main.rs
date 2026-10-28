@@ -272,6 +272,12 @@ impl Workbench {
         future: impl Future<Output = anyhow::Result<Update>> + Send + 'static,
         cx: &mut Context<Self>,
     ) {
+        if self.capture_stop.is_some() {
+            // Playback is a separate process that screen capture would record as system audio.
+            self.status = "Review playback is paused while a meeting is recording".into();
+            cx.notify();
+            return;
+        }
         self.stop_playback(cx);
         self.playback_label = label.to_owned();
         self.launch(label, Box::pin(future), true, cx);
