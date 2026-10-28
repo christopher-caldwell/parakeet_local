@@ -15,3 +15,5 @@ Source recordings and the original MacParakeet database are read-only. Work prod
 5. Integrations: capture/health/recovery, shortcuts/insertion, opt-in AI routes, media metadata/import. Hardware claims require actual hardware evidence.
 
 These are implementation milestones, not human approval gates. Unavailable Swift tooling, model access, or hardware permission does not block independent work. Human checkpoints require only actual identity labels, OS permission, physical keyboard/capture checks, and subjective acceptance after useful workflows exist.
+
+Current scope, conformance findings and reset priorities are tracked in the [top-to-bottom project review](project-review.md), audited at `64a6278`. The original product brief remains authoritative; a green build or isolated feature receipt is not whole-product acceptance.
