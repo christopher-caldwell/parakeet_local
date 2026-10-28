@@ -10,3 +10,7 @@
 /.local-*.log
 __pycache__/
 *.pyc
+*.caf
+*.flac
+*.webm
+*.opus
