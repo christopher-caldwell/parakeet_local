@@ -1,5 +1,16 @@
 # Focused human checkpoints
 
+## 0. Pick the right transcript (about 10 minutes)
+
+Measures which speech model is more accurate on your own meetings, without anyone typing a reference transcript. Two models transcribe the same recordings; where they disagree, a page plays a short clip and shows both versions in random order. You pick the one that matches what was said.
+
+```sh
+python3 benchmarks/make_review_page.py .local/review/result-tdt.json .local/review/result-lv3.json .local/review --items 60
+open .local/review/review.html
+```
+
+Answer, press **Save my answers**, then `python3 benchmarks/score_review.py .local/review ~/Downloads/review-answers.json` prints how often each transcript was right (counts only). The page, clips and answers hold private speech and stay under `.local/`.
+
 ## 1. Speaker identification session (about 15 minutes)
 
 No new recording is needed. In the desktop app: open a meeting that has been analyzed (Library → recording → Identify voices, or Speakers → Identify voices), then for each waiting voice:
