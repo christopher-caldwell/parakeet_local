@@ -108,6 +108,9 @@ async fn only_old_idle_application_owned_captures_become_verified_lossless_copie
         })
         .await
         .unwrap();
+    let ownership = Arc::new(
+        parakeet_infrastructure::jobs::FileProcessingOwnership::for_database(&db).unwrap(),
+    );
     let service = AudioArchiveService::new(
         store.clone(),
         store.clone(),
@@ -115,6 +118,7 @@ async fn only_old_idle_application_owned_captures_become_verified_lossless_copie
         store.clone(),
         Arc::new(LocalAudioIdentity),
         Arc::new(FfmpegArchiver),
+        ownership.clone(),
     );
     let now = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
@@ -124,6 +128,17 @@ async fn only_old_idle_application_owned_captures_become_verified_lossless_copie
     let preview = service.archive_due(now, true).await.unwrap();
     assert_eq!(preview.archived.len(), 1);
     assert!(old.exists(), "a dry run changes nothing");
+
+    // A recording being analyzed holds its lease, and the archive leaves it alone.
+    {
+        use parakeet_application::jobs::ProcessingOwnership;
+        let key = parakeet_domain::stable_id("meeting-analysis-controller", "old");
+        let _analyzing = ownership.try_acquire(&key).await.unwrap().unwrap();
+        let held = service.archive_due(now, false).await.unwrap();
+        assert!(held.archived.is_empty());
+        assert_eq!(held.skipped_busy, 2);
+        assert!(old.exists());
+    }
 
     let report = service.archive_due(now, false).await.unwrap();
     assert_eq!(

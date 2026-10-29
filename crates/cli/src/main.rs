@@ -857,6 +857,8 @@ async fn execute(cli: Cli) -> anyhow::Result<Value> {
             locations: store.clone(),
         },
     );
+    let ownership =
+        Arc::new(parakeet_infrastructure::jobs::FileProcessingOwnership::for_database(&database)?);
     let archive = parakeet_application::audio_archive::AudioArchiveService::new(
         store.clone(),
         store.clone(),
@@ -864,11 +866,10 @@ async fn execute(cli: Cli) -> anyhow::Result<Value> {
         validated_audio.clone(),
         Arc::new(parakeet_infrastructure::audio::LocalAudioIdentity),
         Arc::new(parakeet_infrastructure::archive::FfmpegArchiver),
+        ownership.clone(),
     );
     let library = LibraryService::new(store.clone(), validated_audio.clone(), source.clone());
     let engine = Arc::new(LocalSpeech::new(models.clone(), model_runtime_executable()));
-    let ownership =
-        Arc::new(parakeet_infrastructure::jobs::FileProcessingOwnership::for_database(&database)?);
     let recovery = parakeet_application::jobs::ProcessingRecoveryService::new(
         store.clone(),
         store.clone(),

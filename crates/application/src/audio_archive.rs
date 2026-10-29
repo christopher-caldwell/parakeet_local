@@ -1,7 +1,7 @@
 //! Raw capture audio is kept untouched for a week so a wrong transcript or speaker label can be
 //! redone from the original. After that it is replaced by a verified lossless copy.
 use super::audio_locations::{AudioFileIdentityReader, AudioLocationWrites};
-use super::jobs::ProcessingQueries;
+use super::jobs::{ProcessingOwnership, ProcessingQueries};
 use super::storage::StorageQueries;
 use super::*;
 use std::collections::BTreeSet;
@@ -44,6 +44,7 @@ pub struct AudioArchiveService {
     writes: Arc<dyn AudioLocationWrites>,
     reader: Arc<dyn AudioFileIdentityReader>,
     archiver: Arc<dyn AudioArchiver>,
+    ownership: Arc<dyn ProcessingOwnership>,
 }
 impl AudioArchiveService {
     pub fn new(
@@ -53,6 +54,7 @@ impl AudioArchiveService {
         writes: Arc<dyn AudioLocationWrites>,
         reader: Arc<dyn AudioFileIdentityReader>,
         archiver: Arc<dyn AudioArchiver>,
+        ownership: Arc<dyn ProcessingOwnership>,
     ) -> Self {
         Self {
             storage,
@@ -61,6 +63,7 @@ impl AudioArchiveService {
             writes,
             reader,
             archiver,
+            ownership,
         }
     }
     /// Converts every application-owned raw capture older than the retention period.
@@ -94,6 +97,9 @@ impl AudioArchiveService {
             let Some(detail) = self.library.detail(&recording).await? else {
                 continue;
             };
+            // Held while this recording's files are swapped, so analysis cannot start on a file
+            // that is about to be removed. Taken only when a track is due.
+            let mut lease = None;
             for track in detail
                 .tracks
                 .into_iter()
@@ -110,7 +116,9 @@ impl AudioArchiveService {
                     .is_some_and(|m| now_unix_ms.saturating_sub(m) >= limit);
                 if !due {
                     report.not_yet_due += 1;
-                } else if busy.contains(&track.recording_id) {
+                } else if busy.contains(&track.recording_id)
+                    || (!dry_run && !self.claim(&recording, &mut lease).await?)
+                {
                     report.skipped_busy += 1;
                 } else if dry_run {
                     report.archived.push(ArchivedTrack {
@@ -128,6 +136,25 @@ impl AudioArchiveService {
             }
         }
         Ok(report)
+    }
+    /// Takes the recording's analysis lease, then confirms no processing started since the
+    /// first check. `false` when the recording is in use.
+    async fn claim(
+        &self,
+        recording: &str,
+        lease: &mut Option<Box<dyn super::jobs::ProcessingLease>>,
+    ) -> Result<bool, ArchiveAudioError> {
+        if lease.is_none() {
+            let key = stable_id("meeting-analysis-controller", recording);
+            *lease = self.ownership.try_acquire(&key).await?;
+        }
+        Ok(lease.is_some()
+            && !self
+                .processing
+                .pending_runs()
+                .await?
+                .iter()
+                .any(|r| r.recording_id == recording))
     }
     async fn archive_track(&self, old: AudioTrack) -> Result<ArchivedTrack, String> {
         let source = PathBuf::from(&old.path);

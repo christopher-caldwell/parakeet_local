@@ -1684,6 +1684,11 @@ fn run() -> anyhow::Result<()> {
             locations: store.clone(),
         },
     );
+    let ownership = Arc::new(
+        parakeet_infrastructure::jobs::FileProcessingOwnership::for_database(
+            &root.join("parakeet.db"),
+        )?,
+    );
     let archive = Arc::new(
         parakeet_application::audio_archive::AudioArchiveService::new(
             store.clone(),
@@ -1692,6 +1697,7 @@ fn run() -> anyhow::Result<()> {
             validated_audio.clone(),
             Arc::new(parakeet_infrastructure::audio::LocalAudioIdentity),
             Arc::new(parakeet_infrastructure::archive::FfmpegArchiver),
+            ownership.clone(),
         ),
     );
     let library = Arc::new(LibraryService::new(
@@ -1719,11 +1725,6 @@ fn run() -> anyhow::Result<()> {
         engine.clone(),
         models.clone(),
     ));
-    let ownership = Arc::new(
-        parakeet_infrastructure::jobs::FileProcessingOwnership::for_database(
-            &root.join("parakeet.db"),
-        )?,
-    );
     let processing = Arc::new(ProcessingService::new(
         store.clone(),
         store.clone(),
