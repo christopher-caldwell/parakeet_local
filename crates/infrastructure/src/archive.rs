@@ -100,7 +100,8 @@ fn encode(source: &Path) -> Result<PathBuf, CapabilityError> {
             "a .wv copy already exists; nothing overwritten",
         ));
     }
-    let partial = finished.with_extension("wv.partial");
+    remove_abandoned_partials(source);
+    let partial = Partial(finished.with_extension("wv.partial"));
     let status = Command::new("ffmpeg")
         .args([
             "-nostdin",
@@ -122,25 +123,53 @@ fn encode(source: &Path) -> Result<PathBuf, CapabilityError> {
             "-f",
             "wv",
         ])
-        .arg(&partial)
+        .arg(&partial.0)
         .stdin(Stdio::null())
         .status()
         .map_err(CapabilityError::new)?;
     if !status.success() {
-        let _ = std::fs::remove_file(&partial);
         return Err(CapabilityError::message(
             "FFmpeg could not encode the lossless copy",
         ));
     }
-    if let Err(e) = same_samples(source, &partial) {
-        let _ = std::fs::remove_file(&partial);
-        return Err(e);
-    }
-    std::fs::File::open(&partial)
+    same_samples(source, &partial.0)?;
+    std::fs::File::open(&partial.0)
         .and_then(|f| f.sync_all())
         .map_err(CapabilityError::new)?;
-    std::fs::rename(&partial, &finished).map_err(CapabilityError::new)?;
+    std::fs::rename(&partial.0, &finished).map_err(CapabilityError::new)?;
     Ok(finished)
+}
+/// This attempt's encoder output, removed on every early return; renaming it away keeps it.
+struct Partial(PathBuf);
+impl Drop for Partial {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+/// No encode runs for a day, so an older partial of this source was left by a process that was
+/// killed or crashed. A partial still being written by another process is always newer.
+const ABANDONED_PARTIAL: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+fn remove_abandoned_partials(source: &Path) {
+    let (Some(dir), Some(stem)) = (source.parent(), source.file_stem().and_then(|s| s.to_str()))
+    else {
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let abandoned = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age > ABANDONED_PARTIAL);
+        if abandoned && name.starts_with(&format!("{stem}.")) && name.ends_with(".wv.partial") {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
 }
 #[async_trait]
 impl AudioArchiver for FfmpegArchiver {
@@ -234,6 +263,33 @@ mod tests {
         assert!(
             same_samples(&other, &flac).is_err(),
             "different audio must fail verification"
+        );
+    }
+    #[test]
+    fn only_abandoned_partials_of_this_source_are_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("microphone-raw.caf");
+        let old = dir.path().join("microphone-raw.a.wv.partial");
+        let fresh = dir.path().join("microphone-raw.b.wv.partial");
+        let other = dir.path().join("system-raw.c.wv.partial");
+        for path in [&old, &fresh, &other] {
+            std::fs::write(path, b"partial").unwrap();
+        }
+        let two_days_ago = std::time::SystemTime::now() - 2 * ABANDONED_PARTIAL;
+        for path in [&old, &other] {
+            std::fs::File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_modified(two_days_ago)
+                .unwrap();
+        }
+        remove_abandoned_partials(&source);
+        assert!(!old.exists());
+        assert!(fresh.exists(), "another process may still be writing it");
+        assert!(
+            other.exists(),
+            "another source's partial is not this attempt's to remove"
         );
     }
 }
