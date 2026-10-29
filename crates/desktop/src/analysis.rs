@@ -89,14 +89,14 @@ impl Workbench {
                 })
                 .child(
                     button("analyze-meeting", "Detect speakers")
-                        .disabled(self.pending > 0)
+                        .disabled(self.busy())
                         .on_click(
                             cx.listener(|this, _, _, cx| this.analyze_meeting(false, false, cx)),
                         ),
                 )
                 .child(
                     quiet("analysis-new-anonymous", "Start over")
-                        .disabled(self.pending > 0)
+                        .disabled(self.busy())
                         .on_click(
                             cx.listener(|this, _, _, cx| this.analyze_meeting(true, false, cx)),
                         ),
@@ -106,7 +106,7 @@ impl Workbench {
             panel=panel
                 .child(caption("Advanced: compare voices with named people while detecting. Enter all three thresholds; similarity is not a probability and these have not been calibrated for you."))
                 .child(div().flex().flex_wrap().gap_2().child(field(&self.match_score).w(px(200.))).child(field(&self.match_margin).w(px(160.))).child(field(&self.match_examples).w(px(190.))))
-                .child(quiet("analysis-new-matching","New analysis with entered policy").disabled(self.pending>0).on_click(cx.listener(|this,_,_,cx|this.analyze_meeting(true,true,cx))));
+                .child(quiet("analysis-new-matching","New analysis with entered policy").disabled(self.busy()).on_click(cx.listener(|this,_,_,cx|this.analyze_meeting(true,true,cx))));
         }
         panel
     }
@@ -143,7 +143,7 @@ impl Workbench {
         let service = self.analysis.clone();
         let recovery = self.recovery.clone();
         let library = self.library.clone();
-        self.task(
+        self.heavy_task(
             "Analyzing meeting locally; source audio and corrections retained",
             async move {
                 if !new_run {

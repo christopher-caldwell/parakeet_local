@@ -64,14 +64,7 @@ enum Update {
     ),
     Permissions(Result<serde_json::Value, String>),
     DictationReady(Result<(serde_json::Value, serde_json::Value), String>),
-    Identified(
-        Box<(
-            String,
-            ClusterIdentification,
-            Vec<SpeakerProfile>,
-            reader::Document,
-        )>,
-    ),
+    Identified(Box<(ClusterIdentification, Vec<SpeakerProfile>, reader::Document)>),
     IdentificationUndone(UndoIdentificationReport),
     Calibration(parakeet_domain::calibration::CalibrationReport),
     Preferences(AudioPreferences, String),
@@ -102,6 +95,8 @@ enum Update {
     MeetingFinalized(Result<reader::Document, String>, Option<String>),
     MeetingPlans(Vec<parakeet_application::meeting::MeetingFinalization>),
 }
+/// What the open recording's voice list was loaded for: its id, run statuses and analysis status.
+type VoicesKey = (String, Vec<(String, String)>, Option<String>);
 struct Workbench {
     #[cfg(feature = "performance")]
     performance: Option<performance::Recorder>,
@@ -198,7 +193,7 @@ struct Workbench {
     /// Meetings whose transcript and speaker work after Stop is still running.
     finishing_meetings: std::collections::BTreeSet<String>,
     /// The recording and analysis state the voice list was last loaded for.
-    voices_key: Option<String>,
+    voices_key: Option<VoicesKey>,
     voices_loading: bool,
     analysis_active: bool,
     voices_error: Option<String>,
@@ -233,6 +228,8 @@ struct Workbench {
     prompt_route: String,
     status: String,
     pending: usize,
+    /// Minutes-long processing tasks in flight; see `heavy_task`.
+    heavy: usize,
     playback_abort: Option<tokio::task::AbortHandle>,
     playback_generation: u64,
     playback_label: String,
@@ -274,7 +271,22 @@ impl Workbench {
         future: impl Future<Output = anyhow::Result<Update>> + Send + 'static,
         cx: &mut Context<Self>,
     ) {
-        self.launch(label, Box::pin(future), false, false, cx);
+        self.launch(label, Box::pin(future), false, false, false, cx);
+    }
+    /// Minutes-long processing of one recording (speaker detection, transcription, downloads).
+    /// It is shown as activity and blocks only controls that would start the same kind of work,
+    /// so naming voices or correcting lines elsewhere keeps working.
+    fn heavy_task(
+        &mut self,
+        label: &str,
+        future: impl Future<Output = anyhow::Result<Update>> + Send + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        self.launch(label, Box::pin(future), false, false, true, cx);
+    }
+    /// Short tasks and heavy processing together: what "something is working" means.
+    fn busy(&self) -> bool {
+        self.pending > 0 || self.heavy > 0
     }
     /// Long-lived work (dictation listener, meeting capture, archiving) that must not disable
     /// unrelated controls. Controls that truly conflict check that activity's own state.
@@ -284,23 +296,24 @@ impl Workbench {
         future: impl Future<Output = anyhow::Result<Update>> + Send + 'static,
         cx: &mut Context<Self>,
     ) {
-        self.launch(label, Box::pin(future), false, true, cx);
+        self.launch(label, Box::pin(future), false, true, false, cx);
     }
     fn playback_task(
         &mut self,
         label: &str,
         future: impl Future<Output = anyhow::Result<Update>> + Send + 'static,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         if self.capture_stop.is_some() {
             // Playback is a separate process that screen capture would record as system audio.
             self.status = "Review playback is paused while a meeting is recording".into();
             cx.notify();
-            return;
+            return false;
         }
         self.stop_playback(cx);
         self.playback_label = label.to_owned();
-        self.launch(label, Box::pin(future), true, false, cx);
+        self.launch(label, Box::pin(future), true, false, false, cx);
+        true
     }
     fn stop_playback(&mut self, cx: &mut Context<Self>) {
         if let Some(handle) = self.playback_abort.take() {
@@ -316,11 +329,17 @@ impl Workbench {
         future: std::pin::Pin<Box<dyn Future<Output = anyhow::Result<Update>> + Send + 'static>>,
         playback: bool,
         background: bool,
+        heavy: bool,
         cx: &mut Context<Self>,
     ) {
-        self.status = label.into();
+        // Housekeeping with no label (periodic archiving) leaves the visible message alone.
+        if !label.is_empty() {
+            self.status = label.into();
+        }
         let label = label.to_owned();
-        if !background {
+        if heavy {
+            self.heavy += 1;
+        } else if !background {
             self.pending += 1;
         }
         self.monitor_jobs(cx);
@@ -335,7 +354,9 @@ impl Workbench {
         cx.spawn(async move |this, cx| {
             let result = handle.await;
             let _ = this.update(cx, |this, cx| {
-                if !background {
+                if heavy {
+                    this.heavy = this.heavy.saturating_sub(1);
+                } else if !background {
                     this.pending = this.pending.saturating_sub(1);
                 }
                 if playback {
@@ -358,7 +379,7 @@ impl Workbench {
                                 }
                             }
                             Update::Identified(done) => {
-                                let (_, identification, profiles, detail) = *done;
+                                let (identification, profiles, detail) = *done;
                                 this.status = format!("Named {} lines; {} voice examples saved", identification.segments.len(), identification.example_ids.len());
                                 this.train_done.push(identification);
                                 this.profiles = profiles;
@@ -720,7 +741,7 @@ impl Workbench {
             duration_ms: None,
             word_timestamps,
         };
-        self.task(
+        self.heavy_task(
             "Processing locally; navigation remains available",
             async move {
                 service.run(request).await?;
@@ -1243,8 +1264,10 @@ impl Render for Workbench {
                         .update(cx, |input, cx| input.set_value("", window, cx));
                 }
                 this.editing_title = false;
-                this.close_editor(cx);
-                this.reset_reader_rows(false);
+                if this.editing_segment.is_some() {
+                    this.close_editor(cx);
+                    this.reset_reader_rows(false);
+                }
                 this.show_media_import = false;
                 this.show_import_path = false;
                 cx.notify();
@@ -1330,13 +1353,22 @@ struct DictationOverlay {
     state: Arc<Mutex<serde_json::Value>>,
 }
 impl DictationOverlay {
+    /// Polls the shared dictation state, redrawing only when it changed.
     fn watch(&self, cx: &mut Context<Self>) {
         cx.spawn(async move |view, cx| {
+            let mut shown = serde_json::Value::Null;
             loop {
                 cx.background_executor()
                     .timer(std::time::Duration::from_millis(100))
                     .await;
-                if view.update(cx, |_, cx| cx.notify()).is_err() {
+                let result = view.update(cx, |view, cx| {
+                    let current = view.state.lock().map(|s| s.clone()).unwrap_or_default();
+                    if current != shown {
+                        shown = current;
+                        cx.notify();
+                    }
+                });
+                if result.is_err() {
                     break;
                 }
             }
@@ -1656,20 +1688,22 @@ impl Workbench {
     }
 }
 
-fn model_runtime_executable() -> PathBuf {
-    std::env::var_os("PARAKEET_MODEL_RUNTIME")
+/// A helper program shipped beside the app: `variable` overrides it, then the bundle sibling,
+/// then the development `native/` folder.
+fn bundled_executable(variable: &str, name: &str) -> PathBuf {
+    std::env::var_os(variable)
         .map(PathBuf::from)
         .unwrap_or_else(|| {
             let exe = std::env::current_exe().expect("current executable");
-            let sibling = exe.parent().unwrap().join("parakeet-model-runtime");
+            let dir = exe.parent().expect("executable directory");
+            let sibling = dir.join(name);
             if sibling.exists() {
                 sibling
             } else {
-                exe.parent()
-                    .unwrap()
-                    .parent()
-                    .unwrap()
-                    .join("native/parakeet-model-runtime")
+                dir.parent()
+                    .expect("target directory")
+                    .join("native")
+                    .join(name)
             }
         })
 }
@@ -1774,7 +1808,10 @@ fn run() -> anyhow::Result<()> {
     ));
     let source = Arc::new(MacParakeetArtifacts);
     let models = Arc::new(ModelFiles::new(root.join("models")));
-    let engine = Arc::new(LocalSpeech::new(models.clone(), model_runtime_executable()));
+    let engine = Arc::new(LocalSpeech::new(
+        models.clone(),
+        bundled_executable("PARAKEET_MODEL_RUNTIME", "parakeet-model-runtime"),
+    ));
     let validated_audio = Arc::new(
         parakeet_infrastructure::audio_writes::ValidatedAudioWrites {
             library: store.clone(),
@@ -1854,21 +1891,7 @@ fn run() -> anyhow::Result<()> {
             root: root.join("playback"),
         }),
     ));
-    let bridge_executable = std::env::var_os("PARAKEET_NATIVE_BRIDGE")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            let exe = std::env::current_exe().unwrap();
-            let sibling = exe.parent().unwrap().join("parakeet-bridge");
-            if sibling.exists() {
-                sibling
-            } else {
-                exe.parent()
-                    .unwrap()
-                    .parent()
-                    .unwrap()
-                    .join("native/parakeet-bridge")
-            }
-        });
+    let bridge_executable = bundled_executable("PARAKEET_NATIVE_BRIDGE", "parakeet-bridge");
     let native = Arc::new(parakeet_infrastructure::native::NativeBridge::new(
         bridge_executable,
         root.clone(),
@@ -2084,8 +2107,7 @@ fn run() -> anyhow::Result<()> {
                             transcript_find,
                             transcript_query: String::new(),
                             show_transcript_find: false,
-                            reader_list: ListState::new(0, ListAlignment::Top, px(300.))
-                                .measure_all(),
+                            reader_list: ListState::new(0, ListAlignment::Top, px(300.)),
                             reader_editor_focus,
                             reader_matches: Default::default(),
                             search_generation: 0,
@@ -2143,6 +2165,7 @@ fn run() -> anyhow::Result<()> {
                             prompt_route: "remote".into(),
                             status: startup_status,
                             pending: 0,
+                            heavy: 0,
                             playback_abort: None,
                             playback_generation: 0,
                             playback_label: String::new(),

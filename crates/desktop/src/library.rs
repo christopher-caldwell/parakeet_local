@@ -1236,7 +1236,7 @@ impl Workbench {
         let id = detail.recording.id.clone();
         view = view.child(
             primary("finalize-meeting", "Finish transcription of all sources")
-                .disabled(self.pending > 0)
+                .disabled(self.busy())
                 .on_click(cx.listener(move |this, _, _, cx| this.finalize_meeting(id.clone(), cx))),
         );
         for run in self
@@ -1314,8 +1314,8 @@ impl Workbench {
         {
             view=view.child(div().mt_2().flex().flex_col().gap_2().child(caption(format!("Selected source: {}",track_name(&track.kind))))
                 .child(div().flex().flex_wrap().gap_2()
-                    .child(primary("transcribe-source","Transcribe source").disabled(!track.available||self.pending>0).on_click(cx.listener(|this,_,_,cx|this.process(false,false,cx))))
-                    .child(button("diarize-source","Speakers in this source only").disabled(!track.available||self.pending>0).on_click(cx.listener(|this,_,_,cx|this.process(true,false,cx))))
+                    .child(primary("transcribe-source","Transcribe source").disabled(!track.available||self.busy()).on_click(cx.listener(|this,_,_,cx|this.process(false,false,cx))))
+                    .child(button("diarize-source","Speakers in this source only").disabled(!track.available||self.busy()).on_click(cx.listener(|this,_,_,cx|this.process(true,false,cx))))
                     .child(button("identify-voices","Name voices").on_click(cx.listener(|this,_,_,cx|this.open_voices(cx))))
                     .child(button("review-source-clusters","Review voice groups").on_click(cx.listener(|this,_,_,cx|{this.speaker_mode=SpeakerMode::Clusters;this.navigate(Area::Speakers,cx);this.inspect_clusters(cx);}))))
                 .child(caption("Processing creates a new result. Existing audio, title, and corrections are retained. To find and name everyone, including the check for meeting audio leaking into your microphone, use Name voices.")));
@@ -1382,7 +1382,7 @@ impl Workbench {
                 view=view.child(div().mt_3().p_4().rounded_lg().border_1().border_color(rgb(BORDER)).flex().flex_col().gap_2()
                 .child(div().font_weight(FontWeight::SEMIBOLD).child("Experimental word timing"))
                 .child(caption("Whisper can retain estimated word times for speaker review. These estimates are not verified alignments."))
-                .child(button("transcribe-estimated-words","Transcribe with word estimates").disabled(!track.available||self.pending>0).on_click(cx.listener(|this,_,_,cx|this.process(false,true,cx)))));
+                .child(button("transcribe-estimated-words","Transcribe with word estimates").disabled(!track.available||self.busy()).on_click(cx.listener(|this,_,_,cx|this.process(false,true,cx)))));
             }
         }
         div()
@@ -1430,7 +1430,7 @@ impl Workbench {
             view = view.child(
                 button("resume-finalization", "Resume final transcription")
                     .disabled(
-                        self.pending > 0
+                        self.busy()
                             || (plan["status"] == "completed"
                                 && (plan["speaker_analysis"].is_null()
                                     || detail
@@ -1538,12 +1538,12 @@ impl Workbench {
                         |row| {
                             row.child(
                                 button(format!("retry-{}", run.id), "Retry from retained audio")
-                                    .disabled(self.pending > 0)
+                                    .disabled(self.busy())
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         let service = this.processing.clone();
                                         let library = this.library.clone();
                                         let id = id.clone();
-                                        this.task(
+                                        this.heavy_task(
                                             "Retrying retained audio",
                                             async move {
                                                 let run = service.retry(&id).await?;

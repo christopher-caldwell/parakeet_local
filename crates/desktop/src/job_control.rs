@@ -19,7 +19,7 @@ impl Workbench {
                         first = false;
                         return true;
                     }
-                    if this.pending == 0 && this.area != Area::Jobs && this.pending_jobs.is_empty() && !this.analysis_active {
+                    if !this.busy() && this.area != Area::Jobs && this.pending_jobs.is_empty() && !this.analysis_active {
                         this.job_monitor_running = false;
                         false
                     } else {

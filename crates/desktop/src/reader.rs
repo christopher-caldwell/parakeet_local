@@ -101,6 +101,20 @@ impl Workbench {
             .unwrap_or_default();
         self.reset_reader_rows(true);
     }
+    /// Re-measures only the line being edited as its editor grows or shrinks; every other row
+    /// keeps its measured height.
+    pub(super) fn remeasure_editing_row(&self) {
+        let Some(detail) = &self.detail else { return };
+        let editing = self.editing_segment.as_deref();
+        if let Some(row) = self.reader_matches.iter().position(|&index| {
+            detail
+                .segments
+                .get(index)
+                .is_some_and(|segment| Some(segment.id.as_str()) == editing)
+        }) {
+            self.reader_list.remeasure_items(row..row + 1);
+        }
+    }
     /// Invalidate variable-height measurements after data/editor changes. The whole transcript
     /// is one list; only rows near the viewport are measured and drawn.
     /// Preserve the logical top when only the row's content changed.

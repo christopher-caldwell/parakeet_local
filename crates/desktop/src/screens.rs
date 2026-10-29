@@ -196,7 +196,7 @@ impl Workbench {
     fn model_card(&self, m: &ModelInfo, cx: &mut Context<Self>) -> Div {
         let in_use = m.detail["selected"] == true;
         let for_voices = m.detail["selected_for_embeddings"] == true;
-        let busy = self.pending > 0;
+        let busy = self.busy();
         let (install_id, verify_id, select_id, embedding_id, remove_id) = (
             m.id.clone(),
             m.id.clone(),
@@ -207,7 +207,7 @@ impl Workbench {
         let install = move |this: &mut Self, cx: &mut Context<Self>| {
             let service = this.models.clone();
             let id = install_id.clone();
-            this.task(
+            this.heavy_task(
                 "Downloading local model",
                 async move {
                     service.install(&id).await?;

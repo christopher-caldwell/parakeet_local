@@ -297,7 +297,7 @@ impl Workbench {
                                         "Detect speakers"
                                     },
                                 )
-                                .disabled(running || self.pending > 0 || state == Some("completed"))
+                                .disabled(running || self.busy() || state == Some("completed"))
                                 .on_click(cx.listener(
                                     |this, _, _, cx| this.analyze_meeting(false, false, cx),
                                 )),
@@ -444,12 +444,17 @@ impl Workbench {
             _ => (0, vec![]),
         };
         let (start, end) = samples[next % samples.len()];
-        if !heard.contains(&(start, end)) {
-            heard.push((start, end));
+        // Only a clip that actually started counts as heard; playback is refused while a
+        // meeting records, and an unheard voice must not be savable.
+        if self.play_range(candidate.track_id.clone(), start, end, cx) {
+            if !heard.contains(&(start, end)) {
+                heard.push((start, end));
+            }
+            self.train_heard = Some((candidate.id.clone(), next + 1, heard));
+            self.train_hint = None;
+        } else {
+            self.train_heard = Some((candidate.id.clone(), next, heard));
         }
-        self.train_heard = Some((candidate.id.clone(), next + 1, heard));
-        self.train_hint = None;
-        self.play_range(candidate.track_id.clone(), start, end, cx);
     }
     fn play_button(&self, candidate: &EnrollmentCandidate, cx: &mut Context<Self>) -> Div {
         let first = candidate.clone();
@@ -684,7 +689,6 @@ impl Workbench {
         let service = self.speakers.clone();
         let library = self.library.clone();
         let recording = candidate.recording_id.clone();
-        let candidate_id = candidate.id.clone();
         self.task(
             "Naming this voice",
             async move {
@@ -702,7 +706,6 @@ impl Workbench {
                 let profiles = service.profiles().await?;
                 let detail = library.show(&recording).await.map(reader::Document::new)?;
                 Ok(Update::Identified(Box::new((
-                    candidate_id,
                     identification,
                     profiles,
                     detail,
@@ -717,8 +720,10 @@ impl Workbench {
         start_ms: i64,
         end_ms: i64,
         cx: &mut Context<Self>,
-    ) {
-        let Some(detail) = &self.detail else { return };
+    ) -> bool {
+        let Some(detail) = &self.detail else {
+            return false;
+        };
         let recording_id = detail.recording.id.clone();
         let service = self.playback.clone();
         self.playback_task(
@@ -735,7 +740,7 @@ impl Workbench {
                 Ok(Update::Message("Playback completed".into()))
             },
             cx,
-        );
+        )
     }
 }
 fn people_key(id: &str) -> usize {

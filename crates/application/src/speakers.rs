@@ -189,6 +189,12 @@ pub struct SpeakerService {
     engine: Arc<dyn VoiceEmbeddings>,
     models: Arc<dyn LocalModels>,
 }
+pub(crate) fn name_taken(name: &str) -> ValidationError {
+    ValidationError(format!(
+        "{} is already one of your people; choose them instead",
+        name.trim()
+    ))
+}
 impl SpeakerService {
     pub fn new(
         queries: Arc<dyn SpeakerQueries>,
@@ -230,26 +236,20 @@ impl SpeakerService {
         ))
     }
     /// A second person with the same name would split one person's voice and corrections.
-    pub(crate) async fn unique_name(
+    pub(crate) async fn name_in_use(
         &self,
         name: &str,
         except: Option<&str>,
-    ) -> Result<Result<(), ValidationError>, PersistenceError> {
-        let taken = self.queries.profiles().await?.into_iter().any(|p| {
+    ) -> Result<bool, PersistenceError> {
+        Ok(self.queries.profiles().await?.into_iter().any(|p| {
             Some(p.id.as_str()) != except && p.name.trim().eq_ignore_ascii_case(name.trim())
-        });
-        Ok(if taken {
-            Err(ValidationError(format!(
-                "{} is already one of your people; choose them instead",
-                name.trim()
-            )))
-        } else {
-            Ok(())
-        })
+        }))
     }
     pub async fn create(&self, name: &str) -> Result<SpeakerProfile, CreateSpeakerError> {
         Recording::validate_title(name)?;
-        self.unique_name(name, None).await??;
+        if self.name_in_use(name, None).await? {
+            return Err(name_taken(name).into());
+        }
         let p = SpeakerProfile {
             id: new_id(),
             name: name.into(),
@@ -262,7 +262,9 @@ impl SpeakerService {
         let id = input.id.as_str();
         let name = input.name.as_str();
         Recording::validate_title(name)?;
-        self.unique_name(name, Some(id)).await??;
+        if self.name_in_use(name, Some(id)).await? {
+            return Err(name_taken(name).into());
+        }
         if !self.writes.rename_profile(id, name).await? {
             return Err(RenameSpeakerError::NotFound(id.into()));
         }

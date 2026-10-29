@@ -19,7 +19,7 @@ impl Workbench {
     pub(super) fn finalize_meeting(&mut self, id: String, cx: &mut Context<Self>) {
         let service = self.meeting.clone();
         let library = self.library.clone();
-        self.task(
+        self.heavy_task(
             "Finishing transcription from saved source audio",
             async move {
                 let warning = service
@@ -292,7 +292,7 @@ impl Workbench {
         )
     }
     pub(super) fn status_bar(&self, cx: &mut Context<Self>) -> Div {
-        let working = self.pending > 0;
+        let working = self.busy();
         let color = if self.last_error.is_some() {
             DANGER
         } else if working {
@@ -346,7 +346,10 @@ impl Workbench {
                             .child(message),
                     )
                     .when(working, |row| {
-                        row.child(pill(format!("{} active", self.pending), WARNING))
+                        row.child(pill(
+                            format!("{} active", self.pending + self.heavy),
+                            WARNING,
+                        ))
                     })
                     .child(
                         quiet(
@@ -543,19 +546,18 @@ impl Workbench {
         self.reader_matches = d.matching(&self.transcript_query);
         let id = d.recording.id.clone();
         // Voices only change with the analysis runs; a text or title save must not reload them.
-        let key = serde_json::json!([
-            id,
+        let key = (
+            id.clone(),
             d.runs
                 .iter()
-                .map(|r| (&r.id, &r.status))
+                .map(|r| (r.id.clone(), r.status.clone()))
                 .collect::<Vec<_>>(),
             d.analysis
                 .as_ref()
                 .ok()
                 .and_then(|p| p.as_ref())
-                .map(|p| &p.status),
-        ])
-        .to_string();
+                .map(|p| p.status.clone()),
+        );
         self.detail = Some(d);
         if self.voices_key.as_ref() != Some(&key) {
             self.voices_key = Some(key);
@@ -594,7 +596,7 @@ impl Workbench {
         .detach();
         cx.subscribe(&self.edit_text, |this, _, event, cx| {
             if matches!(event, InputEvent::Change) && this.editing_segment.is_some() {
-                this.reset_reader_rows(false);
+                this.remeasure_editing_row();
                 cx.notify();
             }
         })

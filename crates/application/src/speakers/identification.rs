@@ -123,8 +123,10 @@ impl SpeakerService {
         {
             return Err(IdentifyClusterError::NotFound(id.clone()));
         }
-        if let PersonChoice::New(name) = &input.person {
-            self.unique_name(name, None).await??;
+        if let PersonChoice::New(name) = &input.person
+            && self.name_in_use(name, None).await?
+        {
+            return Err(super::name_taken(name).into());
         }
         // Segments the cluster speaks alone; everything else is listed, never guessed.
         let attributions = parakeet_domain::reconciliation::reconcile(&detail.segments, &intervals);

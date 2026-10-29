@@ -3,7 +3,7 @@ use super::*;
 
 impl Workbench {
     fn live_activity(&self) -> bool {
-        self.pending > 0 || self.capture_stop.is_some() || self.dictation_stop.is_some()
+        self.busy() || self.capture_stop.is_some() || self.dictation_stop.is_some()
     }
     pub(super) fn start_heartbeat(&mut self, cx: &mut Context<Self>) {
         if self.heartbeat_running || (!self.live_activity() && self.metrics_path.is_none()) {
@@ -30,7 +30,7 @@ impl Workbench {
                     // Only the screen showing live levels or progress needs redrawing.
                     if (this.capture_stop.is_some() && this.area == Area::Capture)
                         || (this.dictation_stop.is_some() && this.area == Area::Dictation)
-                        || (this.area == Area::Models && this.pending > 0)
+                        || (this.area == Area::Models && this.busy())
                     {
                         cx.notify();
                     }
