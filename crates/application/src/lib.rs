@@ -305,16 +305,26 @@ impl LibraryService {
         }
         let intervals = latest.into_values().flatten().collect::<Vec<_>>();
         d.attributions = parakeet_domain::reconciliation::reconcile(&d.segments, &intervals);
-        let bleed: Vec<parakeet_domain::reconciliation::BleedSpan> = serde_json::from_value(
-            d.recording.metadata["meeting_analysis"]["bleed"]["spans"].clone(),
-        )
-        .unwrap_or_default();
+        let saved = &d.recording.metadata["meeting_analysis"]["bleed"];
+        let bleed = saved.is_object().then(|| {
+            let mic_offset = d
+                .tracks
+                .iter()
+                .find(|t| t.kind == TrackKind::Microphone)
+                .and_then(|t| t.meeting_offset_ms())
+                .unwrap_or(0);
+            parakeet_domain::reconciliation::BleedCheck {
+                spans: serde_json::from_value(saved["spans"].clone()).unwrap_or_default(),
+                checked_until_ms: mic_offset
+                    + (saved["analyzed_seconds"].as_f64().unwrap_or(0.) * 1000.) as i64,
+            }
+        });
         d.source_attributions = parakeet_domain::reconciliation::attribute_sources(
             &d.segments,
             &d.attributions,
             &intervals,
             &d.tracks,
-            &bleed,
+            bleed.as_ref(),
         );
         d.word_attributions = parakeet_domain::word_timing::reconcile_words(
             &d.segments,
@@ -354,6 +364,9 @@ impl LibraryService {
                 .map(|a| match a.category.as_str() {
                     "me" => "Me (microphone)",
                     "them" => "Them (system audio)",
+                    _ if a.reasons == ["not_checked_for_echo"] => {
+                        "Microphone (not checked for echo)"
+                    }
                     _ => "Unknown source",
                 })
                 .unwrap_or("Unknown source");

@@ -442,7 +442,8 @@ fn analysis_is_explicit_and_all_matching_thresholds_are_required() {
     assert_eq!(run(&root, &["db", "migrate"]).0, 0);
     let (code, preferences) = run(&root, &["capture", "settings"]);
     assert_eq!(code, 0);
-    assert_eq!(preferences["data"]["analyze_meetings_after_stop"], false);
+    // Speaker detection (and the echo check behind "Me") runs after Stop by default.
+    assert_eq!(preferences["data"]["analyze_meetings_after_stop"], true);
     let (code, preferences) = run(
         &root,
         &["capture", "settings", "--analyze-after-stop", "true"],

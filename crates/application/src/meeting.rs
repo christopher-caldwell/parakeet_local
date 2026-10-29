@@ -170,6 +170,9 @@ pub struct RecordedMeeting {
     /// Why automatic transcription did not start although it was requested.
     #[serde(default)]
     pub transcription_skipped: Option<String>,
+    /// Why speaker detection after Stop did not run although the preference asked for it.
+    #[serde(default)]
+    pub analysis_skipped: Option<String>,
 }
 operation_error!(ListPendingMeetingsError,sources{Persistence:PersistenceError=>"persistence",Invalid:ValidationError=>"invalid_input"},values{});
 #[derive(Debug, Clone)]
@@ -262,6 +265,7 @@ impl MeetingService {
             .validate()
             .map_err(crate::capture::CaptureRecordingError::Invalid)?;
         let mut transcription_skipped = None;
+        let mut analysis_skipped = None;
         let planned = if transcribe_after_stop || analyze_speakers {
             match self.plan("selected-asr").await {
                 Ok(plan) => Some(plan),
@@ -282,17 +286,25 @@ impl MeetingService {
                         "speaker analysis is not configured at this entry point".into(),
                     )
                 })?;
-                let recipe = service
-                    .prepare_recipe(matching_policy)
-                    .await
-                    .map_err(|source| RecordMeetingError::AnalysisPreparation(Box::new(source)))?;
-                if recipe.asr.id != plan.model || recipe.asr.revision != plan.model_revision {
-                    return Err(FinalizeMeetingError::Conflict(
-                        "ASR selection changed during preflight; retry".into(),
-                    )
-                    .into());
+                match service.prepare_recipe(matching_policy).await {
+                    Ok(recipe) => {
+                        if recipe.asr.id != plan.model || recipe.asr.revision != plan.model_revision
+                        {
+                            return Err(FinalizeMeetingError::Conflict(
+                                "ASR selection changed during preflight; retry".into(),
+                            )
+                            .into());
+                        }
+                        plan.speaker_analysis = Some(recipe);
+                    }
+                    // Like transcription: a preference never blocks recording; say why it was skipped.
+                    Err(error) if input_skip => {
+                        analysis_skipped = Some(error.to_string());
+                    }
+                    Err(source) => {
+                        return Err(RecordMeetingError::AnalysisPreparation(Box::new(source)));
+                    }
                 }
-                plan.speaker_analysis = Some(recipe);
             }
             Some(plan)
         } else {
@@ -320,6 +332,7 @@ impl MeetingService {
             recording_id,
             finalization,
             transcription_skipped,
+            analysis_skipped,
         })
     }
     pub async fn pending(&self) -> Result<Vec<MeetingFinalization>, ListPendingMeetingsError> {

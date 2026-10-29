@@ -1427,7 +1427,10 @@ impl Workbench {
                         Some(report.recording_id),
                         report
                             .transcription_skipped
-                            .map(|why| format!("Audio saved without a transcript: {why}")),
+                            .map(|why| format!("Audio saved without a transcript: {why}"))
+                            .or(report.analysis_skipped.map(|why| {
+                                format!("Transcribed, but speakers were not detected: {why}")
+                            })),
                     ),
                     Err(error) => (
                         error.retained_recording_id().map(str::to_owned),

@@ -386,7 +386,9 @@ pub struct AudioPreferences {
     /// ASR model is installed the audio is still saved and the skipped transcription is reported.
     #[serde(default = "transcribe_by_default")]
     pub transcribe_meetings_after_stop: bool,
-    #[serde(default)]
+    /// Speaker detection and the echo check run after Stop unless turned off: accuracy comes
+    /// first, and without the echo check microphone speech is never labeled "Me".
+    #[serde(default = "transcribe_by_default")]
     pub analyze_meetings_after_stop: bool,
     /// Offer name suggestions after Stop using the saved calibrated criteria. Suggestions are
     /// never confirmed names. Off until the user enables it.
@@ -417,7 +419,7 @@ impl Default for AudioPreferences {
             microphone_uid: None,
             system_audio: false,
             transcribe_meetings_after_stop: true,
-            analyze_meetings_after_stop: false,
+            analyze_meetings_after_stop: true,
             suggest_speakers_after_stop: false,
             matching_policy: None,
             skipped_voices: vec![],

@@ -888,6 +888,10 @@ impl Workbench {
             .map(|a| match a.category.as_str() {
                 "me" => ("Me · microphone".to_owned(), MUTED),
                 "them" => ("Them · system audio".to_owned(), MUTED),
+                _ if a.reasons == ["not_checked_for_echo"] => (
+                    "Microphone · not yet checked for meeting-audio echo".to_owned(),
+                    MUTED,
+                ),
                 _ => (
                     format!(
                         "Unknown source · {}",
