@@ -68,6 +68,13 @@ impl Workbench {
                 }
             }
             Area::Dictation => {
+                self.refresh_permissions(cx);
+                let capture = self.audio_inspection.clone();
+                self.task(
+                    "Checking selected microphone",
+                    async move { Ok(Update::Devices(capture.devices().await?)) },
+                    cx,
+                );
                 let service = self.dictation_history.clone();
                 self.task(
                     "Reading retained dictations",
@@ -95,6 +102,7 @@ impl Workbench {
                 );
             }
             Area::Privacy => {
+                self.refresh_permissions(cx);
                 let service = self.settings.clone();
                 self.task(
                     "Reading settings",
@@ -165,7 +173,7 @@ impl Workbench {
             (Area::Models, "Local models", "models", ""),
             (Area::Jobs, "Background jobs", "jobs", ""),
             (Area::Storage, "Storage", "models", ""),
-            (Area::Privacy, "Privacy & AI", "shield", ""),
+            (Area::Privacy, "Permissions", "shield", ""),
         ]
         .into_iter()
         .enumerate()
@@ -433,7 +441,7 @@ impl Workbench {
                     })),
             )
     }
-    pub(super) fn receive_detail(&mut self, d: reader::Document) {
+    pub(super) fn receive_detail(&mut self, d: reader::Document, cx: &mut Context<Self>) {
         if self.requested_recording.as_deref() != Some(d.recording.id.as_str()) {
             return;
         }
@@ -454,7 +462,9 @@ impl Workbench {
         self.segment_page = self
             .segment_page
             .min(self.reader_matches.len().saturating_sub(1) / 40);
+        let id = d.recording.id.clone();
         self.detail = Some(d);
+        self.load_voices(id, cx);
         self.reset_reader_rows(false);
     }
     pub(super) fn subscribe_search(&mut self, cx: &mut Context<Self>) {

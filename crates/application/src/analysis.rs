@@ -177,6 +177,12 @@ impl MeetingAnalysisService {
             ownership,
         }
     }
+    /// A saved running plan can outlive its process. Probe the controller lease,
+    /// including between source jobs, without changing the plan or its results.
+    pub async fn is_active(&self, recording_id: &str) -> Result<bool, CapabilityError> {
+        let key = stable_id("meeting-analysis-controller", recording_id);
+        Ok(self.ownership.try_acquire(&key).await?.is_none())
+    }
     /// Optional: lets analysis record where the microphone only carries the system source.
     pub fn with_bleed_detection(mut self, detector: Arc<dyn BleedDetection>) -> Self {
         self.bleed = Some(detector);

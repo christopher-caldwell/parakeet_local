@@ -79,13 +79,27 @@ impl Workbench {
     }
     /// Reads the prepared voices and the names already given for a recording.
     pub(super) fn load_voices(&mut self, recording: String, cx: &mut Context<Self>) {
+        self.voices_generation += 1;
+        let generation = self.voices_generation;
+        self.voices_loading = true;
+        self.voices_error = None;
         let service = self.speakers.clone();
+        let analysis = self.analysis.clone();
         self.task(
             "Finding the voices in this recording",
             async move {
-                let candidates = service.candidates(&recording).await?;
-                let named = service.identifications(Some(&recording)).await?;
-                Ok(Update::Candidates(recording, candidates, named))
+                let result = async {
+                    let candidates = service.candidates(&recording).await?;
+                    let named = service.identifications(Some(&recording)).await?;
+                    Ok::<_, anyhow::Error>((
+                        candidates,
+                        named,
+                        analysis.is_active(&recording).await?,
+                    ))
+                }
+                .await
+                .map_err(|e| e.to_string());
+                Ok(Update::Candidates(recording, generation, result))
             },
             cx,
         );
@@ -106,11 +120,26 @@ impl Workbench {
     pub(super) fn voices_view(&self, cx: &mut Context<Self>) -> Div {
         let mut view = div().p_5().flex().flex_col().gap_4().child(section(
             "Name the voices",
-            "The app found the separate voices in this recording. Listen to each one and type who it is. Every line that voice speaks on its own gets that name, and you can undo any name.",
+            "Listen to a voice, then choose a name. Names are only saved when you confirm them, and can be undone.",
         ));
         let Some(detail) = &self.detail else {
             return view;
         };
+        if let Some(error) = &self.voices_error {
+            return view
+                .child(
+                    panel()
+                        .child("Voices could not be loaded")
+                        .child(caption(error.clone())),
+                )
+                .child(
+                    button("retry-voices", "Try again")
+                        .on_click(cx.listener(|this, _, _, cx| this.open_voices(cx))),
+                );
+        }
+        if self.voices_loading && self.candidates.is_empty() {
+            return view.child(panel().child("Loading voices…"));
+        }
         let queue = self.waiting_voices();
         if let Some(candidate) = queue.first().cloned() {
             let position = self.candidates.len() - queue.len() + 1;
@@ -120,7 +149,7 @@ impl Workbench {
                 .find(|t| t.id == candidate.track_id)
                 .map(|t| match t.kind {
                     TrackKind::Microphone => "on your microphone",
-                    TrackKind::System => "on the meeting audio, so someone other than you",
+                    TrackKind::System => "on the meeting audio",
                     _ => "in this recording",
                 })
                 .unwrap_or("in this recording");
@@ -190,6 +219,40 @@ impl Workbench {
                     )),
             );
         } else if self.candidates.is_empty() {
+            let state = detail
+                .analysis
+                .as_ref()
+                .ok()
+                .and_then(|p| p.as_ref())
+                .map(|p| p.status.as_str());
+            let running = self.analysis_active;
+            let interrupted = !running && matches!(state, Some("running" | "interrupted"));
+            let (title, hint) = if running {
+                (
+                    "Detecting voices…",
+                    "You can read the transcript while this runs. Voices will appear here when ready.",
+                )
+            } else if interrupted {
+                (
+                    "Voice detection was interrupted",
+                    "Your recording and completed work are saved. Resume detection to finish preparing the voices.",
+                )
+            } else if state == Some("completed") {
+                (
+                    "No clear voices to name",
+                    "Detection finished, but found no voice with enough clear speech. You can still read and correct the transcript.",
+                )
+            } else if state == Some("failed") {
+                (
+                    "Voice detection needs another try",
+                    "Your recording is saved. Retry detection or see Processing for details.",
+                )
+            } else {
+                (
+                    "Find the voices in this recording",
+                    "Detect speakers to prepare short clips you can listen to and name.",
+                )
+            };
             view = view.child(
                 div()
                     .p_5()
@@ -198,20 +261,27 @@ impl Workbench {
                     .flex()
                     .flex_col()
                     .gap_3()
-                    .child(div().font_weight(FontWeight::SEMIBOLD).child("No voices are ready to name yet"))
-                    .child(caption(
-                        "Voices appear here once the speakers in this recording have been detected. Detection can take a few minutes for a long meeting.",
-                    ))
+                    .child(div().font_weight(FontWeight::SEMIBOLD).child(title))
+                    .child(caption(hint))
                     .child(
                         div()
                             .flex()
                             .gap_2()
                             .child(
-                                primary("voices-detect", "Detect speakers")
-                                    .disabled(self.pending > 0)
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.analyze_meeting(false, false, cx)
-                                    })),
+                                primary(
+                                    "voices-detect",
+                                    if interrupted {
+                                        "Resume detection"
+                                    } else if state == Some("failed") {
+                                        "Retry detection"
+                                    } else {
+                                        "Detect speakers"
+                                    },
+                                )
+                                .disabled(running || self.pending > 0 || state == Some("completed"))
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| this.analyze_meeting(false, false, cx),
+                                )),
                             )
                             .child(
                                 quiet("voices-refresh", "Look again")
@@ -273,7 +343,7 @@ impl Workbench {
         let mut named = div().flex().flex_col().gap_2();
         let mut any = false;
         for (index, done) in self.train_done.iter().enumerate() {
-            if done.undone_at.is_some() {
+            if done.undone_at.is_some() || done.recording_id != detail.recording.id {
                 continue;
             }
             any = true;
@@ -398,7 +468,11 @@ impl Workbench {
                     .gap_2()
                     .child(
                         primary("train-save", "Save name")
-                            .disabled(self.pending > 0)
+                            .disabled(
+                                self.pending > 0
+                                    || (self.train_person.is_none()
+                                        && self.person_name.read(cx).value().trim().is_empty()),
+                            )
                             .on_click(
                                 cx.listener(move |this, _, _, cx| {
                                     this.train_save(save.clone(), cx)

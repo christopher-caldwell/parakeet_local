@@ -200,6 +200,7 @@ pub fn tile(
     button_base(id, "")
         .accessibility_label(title.clone())
         .w_full()
+        .max_w(px(360.))
         .min_h(px(48.))
         .px_3()
         .py_2()
@@ -252,6 +253,7 @@ pub fn toggle_row(
     button_base(id, "")
         .accessibility_label(title.clone())
         .w_full()
+        .max_w(px(760.))
         .px_3()
         .py_3()
         .rounded_lg()
@@ -279,10 +281,18 @@ pub fn toggle_row(
         )
         .child(switch(on))
 }
+pub fn column_count(available_width: f32) -> usize {
+    (((available_width + 12.) / 332.).floor() as usize).clamp(1, 3)
+}
 /// Lays `items` out in rows of `columns` equal-width cells.
 pub fn grid(columns: usize, items: Vec<AnyElement>) -> Div {
-    let columns = columns.max(1);
-    let mut rows = div().flex().flex_col().gap_3();
+    let columns = columns.max(1).min(items.len().max(1));
+    let mut rows = div()
+        .w_full()
+        .max_w(px(columns as f32 * 360. + (columns - 1) as f32 * 12.))
+        .flex()
+        .flex_col()
+        .gap_3();
     let mut items = items.into_iter().peekable();
     while items.peek().is_some() {
         let mut row = div().flex().gap_3();

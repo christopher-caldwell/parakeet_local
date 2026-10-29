@@ -57,7 +57,13 @@ enum Update {
     Detail(reader::Document),
     Profiles(Vec<SpeakerProfile>),
     Examples(String, Vec<VoiceExampleSummary>),
-    Candidates(String, Vec<EnrollmentCandidate>, Vec<ClusterIdentification>),
+    Candidates(
+        String,
+        u64,
+        Result<(Vec<EnrollmentCandidate>, Vec<ClusterIdentification>, bool), String>,
+    ),
+    Permissions(Result<serde_json::Value, String>),
+    DictationReady(Result<(serde_json::Value, serde_json::Value), String>),
     Identified(
         Box<(
             String,
@@ -72,7 +78,7 @@ enum Update {
     RefreshSelected,
     SegmentSaved(String),
     Models(Vec<ModelInfo>),
-    DictationStopped(String),
+    DictationStopped(Result<(), String>),
     Dictations(Vec<DictationReceipt>),
     Message(String),
     Jobs(Vec<ProcessingRun>),
@@ -138,6 +144,9 @@ struct Workbench {
     dictation_overlay: Option<WindowHandle<DictationOverlay>>,
     dictation_state: Arc<Mutex<serde_json::Value>>,
     devices: serde_json::Value,
+    permissions: Option<serde_json::Value>,
+    permissions_error: Option<String>,
+    dictation_starting: bool,
     audio_preferences: AudioPreferences,
     focus: FocusHandle,
     main_window: AnyWindowHandle,
@@ -175,6 +184,10 @@ struct Workbench {
     profiles: Vec<SpeakerProfile>,
     examples: Vec<VoiceExampleSummary>,
     candidates: Vec<EnrollmentCandidate>,
+    voices_generation: u64,
+    voices_loading: bool,
+    analysis_active: bool,
+    voices_error: Option<String>,
     calibration: Option<parakeet_domain::calibration::CalibrationReport>,
     train_person: Option<String>,
     train_hint: Option<String>,
@@ -322,7 +335,7 @@ impl Workbench {
                                 let _ = cx.update_window(this.main_window, move |_, window, cx| {
                                     name.update(cx, |input, cx| input.set_value("", window, cx));
                                 });
-                                this.receive_detail(detail);
+                                this.receive_detail(detail, cx);
                                 cx.notify();
                                 return;
                             }
@@ -335,13 +348,37 @@ impl Workbench {
                                 cx.notify();
                                 return;
                             }
-                            Update::Candidates(recording,c,named) => {if this.requested_recording.as_deref()==Some(recording.as_str()){this.candidates = c;this.train_done = named;}},
+                            Update::Candidates(recording, generation, result) => {
+                                if this.requested_recording.as_deref() == Some(recording.as_str()) && generation == this.voices_generation {
+                                    this.voices_loading = false;
+                                    match result {
+                                        Ok((candidates, named, active)) => { this.analysis_active = active; this.candidates = candidates; this.train_done = named; this.voices_error = None; }
+                                        Err(error) => this.voices_error = Some(error),
+                                    }
+                                }
+                            }
+                            Update::Permissions(result) => match result {
+                                Ok(value) => { this.permissions = Some(value); this.permissions_error = None; }
+                                Err(error) => { this.permissions = None; this.permissions_error = Some(error); }
+                            },
+                            Update::DictationReady(result) => {
+                                this.dictation_starting = false;
+                                match result {
+                                    Ok((permissions, devices)) => {
+                                        this.permissions = Some(permissions); this.devices = devices;
+                                        if let Some(reason) = this.dictation_blocker() {
+                                            this.dictation_feedback(reason);
+                                        } else { this.begin_dictation(cx); }
+                                    }
+                                    Err(error) => this.dictation_feedback(format!("Could not check dictation readiness: {error}")),
+                                }
+                            }
                             Update::StoragePreview(result) => {this.storage_busy=false;match result {Ok(preview)=>{this.storage_policy=Some(preview.saved_policy.clone());this.storage_preview=Some(preview);},Err(error)=>{this.last_error=Some(error);this.status="Storage inspection failed; no files changed".into();cx.notify();return;}}},
                             Update::StoragePolicySaved(result) => {this.storage_busy=false;match result {Ok(policy)=>{this.storage_policy=Some(policy);this.storage_preview=None;this.status="Preview policy saved. No files were removed; refresh to inspect it.".into();},Err(error)=>{this.last_error=Some(error);this.status="Preview policy could not be saved; refresh before retrying".into();}}cx.notify();return;},
                             Update::Jobs(jobs) => {this.pending_jobs = jobs;this.load_meeting_plans(cx);},
                             Update::MeetingPlans(plans) => this.meeting_plans = plans,
                             Update::MeetingFinalized(result, warning) => {
-                                match result {Ok(d)=>this.receive_detail(d),Err(e)=>{this.status=e.clone();this.last_error=Some(e);cx.notify();return;}}
+                                match result {Ok(d)=>this.receive_detail(d, cx),Err(e)=>{this.status=e.clone();this.last_error=Some(e);cx.notify();return;}}
                                 this.load_meeting_plans(cx);
                                 if let Some(warning)=warning {this.status=warning.clone();this.last_error=Some(warning);cx.notify();return;}
                             },
@@ -383,7 +420,7 @@ impl Workbench {
                                         this.editing_title=false;this.editing_segment=None;this.segment_page=0;
                                         this.recording_tab=library::RecordingTab::Transcript;
                                         this.show_transcript_find=false;this.transcript_query.clear();
-                                        this.cluster_review=None;this.selected_clusters.clear();this.candidates.clear();
+                                        this.cluster_review=None;this.selected_clusters.clear();this.candidates.clear();this.train_done.clear();this.train_person=None;this.train_hint=None;
                                         this.suggestions.clear();this.suggestion_review=None;
                                         this.reader_list.reset(0);
                                         this.library_filter=library::LibraryFilter::All;
@@ -405,12 +442,13 @@ impl Workbench {
                                         {
                                             *row = d.recording.clone();
                                         }
-                                        this.receive_detail(d);
+                                        this.receive_detail(d, cx);
                                         this.area = Area::Library;
                                         this.reload(cx);
                                         if let Some(warning)=warning {this.status=warning.clone();this.last_error=Some(warning);cx.notify();return;}
                                     }
                                     Err(e) => {
+                                        this.last_error = Some(e.clone());
                                         this.status = e;
                                         cx.notify();
                                         return;
@@ -420,9 +458,9 @@ impl Workbench {
                             Update::CopyText(text) => {cx.write_to_clipboard(ClipboardItem::new_string(text));this.status="Transcript copied".into();cx.notify();return;},
                             Update::LibrarySearch(generation,r) => {if generation==this.search_generation {this.records=r;}},
                             Update::TitleSaved(d) => {if let Some(row)=this.records.iter_mut().find(|r|r.id==d.recording.id){*row=d.recording.clone();}
-                                if this.requested_recording.as_deref()==Some(d.recording.id.as_str()){this.editing_title=false;this.receive_detail(d);}},
+                                if this.requested_recording.as_deref()==Some(d.recording.id.as_str()){this.editing_title=false;this.receive_detail(d, cx);}},
                             Update::Imported(report) => {this.reload(cx);this.status=format!("{} imported · {} already in library{}",report.imported,report.existing,if report.warnings.is_empty(){String::new()}else{format!(" · Warnings: {}",report.warnings.join("; "))});cx.notify();return;},
-                            Update::Detail(d) => this.receive_detail(d),
+                            Update::Detail(d) => this.receive_detail(d, cx),
                             Update::Profiles(p) => {
                                 if this
                                     .selected_profile
@@ -439,16 +477,18 @@ impl Workbench {
                             }
                             Update::Models(m) => this.model_list = m,
                             Update::Dictations(receipts) => this.dictations = receipts,
-                            Update::DictationStopped(message) => {
+                            Update::DictationStopped(result) => {
                                 this.dictation_stop = None;
-                                if let Ok(mut state) = this.dictation_state.lock() {
-                                    *state = serde_json::json!({"state":"disabled"});
-                                }
                                 if let Some(overlay) = this.dictation_overlay.take() {
-                                    let _ =
-                                        overlay.update(cx, |_, window, _| window.remove_window());
+                                    let _ = overlay.update(cx, |_, window, _| window.remove_window());
                                 }
-                                this.status = message;
+                                match result {
+                                    Ok(()) => {
+                                        if let Ok(mut state) = this.dictation_state.lock() { state["state"] = serde_json::json!("disabled"); state.as_object_mut().map(|o| o.remove("message")); }
+                                        this.status = "Dictation is off".into();
+                                    }
+                                    Err(error) => this.dictation_feedback(error),
+                                }
                                 cx.notify();
                                 return;
                             }
@@ -503,6 +543,7 @@ impl Workbench {
         self.suggestions.clear();
         self.suggestion_review = None;
         self.candidates.clear();
+        self.analysis_active = false;
         self.train_done.clear();
         self.train_person = None;
         self.selected_track = None;
@@ -521,7 +562,6 @@ impl Workbench {
             self.title
                 .update(cx, |s, cx| s.set_value(title, window, cx));
         }
-        self.load_voices(id.clone(), cx);
         self.task(
             "Opening recording",
             async move { Ok(Update::detail(lib.show(&id).await?)) },
@@ -634,11 +674,7 @@ impl Workbench {
 impl Render for Workbench {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let began = Instant::now();
-        self.columns = if window.viewport_size().width >= px(1150.) {
-            2
-        } else {
-            1
-        };
+        self.columns = ui::column_count(f32::from(window.viewport_size().width) - 236.);
         let sidebar = self.sidebar(cx);
         let mut content = div()
             .id("area-content")
@@ -1340,10 +1376,13 @@ impl Workbench {
         let request = CaptureRecordingInput {
             microphone_uid,
             system_audio,
-            title: format!("Meeting {}", now()),
+            title: chrono::Local::now()
+                .format("Meeting %b %-d, %Y at %-I:%M %p")
+                .to_string(),
             maximum_seconds: 7200,
             final_transcription: None,
         };
+        self.last_error = None;
         let transcribe = self.audio_preferences.transcribe_meetings_after_stop;
         let analyze_speakers = self.audio_preferences.analyze_meetings_after_stop;
         let matching_policy = self.audio_preferences.after_stop_policy();
@@ -1352,7 +1391,7 @@ impl Workbench {
         let meeting = self.meeting.clone();
         let lib = self.library.clone();
         self.task(
-            "Recording — waiting for first buffers",
+            "Meeting capture",
             async move {
                 let (id, warning) = match meeting
                     .record(
@@ -1391,7 +1430,42 @@ impl Workbench {
             cx,
         );
     }
+    fn dictation_feedback(&mut self, message: String) {
+        self.status = message.clone();
+        if let Ok(mut state) = self.dictation_state.lock() {
+            state["state"] = serde_json::json!("disabled");
+            state["message"] = serde_json::json!(message);
+        }
+    }
     fn start_dictation(&mut self, cx: &mut Context<Self>) {
+        if self.dictation_stop.is_some() || self.dictation_starting {
+            return;
+        }
+        if !self.shortcuts.iter().any(|s| s.enabled) {
+            self.dictation_feedback(
+                "Add and enable a shortcut below before turning on dictation.".into(),
+            );
+            cx.notify();
+            return;
+        }
+        self.dictation_starting = true;
+        let service = self.audio_inspection.clone();
+        self.task(
+            "Checking dictation permissions and microphone",
+            async move {
+                let result = async {
+                    let permissions = service.permissions().await?;
+                    let devices = service.devices().await?;
+                    Ok::<_, anyhow::Error>((permissions, devices))
+                }
+                .await
+                .map_err(|e| e.to_string());
+                Ok(Update::DictationReady(result))
+            },
+            cx,
+        );
+    }
+    fn begin_dictation(&mut self, cx: &mut Context<Self>) {
         if self.dictation_stop.is_some() {
             return;
         }
@@ -1439,10 +1513,9 @@ impl Workbench {
             "Listening for configured hold shortcuts",
             async move {
                 let result = listener.run(uid, stop).await;
-                Ok(Update::DictationStopped(match result {
-                    Ok(()) => "Hold dictation disabled".into(),
-                    Err(e) => format!("Hold dictation stopped: {e}"),
-                }))
+                Ok(Update::DictationStopped(
+                    result.map_err(|e| format!("Dictation could not continue: {e}")),
+                ))
             },
             cx,
         );
@@ -1789,6 +1862,9 @@ fn main() -> anyhow::Result<()> {
                             dictation_overlay: None,
                             dictation_state,
                             devices: serde_json::Value::Null,
+                            permissions: None,
+                            permissions_error: None,
+                            dictation_starting: false,
                             audio_preferences,
                             focus,
                             main_window: window.window_handle(),
@@ -1827,6 +1903,10 @@ fn main() -> anyhow::Result<()> {
                             profiles,
                             examples: vec![],
                             candidates: vec![],
+                            voices_generation: 0,
+                            voices_loading: false,
+                            analysis_active: false,
+                            voices_error: None,
                             calibration: None,
                             train_person: None,
                             train_hint: None,

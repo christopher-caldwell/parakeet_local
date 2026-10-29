@@ -215,15 +215,19 @@ impl Workbench {
                     )
                     .child(caption("Recordings, meetings, and imported media")),
             )
+            .when(self.show_status_details, |row| {
+                row.child(
+                    quiet("show-import-path", "From path…").on_click(cx.listener(
+                        |this, _, _, cx| {
+                            this.show_import_path = !this.show_import_path;
+                            this.show_media_import = false;
+                            cx.notify();
+                        },
+                    )),
+                )
+            })
             .child(
-                quiet("show-import-path", "From path…").on_click(cx.listener(|this, _, _, cx| {
-                    this.show_import_path = !this.show_import_path;
-                    this.show_media_import = false;
-                    cx.notify();
-                })),
-            )
-            .child(
-                button("show-media-import", "YouTube URL").on_click(cx.listener(
+                quiet("show-media-import", "YouTube URL").on_click(cx.listener(
                     |this, _, window, cx| {
                         this.show_media_import = !this.show_media_import;
                         this.show_import_path = false;
@@ -235,7 +239,7 @@ impl Workbench {
                 )),
             )
             .child(
-                primary("import-file", "Import audio…")
+                button("import-file", "Import audio…")
                     .on_click(cx.listener(|this, _, _, cx| this.choose_audio(cx))),
             );
         let mut view = div()
@@ -373,7 +377,10 @@ impl Workbench {
                                 } else {
                                     recording_kind(&recording.source_kind).into()
                                 }
-                            ))),
+                            )))
+                            .when(recording.capture_needs_attention(), |row| {
+                                row.child(caption("Audio needs attention").text_color(rgb(WARNING)))
+                            }),
                     )
                     .on_click(
                         cx.listener(move |this, _, window, cx| this.open(id.clone(), window, cx)),
@@ -455,7 +462,7 @@ impl Workbench {
                 .child(div().size(px(58.)).rounded_xl().bg(rgb(PANEL)).text_color(rgb(ACCENT)).flex().items_center().justify_center().child(icon("wave").size(px(30.)).text_color(rgb(MUTED))))
                 .child(div().text_size(px(21.)).font_weight(FontWeight::SEMIBOLD).child(if loading{"Opening recording…"}else{"A place for every conversation"}))
                 .child(div().max_w(px(340.)).text_center().text_color(rgb(MUTED)).child(if loading{"Loading the saved transcript and source details."}else{"Select a recording to read its transcript, listen to the original audio, or review its speakers."}))
-                .when(!loading,|view|view.child(primary("empty-import","Import audio…").self_center().on_click(cx.listener(|this,_,_,cx|this.choose_audio(cx)))))
+                .when(!loading,|view|view.child(primary("empty-record","Record a meeting").self_center().on_click(cx.listener(|this,_,_,cx|this.navigate(Area::Capture,cx)))))
                 .child(caption("⌘O  Import audio     ⌘F  Find words"));
         };
         let mut heading = div()
@@ -544,11 +551,24 @@ impl Workbench {
                     row.child(pill("Source unavailable", WARNING))
                 }),
         );
+        if detail.recording.capture_needs_attention() {
+            heading = heading.child(
+                div()
+                    .self_start()
+                    .max_w(px(640.))
+                    .p_3()
+                    .rounded_lg()
+                    .bg(rgba((WARNING << 8) | 0x1f))
+                    .text_color(rgb(WARNING))
+                    .child("Audio saved with problems. Some audio may be missing or silent. Check Audio & sources and listen before relying on this transcript."),
+            );
+        }
         let mut tabs = div()
             .px_5()
             .pb_2()
             .flex_shrink_0()
             .flex()
+            .flex_wrap()
             .items_center()
             .gap_1()
             .border_b_1()
@@ -573,7 +593,11 @@ impl Workbench {
             tabs = tabs.child(
                 choice(("recording-tab", i), label, self.recording_tab == tab).on_click(
                     cx.listener(move |this, _, _, cx| {
-                        this.recording_tab = tab;
+                        if tab == RecordingTab::Voices {
+                            this.open_voices(cx);
+                        } else {
+                            this.recording_tab = tab;
+                        }
                         this.reset_reader_rows(true);
                         cx.notify();
                     }),
@@ -588,7 +612,14 @@ impl Workbench {
                 }
                 reader.child(self.transcript_view(detail, cx))
             }
-            RecordingTab::Voices => reader.child(self.voices_view(cx)),
+            RecordingTab::Voices => reader.child(
+                div()
+                    .id("voice-reader")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .child(self.voices_view(cx)),
+            ),
             RecordingTab::Audio => reader.child(self.audio_view(detail, cx)),
             RecordingTab::Processing => reader.child(self.processing_view(detail, cx)),
         }

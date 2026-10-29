@@ -26,12 +26,17 @@ fn model_blurb(id: &str) -> &'static str {
 
 fn capture_state_label(state: &str) -> &str {
     match state {
-        "idle" => "Ready to record",
-        "starting" => "Starting…",
+        "idle" => "Not recording",
+        "starting" => "Checking audio…",
         "recording" => "Recording",
         "waiting_or_stalled" => "Waiting for audio…",
         "source_failed" => "A source stopped working",
         "source_interrupted" => "A source was interrupted",
+        "recording_with_warnings" => "Recording · check audio",
+        "finalizing" => "Checking saved audio…",
+        "completed_with_warnings" => "Audio saved with problems",
+        "failed" => "Recording failed",
+        "start_failed" => "Recording not started",
         "completed" => "Saved",
         other => other,
     }
@@ -44,6 +49,75 @@ fn shortcut_label(binding: &gestures::Shortcut) -> String {
 }
 
 impl Workbench {
+    pub(super) fn refresh_permissions(&mut self, cx: &mut Context<Self>) {
+        let service = self.audio_inspection.clone();
+        self.permissions_error = None;
+        self.task(
+            "Checking macOS permissions",
+            async move {
+                Ok(Update::Permissions(
+                    service.permissions().await.map_err(|e| e.to_string()),
+                ))
+            },
+            cx,
+        );
+    }
+    fn permission_granted(&self, kind: &str) -> Option<bool> {
+        let p = self.permissions.as_ref()?;
+        if kind == "microphone" {
+            p["microphone_status"].as_u64().map(|s| s == 3)
+        } else {
+            p[if kind == "screen_recording" {
+                "screen_capture"
+            } else {
+                kind
+            }]
+            .as_bool()
+        }
+    }
+    pub(super) fn dictation_blocker(&self) -> Option<String> {
+        if self.capture_stop.is_some() {
+            return Some("Finish the meeting recording before using dictation.".into());
+        }
+        if !self.shortcuts.iter().any(|s| s.enabled) {
+            return Some("Add and enable a shortcut below to use dictation.".into());
+        }
+        let selected = self.audio_preferences.microphone_uid.as_deref();
+        if selected.is_none()
+            || !self.devices["devices"]
+                .as_array()
+                .is_some_and(|ds| ds.iter().any(|d| d["uid"].as_str() == selected))
+        {
+            return Some("Choose an available microphone in Record a meeting.".into());
+        }
+        if self.permissions_error.is_some() {
+            return Some(
+                "Permissions could not be checked. Open permissions and refresh their status."
+                    .into(),
+            );
+        }
+        let missing: Vec<_> = [
+            ("microphone", "Microphone"),
+            ("accessibility", "Pasting text"),
+            ("input_monitoring", "Shortcuts"),
+        ]
+        .into_iter()
+        .filter(|(kind, _)| self.permission_granted(kind) != Some(true))
+        .map(|(_, label)| label)
+        .collect();
+        if !missing.is_empty() {
+            return Some(if self.permissions.is_none() {
+                "Checking macOS permissions…".into()
+            } else {
+                format!(
+                    "Allow {} in Privacy & permissions before turning on dictation.",
+                    missing.join(", ")
+                )
+            });
+        }
+        None
+    }
+
     pub(super) fn models_view(&self, cx: &mut Context<Self>) -> Div {
         let mut view = div().flex().flex_col().gap_3().child(section(
             "Local models",
@@ -277,20 +351,26 @@ impl Workbench {
                 })
             })
             .and_then(|d| d["name"].as_str());
-        let no_mic = self.audio_preferences.microphone_uid.is_none();
-        let mut view = div().flex().flex_col().gap_3().child(section(
+        let no_mic = microphone.is_none();
+        let mut view = div().w_full().max_w(px(1080.)) .flex().flex_col().gap_3().child(section(
             "Record a meeting",
-            "Records your microphone and the other people's audio as separate tracks, which makes the transcript more accurate.",
+            "Record your microphone and meeting audio together. Transcription starts after you stop.",
         ));
         let mut card = panel()
+            .max_w(px(760.))
             .child(div().flex().child(pill(
                 capture_state_label(state).to_owned(),
                 match state {
-                    "idle" | "completed" => SUCCESS,
+                    "completed" => SUCCESS,
                     "recording" => DANGER,
-                    "source_failed" | "source_interrupted" | "waiting_or_stalled" | "starting" => {
-                        WARNING
-                    }
+                    "source_failed"
+                    | "source_interrupted"
+                    | "waiting_or_stalled"
+                    | "starting"
+                    | "recording_with_warnings"
+                    | "completed_with_warnings"
+                    | "finalizing" => WARNING,
+                    "failed" | "start_failed" => DANGER,
                     _ => MUTED,
                 },
             )))
@@ -309,7 +389,13 @@ impl Workbench {
                     )
                     .child(
                         danger("stop-recording", "Stop & save")
-                            .disabled(!recording || state == "completed")
+                            .disabled(
+                                !recording
+                                    || matches!(
+                                        state,
+                                        "completed" | "completed_with_warnings" | "finalizing"
+                                    ),
+                            )
                             .on_click(cx.listener(|this, _, _, cx| {
                                 if let Some(stop) = &this.capture_stop {
                                     stop.store(true, Ordering::SeqCst);
@@ -318,26 +404,32 @@ impl Workbench {
                                 }
                             })),
                     )
-                    .child(
-                        quiet("record-system", "Meeting audio only")
-                            .disabled(recording)
-                            .on_click(
-                                cx.listener(|this, _, _, cx| this.start_capture(false, true, cx)),
-                            ),
-                    )
-                    .child(
-                        quiet("record-mic", "Microphone only")
-                            .disabled(recording || no_mic)
-                            .on_click(
-                                cx.listener(|this, _, _, cx| this.start_capture(true, false, cx)),
-                            ),
-                    ),
+                    .when(self.show_status_details, |row| {
+                        row.child(
+                            quiet("record-system", "Meeting audio only")
+                                .disabled(recording)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.start_capture(false, true, cx)
+                                })),
+                        )
+                        .child(
+                            quiet("record-mic", "Microphone only")
+                                .disabled(recording || no_mic)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.start_capture(true, false, cx)
+                                })),
+                        )
+                    }),
             )
             .child(caption(match microphone {
                 Some(name) => format!("Microphone: {name}. Change it below."),
+                None if self.audio_preferences.microphone_uid.is_some() => {
+                    "Your selected microphone is unavailable. Reconnect it and press Refresh."
+                        .into()
+                }
                 None => "Choose a microphone below to start recording.".into(),
             }));
-        if recording && state == "completed" {
+        if recording && matches!(state, "completed" | "completed_with_warnings") {
             card = card.child(
                 div()
                     .flex()
@@ -359,6 +451,7 @@ impl Workbench {
                     | "waiting_or_stalled"
                     | "source_failed"
                     | "source_interrupted"
+                    | "recording_with_warnings"
             );
             let wanted = !((source == "microphone"
                 && health["requested_microphone_uid"].is_null())
@@ -415,7 +508,7 @@ impl Workbench {
         view = view.child(card);
         view = view.child(group_action(
             "Microphone",
-            "Pick the one you speak into. A saved microphone that is unplugged is never replaced silently.",
+            "Choose your microphone. Recording checks that it works before starting.",
             button("refresh-audio-devices", "Refresh")
                 .on_click(cx.listener(|this, _, _, cx| this.navigate(Area::Capture, cx))),
         ));
@@ -445,6 +538,7 @@ impl Workbench {
                     (device["is_default"] == true).then(|| "Mac default".to_owned()),
                     selected,
                 )
+                .disabled(recording || self.dictation_stop.is_some())
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.audio_preferences.microphone_uid = Some(uid.clone());
                     let preferences = this.audio_preferences.clone();
@@ -472,13 +566,14 @@ impl Workbench {
         let suggest = self.audio_preferences.suggest_speakers_after_stop;
         view.child(
             panel()
+                .max_w(px(760.))
                 .p_1()
                 .gap_0()
                 .child(
                     toggle_row(
                         "auto-final-transcription",
                         "Transcribe the meeting",
-                        "Uses the transcription model marked In use. If it fails, you can resume it later.",
+                        "Turn the saved audio into a transcript.",
                         transcribe,
                     )
                     .disabled(busy)
@@ -504,7 +599,7 @@ impl Workbench {
                     toggle_row(
                         "auto-speaker-analysis",
                         "Detect the speakers",
-                        "Finds the separate voices so you can name them in the recording's Name voices tab. Also turns on transcription.",
+                        "Prepare voice clips for you to listen to and name. Includes transcription.",
                         analyze,
                     )
                     .disabled(busy)
@@ -526,7 +621,7 @@ impl Workbench {
                         );
                     })),
                 )
-                .child(
+                .when(self.show_status_details || self.audio_preferences.matching_policy.is_some(), |panel| panel                .child(
                     toggle_row(
                         "auto-speaker-suggest",
                         "Suggest names for voices",
@@ -548,7 +643,7 @@ impl Workbench {
                             cx,
                         );
                     })),
-                ),
+                ),),
         )
     }
 
@@ -560,7 +655,8 @@ impl Workbench {
             .map(|v| v.clone())
             .unwrap_or_default();
         let on = self.dictation_stop.is_some();
-        let mut view = div().flex().flex_col().gap_3().child(section(
+        let blocker = self.dictation_blocker();
+        let mut view = div().w_full().max_w(px(760.)) .flex().flex_col().gap_3().child(section(
             "Dictation",
             "Hold a shortcut, speak, then let go. Your words are transcribed on this Mac and pasted where you were typing.",
         ));
@@ -576,8 +672,8 @@ impl Workbench {
                     .items_center()
                     .gap_2()
                     .child(
-                        primary("start-listening", "Turn on dictation")
-                            .disabled(on)
+                        primary("start-listening", if self.dictation_starting { "Checking…" } else { "Turn on dictation" })
+                            .disabled(on || self.dictation_starting || blocker.is_some())
                             .on_click(cx.listener(|this, _, _, cx| this.start_dictation(cx))),
                     )
                     .child(
@@ -597,13 +693,16 @@ impl Workbench {
                     .flex_wrap()
                     .items_center()
                     .gap_2()
-                    .child(caption(
-                        "Needs macOS permission for the microphone, Accessibility (to paste) and Input Monitoring (to hear shortcuts).",
-                    ))
-                    .child(button("dictation-permissions", "Open permissions").on_click(
+                    .child(caption(if ["microphone", "accessibility", "input_monitoring"].iter().all(|kind| self.permission_granted(kind) == Some(true)) {
+                        "Microphone, shortcuts and pasting are allowed."
+                    } else { "Dictation needs access to your microphone, shortcuts and text insertion." }).flex_1().min_w_0())
+                    .child(quiet("dictation-permissions", "Permissions").on_click(
                         cx.listener(|this, _, _, cx| this.navigate(Area::Privacy, cx)),
                     )),
             );
+        if !on && let Some(reason) = blocker {
+            card = card.child(caption(reason).text_color(rgb(WARNING)));
+        }
         if let Some(message) = live["message"].as_str() {
             card = card.child(div().text_color(rgb(WARNING)).child(message.to_owned()));
         }
@@ -680,12 +779,9 @@ impl Workbench {
                     .child(
                         quiet(
                             ("toggle-binding", index),
-                            if binding.enabled {
-                                "Turn off"
-                            } else {
-                                "Turn on"
-                            },
+                            if binding.enabled { "Disable" } else { "Enable" },
                         )
+                        .disabled(on || self.dictation_starting)
                         .on_click(cx.listener(move |this, _, _, cx| {
                             let mut bindings = this.shortcuts.clone();
                             if let Some(b) = bindings.iter_mut().find(|b| b.id == toggle) {
@@ -695,8 +791,9 @@ impl Workbench {
                         })),
                     )
                     .child(
-                        quiet(("remove-binding", index), "Remove").on_click(cx.listener(
-                            move |this, _, _, cx| {
+                        quiet(("remove-binding", index), "Remove")
+                            .disabled(on || self.dictation_starting)
+                            .on_click(cx.listener(move |this, _, _, cx| {
                                 let bindings = this
                                     .shortcuts
                                     .iter()
@@ -704,12 +801,19 @@ impl Workbench {
                                     .cloned()
                                     .collect();
                                 this.persist_shortcuts(bindings, cx);
-                            },
-                        )),
+                            })),
                     ),
             );
         }
         view = view.child(shortcuts);
+        if on {
+            view = view.child(caption("Turn off dictation to change shortcuts."));
+        }
+        if self.recording_shortcut {
+            view = view.child(caption(
+                "Press the keys you want to hold while speaking. Escape cancels.",
+            ));
+        }
         view = view.child(
             div()
                 .flex()
@@ -717,18 +821,26 @@ impl Workbench {
                 .items_center()
                 .gap_2()
                 .child(
-                    button("record-shortcut", "Record a shortcut").on_click(cx.listener(
-                        |this, _, _, cx| {
-                            this.recording_shortcut = true;
-                            this.status = "Press the shortcut; Escape cancels".into();
-                            cx.notify();
+                    primary(
+                        "record-shortcut",
+                        if self.recording_shortcut {
+                            "Press your shortcut…"
+                        } else {
+                            "Record a shortcut"
                         },
-                    )),
+                    )
+                    .disabled(on || self.dictation_starting)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.recording_shortcut = true;
+                        this.status = "Press the shortcut; Escape cancels".into();
+                        cx.notify();
+                    })),
                 )
                 .when(self.show_status_details, |row| {
                     row.child(field(&self.shortcut_key).w(px(160.))).child(
-                        quiet("add-shortcut", "Add by key name").on_click(cx.listener(
-                            |this, _, _, cx| {
+                        quiet("add-shortcut", "Add by key name")
+                            .disabled(on || self.dictation_starting)
+                            .on_click(cx.listener(|this, _, _, cx| {
                                 let key = this.shortcut_key.read(cx).value().to_string();
                                 let mut bindings = this.shortcuts.clone();
                                 bindings.push(gestures::Shortcut {
@@ -738,8 +850,7 @@ impl Workbench {
                                     enabled: true,
                                 });
                                 this.persist_shortcuts(bindings, cx);
-                            },
-                        )),
+                            })),
                     )
                 }),
         );
@@ -792,7 +903,7 @@ impl Workbench {
                     ),
             );
         }
-        view.child(group(
+        view.when(self.show_status_details, |view| view.child(group(
             "Troubleshooting",
             "If dictation was interrupted while it held your clipboard, this puts your clipboard back.",
         ))
@@ -813,14 +924,20 @@ impl Workbench {
                         cx,
                     );
                 })),
-        )
+        ))
     }
 
     pub(super) fn privacy_view(&self, cx: &mut Context<Self>) -> Div {
-        let mut view = div().flex().flex_col().gap_3().child(section(
-            "Privacy & permissions",
-            "What stays on this Mac, and what macOS lets the app do.",
-        ));
+        let mut view = div()
+            .w_full()
+            .max_w(px(760.))
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(section(
+                "Privacy & permissions",
+                "What stays on this Mac, and what macOS lets the app do.",
+            ));
         let mut facts = panel().gap_2();
         for fact in [
             "Transcription and speaker detection run on this Mac. Nothing is uploaded.",
@@ -839,7 +956,7 @@ impl Workbench {
         view = view.child(facts);
         view = view.child(group(
             "macOS permissions",
-            "Each one is requested only when you press Grant. Nothing prompts in the background.",
+            "Allow access for the features you use. After changing a permission in System Settings, refresh below.",
         ));
         let permissions = [
             (
@@ -864,8 +981,23 @@ impl Workbench {
             ),
         ];
         let mut rows = panel().gap_0().p_1();
+        view = view.child(
+            button("refresh-permissions", "Refresh permission status")
+                .on_click(cx.listener(|this, _, _, cx| this.refresh_permissions(cx))),
+        );
+        if let Some(error) = &self.permissions_error {
+            view = view.child(
+                caption(format!("Could not check permissions: {error}")).text_color(rgb(WARNING)),
+            );
+        }
         let last = permissions.len() - 1;
         for (index, (kind, title, purpose)) in permissions.into_iter().enumerate() {
+            let granted = self.permission_granted(kind);
+            let denied = kind == "microphone"
+                && self
+                    .permissions
+                    .as_ref()
+                    .is_some_and(|p| p["microphone_status"] == 2 || p["microphone_status"] == 1);
             rows = rows.child(
                 div()
                     .px_3()
@@ -873,36 +1005,62 @@ impl Workbench {
                     .flex()
                     .items_center()
                     .gap_4()
-                    .when(index < last, |row| row.border_b_1().border_color(rgb(BORDER)))
+                    .when(index < last, |row| {
+                        row.border_b_1().border_color(rgb(BORDER))
+                    })
                     .child(
                         div()
                             .flex_1()
                             .min_w_0()
                             .flex()
                             .flex_col()
-                            .child(div().text_size(px(14.)).font_weight(FontWeight::MEDIUM).child(title))
+                            .child(
+                                div()
+                                    .text_size(px(14.))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .child(title),
+                            )
                             .child(caption(purpose)),
                     )
-                    .child(button(("request-permission", index), "Grant").self_center().on_click(
-                        cx.listener(move |this, _, _, cx| {
-                            let service = this.audio_inspection.clone();
-                            this.task(
-                                "Requesting macOS permission",
-                                async move {
-                                    let result = service.request_permission(kind).await?;
-                                    Ok(Update::Message(format!(
-                                        "{title}: {}",
-                                        if result["granted"] == true {
-                                            "granted"
-                                        } else {
-                                            "not granted yet — approve it in System Settings if prompted"
-                                        }
-                                    )))
+                    .child(pill(
+                        match granted {
+                            Some(true) => "Granted",
+                            Some(false) => "Not granted",
+                            None => "Not checked",
+                        },
+                        if granted == Some(true) {
+                            SUCCESS
+                        } else {
+                            MUTED
+                        },
+                    ))
+                    .when(granted != Some(true), |row| {
+                        row.child(
+                            button(
+                                ("request-permission", index),
+                                if denied { "Open Settings" } else { "Allow" },
+                            )
+                            .self_center()
+                            .on_click(cx.listener(
+                                move |this, _, _, cx| {
+                                    let service = this.audio_inspection.clone();
+                                    this.task(
+                                        "Requesting macOS permission",
+                                        async move {
+                                            let result = async {
+                                                service.request_permission(kind).await?;
+                                                Ok::<_, anyhow::Error>(service.permissions().await?)
+                                            }
+                                            .await
+                                            .map_err(|e| e.to_string());
+                                            Ok(Update::Permissions(result))
+                                        },
+                                        cx,
+                                    );
                                 },
-                                cx,
-                            );
-                        }),
-                    )),
+                            )),
+                        )
+                    }),
             );
         }
         view = view.child(rows);

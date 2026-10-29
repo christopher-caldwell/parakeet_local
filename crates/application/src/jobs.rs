@@ -69,8 +69,24 @@ impl ProcessingRecoveryService {
         Ok(self.queries.pending_runs().await?)
     }
     pub async fn recover(&self) -> Result<ProcessingRecoveryReport, RecoverProcessingJobsError> {
+        self.recover_matching(None).await
+    }
+    /// Resume one recording without changing abandoned jobs from other recordings.
+    pub async fn recover_recording(
+        &self,
+        recording_id: &str,
+    ) -> Result<ProcessingRecoveryReport, RecoverProcessingJobsError> {
+        self.recover_matching(Some(recording_id)).await
+    }
+    async fn recover_matching(
+        &self,
+        recording_id: Option<&str>,
+    ) -> Result<ProcessingRecoveryReport, RecoverProcessingJobsError> {
         let mut report = ProcessingRecoveryReport::default();
         for mut run in self.queries.pending_runs().await? {
+            if recording_id.is_some_and(|id| id != run.recording_id) {
+                continue;
+            }
             if run.configuration["ownership_protocol"] != OWNERSHIP_PROTOCOL {
                 // Older processes cannot participate in this protocol. Time or
                 // PID guesses are insufficient evidence that they stopped.

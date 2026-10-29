@@ -33,6 +33,14 @@ pub struct Recording {
     pub metadata: Value,
 }
 impl Recording {
+    /// Capture integrity is independent of whether later transcription succeeded.
+    pub fn capture_needs_attention(&self) -> bool {
+        matches!(
+            self.metadata["state"].as_str(),
+            Some("partial_needs_inspection" | "recovered_partial")
+        )
+    }
+
     pub fn title(&self) -> &str {
         self.title_override.as_deref().unwrap_or(&self.source_title)
     }

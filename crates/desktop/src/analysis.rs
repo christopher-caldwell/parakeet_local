@@ -141,10 +141,14 @@ impl Workbench {
             None
         };
         let service = self.analysis.clone();
+        let recovery = self.recovery.clone();
         let library = self.library.clone();
         self.task(
             "Analyzing meeting locally; source audio and corrections retained",
             async move {
+                if !new_run {
+                    recovery.recover_recording(&recording_id).await?;
+                }
                 let warning = service
                     .analyze(AnalyzeMeetingInput {
                         recording_id: recording_id.clone(),

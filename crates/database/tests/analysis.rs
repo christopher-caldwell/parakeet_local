@@ -466,6 +466,7 @@ async fn workflow_lease_survives_caller_abort_and_excludes_other_controller() {
     while f.engine.calls.lock().unwrap().is_empty() {
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     }
+    assert!(f.analysis.is_active("r").await.unwrap());
     caller.abort();
     assert!(matches!(
         f.analysis.analyze(f.input()).await,
@@ -784,9 +785,45 @@ async fn abandoned_source_requires_owned_recovery_before_analysis_resume() {
     assert_eq!(f.engine.calls.lock().unwrap().len(), calls);
     let recovery =
         ProcessingRecoveryService::new(f.store.clone(), f.store.clone(), f.ownership.clone());
+    // Simulate the durable state left by a terminated controller. The saved
+    // running label must not imply that a worker still owns the recording.
+    let saved = f.analysis.show("r").await.unwrap().unwrap();
+    let mut stale = saved.clone();
+    stale.status = "running".into();
+    assert!(
+        f.store
+            .replace_analysis(Some(&saved), &stale)
+            .await
+            .unwrap()
+    );
+    assert!(!f.analysis.is_active("r").await.unwrap());
+    use parakeet_application::jobs::ProcessingOwnership;
+    let key = stable_id("meeting-analysis-controller", "r");
+    let owner = f.ownership.try_acquire(&key).await.unwrap().unwrap();
+    assert!(f.analysis.is_active("r").await.unwrap());
+    drop(owner);
+    assert!(!f.analysis.is_active("r").await.unwrap());
+    assert!(
+        recovery
+            .recover_recording("other-recording")
+            .await
+            .unwrap()
+            .interrupted
+            .is_empty()
+    );
     assert_eq!(
-        recovery.recover().await.unwrap().interrupted,
+        recovery.recover_recording("r").await.unwrap().interrupted,
         vec![abandoned.id]
     );
-    assert_eq!(f.analysis.analyze(f.input()).await.unwrap().id, plan.id);
+    // Recovery changes abandoned source jobs, while the old plan remains
+    // resumable even though its saved status still says running.
+    assert_eq!(
+        f.analysis.show("r").await.unwrap().unwrap().status,
+        "running"
+    );
+    assert!(!f.analysis.is_active("r").await.unwrap());
+    let resumed = f.analysis.analyze(f.input()).await.unwrap();
+    assert_eq!(resumed.id, plan.id);
+    assert_eq!(resumed.status, "completed");
+    assert!(!resumed.candidates.is_empty());
 }

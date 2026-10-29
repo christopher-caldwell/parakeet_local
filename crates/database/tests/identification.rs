@@ -108,12 +108,18 @@ async fn fixture() -> (tempfile::TempDir, Arc<SqliteStore>, SpeakerService) {
 async fn fixture_with(
     segments: Vec<TranscriptSegment>,
 ) -> (tempfile::TempDir, Arc<SqliteStore>, SpeakerService) {
+    fixture_with_overlap(segments, false).await
+}
+async fn fixture_with_overlap(
+    segments: Vec<TranscriptSegment>,
+    microphone: bool,
+) -> (tempfile::TempDir, Arc<SqliteStore>, SpeakerService) {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("test.db");
     create_empty(&path).await.unwrap();
     migrate(&path).await.unwrap();
     let store = Arc::new(SqliteStore::new(open_existing(&path).await.unwrap()));
-    let bundle = ImportBundle {
+    let mut bundle = ImportBundle {
         recording: Recording {
             id: "r".into(),
             source_key: "original:r".into(),
@@ -141,6 +147,12 @@ async fn fixture_with(
         original: json!({}),
         warnings: vec![],
     };
+    if microphone {
+        let mut mic = bundle.tracks[0].clone();
+        mic.id = "mic-track".into();
+        mic.kind = TrackKind::Microphone;
+        bundle.tracks.push(mic);
+    }
     store.import(&bundle).await.unwrap();
     let intervals = vec![
         interval("a", 0, 6_500),
@@ -166,6 +178,18 @@ async fn fixture_with(
     run.status = "completed".into();
     run.result = json!({"intervals":intervals});
     store.finish(&run, &[]).await.unwrap();
+    if microphone {
+        let mut mic = run.clone();
+        mic.id = "mic-diarization".into();
+        mic.configuration["track"]["id"] = json!("mic-track");
+        for interval in mic.result["intervals"].as_array_mut().unwrap() {
+            interval["track_id"] = json!("mic-track");
+        }
+        mic.status = "running".into();
+        store.start(&mic).await.unwrap();
+        mic.status = "completed".into();
+        store.finish(&mic, &[]).await.unwrap();
+    }
     let service = SpeakerService::new(
         store.clone(),
         store.clone(),
@@ -513,4 +537,22 @@ async fn profile_history_lists_enrollments_recognitions_and_notes() {
     assert_eq!(after.recognitions[0].outcome, "accepted");
     assert_eq!(after.enrollments.len(), 3);
     assert!(service.save_notes("missing", "x").await.is_err());
+}
+
+#[tokio::test]
+async fn simultaneous_microphone_and_system_voices_remain_available_to_name() {
+    let (_tmp, _store, service) = fixture_with_overlap(vec![], true).await;
+    let candidates = service.candidates("r").await.unwrap();
+    assert_eq!(
+        candidates.iter().filter(|c| c.track_id == "track").count(),
+        2
+    );
+    assert_eq!(
+        candidates
+            .iter()
+            .filter(|c| c.track_id == "mic-track")
+            .count(),
+        2,
+        "complete temporal overlap is not proof of echo and must not discard a real microphone voice"
+    );
 }
