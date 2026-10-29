@@ -16,9 +16,9 @@ parakeet --data-root <existing-root> storage set-policy --keep-all --expected-re
 
 ## Raw recordings: seven days, then lossless
 
-Captured audio (`*-raw.caf`, application-owned) is kept exactly as recorded for **seven days**, so a wrong transcript or speaker label can be redone from the original. After that it is replaced by a **lossless FLAC copy** (24-bit). Lossy encoding is never used and nothing is deleted outright.
+Captured audio (`*-raw.caf`, application-owned) is kept exactly as recorded for **seven days**, so a wrong transcript or speaker label can be redone from the original. After that it is replaced by a **lossless WavPack copy**, preserving the captured floating-point samples exactly. Lossy encoding is never used and nothing is deleted outright.
 
-- The copy is written beside the original, then both are decoded and compared sample by sample (largest allowed difference: one 24-bit step). Any difference or error leaves the original untouched.
+- The copy is written beside the original, then both are decoded and compared sample by sample (exact decoded sample bytes; no tolerance). Any difference or error leaves the original untouched.
 - Only then does the library switch the track to the copy (a compare-and-set update through the storage gate) and the raw file is removed. The track keeps its transcripts and voice examples; its history records the original path, original hash and the verification.
 - Tracks with a queued or running job are skipped and retried next time. Imported (externally owned) audio is never touched.
 - The desktop app does this once at startup. From the CLI: `parakeet storage archive-audio --dry-run` to see what would change, then `parakeet storage archive-audio`.

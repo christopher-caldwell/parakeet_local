@@ -137,7 +137,7 @@ async fn only_old_idle_application_owned_captures_become_verified_lossless_copie
     assert!(report.failed.is_empty(), "{:?}", report.failed);
     assert!(!old.exists() && recent.exists() && busy.exists());
     let track = store.detail("old").await.unwrap().unwrap().tracks.remove(0);
-    assert!(track.path.ends_with("old-raw.flac"));
+    assert!(track.path.ends_with(".wv"));
     assert_eq!(
         track.provenance["archived"]["original_content_sha256"],
         "original-hash"

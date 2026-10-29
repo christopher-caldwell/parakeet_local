@@ -1,4 +1,4 @@
-//! Lossless FLAC copies of raw captures, verified sample by sample before anything is replaced.
+//! Lossless WavPack copies of raw captures, verified sample by sample before anything is replaced.
 use async_trait::async_trait;
 use parakeet_application::{CapabilityError, audio_archive::AudioArchiver};
 use std::{
@@ -6,10 +6,6 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
 };
-
-/// 24-bit FLAC cannot represent float32 below 2^-24. Anything larger than one 24-bit step is a
-/// real difference, not rounding.
-const MAX_SAMPLE_ERROR: f32 = 1.2e-7;
 
 pub struct FfmpegArchiver;
 
@@ -69,19 +65,10 @@ fn same_samples(original: &Path, copy: &Path) -> Result<(), CapabilityError> {
             if n == 0 {
                 break;
             }
-            for (p, q) in x[..n]
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .zip(y[..n].as_chunks::<4>().0)
-            {
-                let p = f32::from_le_bytes(*p);
-                let q = f32::from_le_bytes(*q);
-                if !p.is_finite() || !q.is_finite() || (p - q).abs() > MAX_SAMPLE_ERROR {
-                    return Err(CapabilityError::message(
-                        "archived copy differs from the original",
-                    ));
-                }
+            if x[..n] != y[..n] {
+                return Err(CapabilityError::message(
+                    "archived copy differs from the original",
+                ));
             }
             total += n;
         }
@@ -90,21 +77,30 @@ fn same_samples(original: &Path, copy: &Path) -> Result<(), CapabilityError> {
         }
         Ok(())
     })();
-    let _ = a.kill();
-    let _ = b.kill();
-    let _ = a.wait();
-    let _ = b.wait();
-    result
-}
-fn encode(source: &Path) -> Result<PathBuf, CapabilityError> {
-    let finished = source.with_extension("flac");
-    if finished.exists() {
+    if result.is_err() {
+        let _ = a.kill();
+        let _ = b.kill();
+    }
+    let left = a.wait().map_err(CapabilityError::new)?;
+    let right = b.wait().map_err(CapabilityError::new)?;
+    result?;
+    if !left.success() || !right.success() {
         return Err(CapabilityError::message(
-            "a .flac copy already exists; nothing overwritten",
+            "archive verification decoder failed",
         ));
     }
-    let partial = source.with_extension("flac.partial");
-    let _ = std::fs::remove_file(&partial);
+    Ok(())
+}
+fn encode(source: &Path) -> Result<PathBuf, CapabilityError> {
+    // Each attempt owns its copy. If another process wins the locator CAS, cleanup
+    // must never remove the winner's file or its in-progress encoder output.
+    let finished = source.with_extension(format!("{}.wv", uuid::Uuid::new_v4()));
+    if finished.exists() {
+        return Err(CapabilityError::message(
+            "a .wv copy already exists; nothing overwritten",
+        ));
+    }
+    let partial = finished.with_extension("wv.partial");
     let status = Command::new("ffmpeg")
         .args([
             "-nostdin",
@@ -120,13 +116,11 @@ fn encode(source: &Path) -> Result<PathBuf, CapabilityError> {
             "0:a:0",
             "-vn",
             "-c:a",
-            "flac",
+            "wavpack",
             "-sample_fmt",
-            "s32",
-            "-compression_level",
-            "8",
+            "fltp",
             "-f",
-            "flac",
+            "wv",
         ])
         .arg(&partial)
         .stdin(Stdio::null())
@@ -190,22 +184,24 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let raw = synthetic_caf(dir.path());
         let copy = FfmpegArchiver.encode_verified(&raw).await.unwrap();
-        assert_eq!(copy.extension().unwrap(), "flac");
+        assert_eq!(copy.extension().unwrap(), "wv");
+        same_samples(&raw, &copy).unwrap();
         assert!(std::fs::metadata(&copy).unwrap().len() < std::fs::metadata(&raw).unwrap().len());
         assert!(
             raw.exists(),
             "the original is only removed by the service after the swap"
         );
-        assert!(!dir.path().join("microphone-raw.flac.partial").exists());
+        assert!(!copy.with_extension("wv.partial").exists());
     }
     #[tokio::test]
-    async fn refuses_to_overwrite_and_a_corrupt_copy_is_rejected() {
+    async fn preserves_existing_copies_and_rejects_different_audio() {
         let dir = tempfile::tempdir().unwrap();
         let raw = synthetic_caf(dir.path());
-        std::fs::write(dir.path().join("microphone-raw.flac"), b"existing").unwrap();
-        assert!(FfmpegArchiver.encode_verified(&raw).await.is_err());
+        std::fs::write(dir.path().join("microphone-raw.wv"), b"existing").unwrap();
+        let fresh = FfmpegArchiver.encode_verified(&raw).await.unwrap();
+        assert_ne!(fresh, dir.path().join("microphone-raw.wv"));
         assert_eq!(
-            std::fs::read(dir.path().join("microphone-raw.flac")).unwrap(),
+            std::fs::read(dir.path().join("microphone-raw.wv")).unwrap(),
             b"existing"
         );
         let other = dir.path().join("other.caf");

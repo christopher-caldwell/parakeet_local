@@ -150,7 +150,7 @@ impl AudioArchiveService {
             .unwrap_or_default();
         history.push(json!({"path":old.path,"size_bytes":old.size_bytes,"modified_unix_ms":old.modified_unix_ms,"relinked_at":now(),"verification":"lossless_archive"}));
         next.provenance["locator_history"] = json!(history);
-        next.provenance["archived"] = json!({"codec":"flac","archived_at":now(),"original_content_sha256":old.provenance["content_sha256"],"original_path":old.path,"verification":"decoded_samples_match_within_24_bit"});
+        next.provenance["archived"] = json!({"codec":"wavpack","archived_at":now(),"original_content_sha256":old.provenance["content_sha256"],"original_path":old.path,"verification":"decoded_float_samples_exact"});
         next.provenance["content_sha256"] = json!(identity.sha256);
         next.path = identity.path;
         next.size_bytes = Some(identity.size_bytes);
