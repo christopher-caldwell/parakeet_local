@@ -1554,19 +1554,87 @@ fn model_runtime_executable() -> PathBuf {
             }
         })
 }
-fn main() -> anyhow::Result<()> {
+/// Apps opened from Finder or the Dock get a minimal PATH without Homebrew, so FFmpeg, FFprobe
+/// and yt-dlp would not be found. Adds the standard tool folders that exist.
+fn extend_tool_path() {
+    let mut paths: Vec<PathBuf> = std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).collect())
+        .unwrap_or_default();
+    for dir in ["/opt/homebrew/bin", "/usr/local/bin"] {
+        let dir = PathBuf::from(dir);
+        if dir.is_dir() && !paths.contains(&dir) {
+            paths.push(dir);
+        }
+    }
+    if let Ok(joined) = std::env::join_paths(paths) {
+        // SAFETY: called first in `main`, before any other thread exists.
+        unsafe { std::env::set_var("PATH", joined) };
+    }
+}
+fn support_directory() -> PathBuf {
+    PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
+        .join("Library/Application Support/ParakeetLocal")
+}
+/// The library the app was last explicitly started with, so opening the app from Finder finds
+/// the same library. `PARAKEET_DATA_ROOT` always wins; nothing is created or migrated here.
+fn library_root() -> (PathBuf, bool) {
+    if let Some(root) = std::env::var_os("PARAKEET_DATA_ROOT") {
+        return (PathBuf::from(root), true);
+    }
+    let remembered = std::fs::read_to_string(support_directory().join("library-location"))
+        .ok()
+        .map(|text| PathBuf::from(text.trim()))
+        .filter(|path| path.is_absolute());
+    (remembered.unwrap_or_else(support_directory), false)
+}
+fn remember_library(root: &std::path::Path) {
+    let Ok(root) = root.canonicalize() else {
+        return;
+    };
+    let support = support_directory();
+    if std::fs::create_dir_all(&support).is_ok() {
+        let _ = std::fs::write(
+            support.join("library-location"),
+            root.to_string_lossy().as_bytes(),
+        );
+    }
+}
+/// A Finder launch has no terminal, so a startup failure must be shown, not only printed.
+fn show_startup_failure(error: &anyhow::Error) {
+    let message = format!("{error:#}")
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"");
+    let _ = std::process::Command::new("osascript")
+        .args([
+            "-e",
+            &format!(
+                "display alert \"Parakeet Local could not start\" message \"{message}\" as critical"
+            ),
+        ])
+        .status();
+}
+fn main() {
+    extend_tool_path();
+    if let Err(error) = run() {
+        eprintln!("{error:#}");
+        show_startup_failure(&error);
+        std::process::exit(1);
+    }
+}
+fn run() -> anyhow::Result<()> {
     #[cfg(feature = "performance")]
     let performance = performance::Recorder::from_env()?;
     #[cfg(not(feature = "performance"))]
     if std::env::var_os("PARAKEET_PERFORMANCE_DIR").is_some() {
         anyhow::bail!("Performance recording requires a build with --features performance");
     }
-    let root = std::env::var_os("PARAKEET_DATA_ROOT")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
-                .join("Library/Application Support/ParakeetLocal")
-        });
+    let (root, explicit) = library_root();
+    if !root.join("parakeet.db").exists() {
+        anyhow::bail!(
+            "No library at {}. Create it with `parakeet --data-root <folder> db create` and `db migrate`, then start the app once with `just run` so it remembers the folder.",
+            root.display()
+        );
+    }
     let runtime = Arc::new(
         tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
@@ -1574,6 +1642,9 @@ fn main() -> anyhow::Result<()> {
             .build()?,
     );
     let pool = runtime.block_on(parakeet_database::open_existing(&root.join("parakeet.db")))?;
+    if explicit {
+        remember_library(&root);
+    }
     let store = Arc::new(SqliteStore::new(pool));
     let storage = Arc::new(parakeet_application::storage::StorageService::new(
         store.clone(),
