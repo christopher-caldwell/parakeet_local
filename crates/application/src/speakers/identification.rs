@@ -56,6 +56,9 @@ pub struct IdentifyClusterInput {
     pub person: PersonChoice,
     /// The user listened and decided; required, like enrollment.
     pub confirmed: bool,
+    /// Source-local ranges the user actually played. Only speech inside them becomes a voice
+    /// example; when empty, only the cluster's longest clean turn (the clip offered first) does.
+    pub heard: Vec<(i64, i64)>,
 }
 #[derive(Debug, Clone)]
 pub enum PersonChoice {
@@ -159,16 +162,15 @@ impl SpeakerService {
             source_kind: "cluster_identification".into(),
             source_id: identification_id.clone(),
         };
+        let windows = heard_windows(
+            clean_windows(&intervals, offset)
+                .remove(&input.cluster)
+                .unwrap_or_default(),
+            &input.heard,
+            &contradicted_ranges(&detail, &input.track_id, offset, &profile_id),
+        );
         let (examples, example_note) = self
-            .admit_cluster_examples(
-                &profile_id,
-                &detail,
-                track,
-                clean_windows(&intervals, offset)
-                    .remove(&input.cluster)
-                    .unwrap_or_default(),
-                origin,
-            )
+            .admit_cluster_examples(&profile_id, &detail, track, windows, origin)
             .await;
         if let PersonChoice::New(name) = &input.person {
             Recording::validate_title(name)?;
@@ -300,7 +302,7 @@ impl SpeakerService {
 
     /// Embeds up to a few clean windows of a confirmed speaker as reversible examples.
     /// Failure to embed never blocks the user's decision; it is reported in the note.
-    async fn admit_cluster_examples(
+    pub(super) async fn admit_cluster_examples(
         &self,
         profile_id: &str,
         detail: &RecordingDetail,
@@ -401,28 +403,54 @@ impl SpeakerService {
             .then(|| "no example could be embedded from the clean speech".to_owned());
         (examples, note)
     }
-    /// Admits one example for an explicitly confirmed interval (accepted suggestion or a
-    /// segment the user assigned). Returns why none was admitted instead of failing the action.
-    pub(super) async fn admit_confirmed_interval(
-        &self,
-        profile_id: &str,
-        recording_id: &str,
-        track_id: &str,
-        range: (i64, i64),
-        origin: ExampleOrigin,
-    ) -> (Option<VoiceExample>, Option<String>) {
-        let detail = match self.library.detail(recording_id).await {
-            Ok(Some(detail)) => detail,
-            _ => return (None, Some("recording unavailable".into())),
-        };
-        let Some(track) = detail.tracks.iter().find(|t| t.id == track_id) else {
-            return (None, Some("source unavailable".into()));
-        };
-        let (examples, note) = self
-            .admit_cluster_examples(profile_id, &detail, track, vec![range], origin)
-            .await;
-        (examples.into_iter().next(), note)
-    }
+}
+/// Source-local ranges of segments on `track_id` whose current speaker is someone other than
+/// `profile_id` or Unknown: the user already said that speech is not this person.
+fn contradicted_ranges(
+    detail: &RecordingDetail,
+    track_id: &str,
+    offset: i64,
+    profile_id: &str,
+) -> Vec<(i64, i64)> {
+    use parakeet_domain::corrections::{SpeakerOverride, resolve};
+    detail
+        .segments
+        .iter()
+        .filter(|s| s.track_id.as_deref() == Some(track_id))
+        .filter(|s| match resolve(&s.id, &detail.corrections).speaker {
+            Some(SpeakerOverride::Profile(p)) => p != profile_id,
+            Some(SpeakerOverride::Unknown) => true,
+            None => false,
+        })
+        .filter_map(|s| local_range(s, offset))
+        .collect()
+}
+/// Clean windows cut to what the user heard, minus speech they assigned to someone else.
+pub(crate) fn heard_windows(
+    windows: Vec<(i64, i64)>,
+    heard: &[(i64, i64)],
+    contradicted: &[(i64, i64)],
+) -> Vec<(i64, i64)> {
+    let heard: Vec<(i64, i64)> = if heard.is_empty() {
+        windows
+            .iter()
+            .max_by(|a, b| (a.1 - a.0).cmp(&(b.1 - b.0)).then(b.0.cmp(&a.0)))
+            .map(|&(a, b)| (a, b.min(a + *EXAMPLE_SPEECH_MS.end())))
+            .into_iter()
+            .collect()
+    } else {
+        heard.to_vec()
+    };
+    windows
+        .into_iter()
+        .flat_map(|(a, b)| {
+            heard
+                .iter()
+                .map(move |&(x, y)| (a.max(x), b.min(y)))
+                .filter(|(a, b)| b > a)
+        })
+        .filter(|&(a, b)| !contradicted.iter().any(|&(x, y)| x < b && y > a))
+        .collect()
 }
 pub(super) fn segment_local_range(
     segment: &TranscriptSegment,
@@ -434,4 +462,27 @@ pub(super) fn segment_local_range(
         .find(|t| Some(&t.id) == segment.track_id.as_ref())?
         .meeting_offset_ms()?;
     local_range(segment, offset)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn only_heard_speech_not_assigned_to_others_is_admitted() {
+        let windows = vec![(0, 8_000), (10_000, 30_000), (40_000, 45_000)];
+        // Nothing explicitly heard: only the longest turn, the clip offered first.
+        assert_eq!(
+            heard_windows(windows.clone(), &[], &[]),
+            vec![(10_000, 30_000)]
+        );
+        // Two clips heard; a turn the user assigned to someone else is excluded.
+        assert_eq!(
+            heard_windows(
+                windows,
+                &[(0, 8_000), (40_000, 45_000)],
+                &[(41_000, 43_000)]
+            ),
+            vec![(0, 8_000)]
+        );
+    }
 }

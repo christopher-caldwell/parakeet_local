@@ -399,6 +399,10 @@ enum Speakers {
             help = "Confirm that a human listened and verified this identity"
         )]
         confirmed: bool,
+        /// Source-local START-END milliseconds you listened to (repeatable). Only that speech
+        /// becomes voice examples; without it, only the cluster's longest clean turn does.
+        #[arg(long, value_parser = parse_range)]
+        heard: Vec<(i64, i64)>,
     },
     UndoIdentification {
         id: String,
@@ -1353,6 +1357,7 @@ async fn execute(cli: Cli) -> anyhow::Result<Value> {
                 profile,
                 new_name,
                 confirmed,
+                heard,
             } => {
                 let person = match (profile, new_name) {
                     (Some(id), None) => parakeet_application::speakers::PersonChoice::Existing(id),
@@ -1367,6 +1372,7 @@ async fn execute(cli: Cli) -> anyhow::Result<Value> {
                 value(
                     speakers
                         .identify_cluster(parakeet_application::speakers::IdentifyClusterInput {
+                            heard,
                             recording_id: recording,
                             track_id: track,
                             run_id: run,
@@ -1776,6 +1782,17 @@ fn kind(error: &anyhow::Error) -> &'static str {
         }
     }
     "operation_failed"
+}
+fn parse_range(text: &str) -> Result<(i64, i64), String> {
+    let (start, end) = text
+        .split_once('-')
+        .ok_or_else(|| "expected START-END in milliseconds".to_string())?;
+    let start: i64 = start.trim().parse().map_err(|e| format!("{e}"))?;
+    let end: i64 = end.trim().parse().map_err(|e| format!("{e}"))?;
+    if start < 0 || end <= start {
+        return Err("range must satisfy 0 <= START < END".into());
+    }
+    Ok((start, end))
 }
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() {

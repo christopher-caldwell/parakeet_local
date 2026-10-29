@@ -35,6 +35,20 @@ pub struct SuggestSpeakerInput {
     pub more_ranges: Vec<(i64, i64)>,
     pub policy: MatchPolicy,
 }
+/// Voice examples a speaker decision admits and removes, written atomically with it.
+#[derive(Debug, Default)]
+pub(crate) struct LearningEffect {
+    pub admit: Vec<VoiceExample>,
+    pub remove: Vec<String>,
+    pub note: Option<String>,
+}
+fn origin(source_kind: &str, source_id: &str) -> parakeet_domain::ExampleOrigin {
+    parakeet_domain::ExampleOrigin {
+        verified_by: "user_identification".into(),
+        source_kind: source_kind.into(),
+        source_id: source_id.into(),
+    }
+}
 /// A saved correction plus the verified example it admitted, if any.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CorrectionOutcome {
@@ -83,6 +97,8 @@ pub trait SpeakerWrites: Send + Sync {
         expected_revision: usize,
         correction: Option<&Correction>,
         expected_correction_revision: usize,
+        admit: &[VoiceExample],
+        remove: &[String],
     ) -> Result<bool, PersistenceError>;
     async fn create_profile(&self, profile: &SpeakerProfile) -> Result<(), PersistenceError>;
     async fn rename_profile(&self, id: &str, name: &str) -> Result<bool, PersistenceError>;
@@ -106,10 +122,14 @@ pub trait SpeakerWrites: Send + Sync {
         corrections: &[(Correction, usize)],
         example_ids: &[String],
     ) -> Result<bool, PersistenceError>;
+    /// Appends the correction against the expected revision and applies its learning effect
+    /// (examples admitted and removed) atomically. `false` on conflict.
     async fn correct(
         &self,
         correction: &Correction,
         expected_revision: usize,
+        admit: &[VoiceExample],
+        remove: &[String],
     ) -> Result<bool, PersistenceError>;
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -474,44 +494,98 @@ impl SpeakerService {
             action: action.into(),
             created_at: now(),
         };
-        if !self.writes.correct(&c, previous.len()).await? {
+        let mut after = previous.clone();
+        after.push(c.clone());
+        let effect = if action == "text" {
+            LearningEffect::default()
+        } else {
+            self.learning_effect(
+                segment_id,
+                &after,
+                Some(origin("segment_correction", &c.id)),
+                None,
+            )
+            .await?
+        };
+        if !self
+            .writes
+            .correct(&c, previous.len(), &effect.admit, &effect.remove)
+            .await?
+        {
             return Err(CorrectSegmentError::Conflict(
                 "Another correction was saved; reread before applying this change".into(),
             ));
         }
-        let (example, example_note) = match (&c.action[..], &c.profile_id) {
-            ("assign", Some(profile)) => self.admit_for_correction(&c, profile).await,
-            _ => (None, None),
-        };
         Ok(CorrectionOutcome {
             correction: c,
-            example,
-            example_note,
+            example: effect.admit.into_iter().next().map(Into::into),
+            example_note: effect.note,
         })
     }
-    /// The user assigned a person to a segment: if that segment is clean single-speaker speech
-    /// long enough to embed, keep it as a reversible verified example.
-    async fn admit_for_correction(
+    /// What a segment's new speaker decision does to the learned voices. Examples the decision
+    /// contradicts are removed: those of anyone else when the segment is now a person, all of them
+    /// when it is now Unknown, and those admitted from segment decisions when it returns to the
+    /// model's attribution. A clean segment confirmed as a person admits one example.
+    pub(super) async fn learning_effect(
         &self,
-        correction: &Correction,
-        profile: &str,
-    ) -> (Option<VoiceExampleSummary>, Option<String>) {
-        let note = |why: &str| (None, Some(format!("no example admitted: {why}")));
-        let Ok(Some(segment)) = self.queries.segment(&correction.segment_id).await else {
-            return note("segment unavailable");
+        segment_id: &str,
+        history_after: &[Correction],
+        admit_origin: Option<parakeet_domain::ExampleOrigin>,
+        undone_origin: Option<&str>,
+    ) -> Result<LearningEffect, PersistenceError> {
+        use parakeet_domain::corrections::{SpeakerOverride, resolve};
+        let mut effect = LearningEffect::default();
+        let speaker = resolve(segment_id, history_after).speaker;
+        let all = self.queries.examples(None).await?;
+        if let Some(undone) = undone_origin {
+            effect.remove.extend(
+                all.iter()
+                    .filter(|e| e.origin.as_ref().is_some_and(|o| o.source_id == undone))
+                    .map(|e| e.id.clone()),
+            );
+        }
+        let located = match self.queries.segment(segment_id).await? {
+            Some(segment) => match self.library.detail(&segment.recording_id).await? {
+                Some(detail) => identification::segment_local_range(&segment, &detail)
+                    .zip(segment.track_id.clone())
+                    .map(|(range, track)| (segment, detail, range, track)),
+                None => None,
+            },
+            None => None,
         };
-        let Some(track_id) = segment.track_id.clone() else {
-            return note("segment has no source");
+        let Some((segment, detail, (start, end), track_id)) = located else {
+            effect.note = admit_origin
+                .is_some()
+                .then(|| "no example admitted: segment timing or source is unresolved".into());
+            return Ok(effect);
         };
-        let Ok(Some(detail)) = self.library.detail(&segment.recording_id).await else {
-            return note("recording unavailable");
+        for e in all.iter().filter(|e| {
+            e.recording_id == segment.recording_id
+                && e.track_id == track_id
+                && e.start_ms < end
+                && e.end_ms > start
+        }) {
+            let contradicted = match &speaker {
+                Some(SpeakerOverride::Profile(person)) => e.profile_id != *person,
+                Some(SpeakerOverride::Unknown) => true,
+                None => e.origin.as_ref().is_some_and(|o| {
+                    ["segment_correction", "suggestion_resolution"]
+                        .contains(&o.source_kind.as_str())
+                }),
+            };
+            if contradicted && !effect.remove.contains(&e.id) {
+                effect.remove.push(e.id.clone());
+            }
+        }
+        let (Some(SpeakerOverride::Profile(person)), Some(origin)) = (&speaker, admit_origin)
+        else {
+            return Ok(effect);
         };
-        let Some(range) = identification::segment_local_range(&segment, &detail) else {
-            return note("segment timing is unresolved");
-        };
+        let note = |why: &str| Some(format!("no example admitted: {why}"));
         let Some(diarization) = current_diarization_runs(&detail.runs).remove(track_id.as_str())
         else {
-            return note("no current diarization to confirm the speech is clean");
+            effect.note = note("no current diarization to confirm the speech is clean");
+            return Ok(effect);
         };
         let intervals: Vec<SpeakerInterval> =
             serde_json::from_value(diarization.result["intervals"].clone()).unwrap_or_default();
@@ -521,45 +595,23 @@ impl SpeakerService {
             .first()
             .is_none_or(|a| a.state != "anonymous_model_attribution" || a.overlapping_speech)
         {
-            return note("segment is not clean single-speaker speech");
+            effect.note = note("segment is not clean single-speaker speech");
+            return Ok(effect);
         }
-        let (example, why) = self
-            .admit_confirmed_interval(
-                profile,
-                &segment.recording_id,
-                &track_id,
-                range,
-                parakeet_domain::ExampleOrigin {
-                    verified_by: "user_identification".into(),
-                    source_kind: "segment_correction".into(),
-                    source_id: correction.id.clone(),
-                },
-            )
+        let Some(track) = detail.tracks.iter().find(|t| t.id == track_id) else {
+            effect.note = note("source unavailable");
+            return Ok(effect);
+        };
+        let (examples, why) = self
+            .admit_cluster_examples(person, &detail, track, vec![(start, end)], origin)
             .await;
-        match example {
-            Some(example) => match self.writes.enroll(&example).await {
-                Ok(()) => (Some(example.into()), None),
-                Err(error) => (None, Some(format!("no example admitted: {error}"))),
-            },
-            None => (None, why.map(|why| format!("no example admitted: {why}"))),
-        }
-    }
-    /// Removes examples a user action admitted; used when that action is undone.
-    async fn remove_admitted_examples(
-        &self,
-        source_kind: &str,
-        source_id: &str,
-    ) -> Result<(), PersistenceError> {
-        for example in self.queries.examples(None).await? {
-            if example
-                .origin
-                .as_ref()
-                .is_some_and(|o| o.source_kind == source_kind && o.source_id == source_id)
-            {
-                self.writes.remove_example(&example.id).await?;
-            }
-        }
-        Ok(())
+        effect.note = if examples.is_empty() {
+            why.map(|why| format!("no example admitted: {why}"))
+        } else {
+            None
+        };
+        effect.admit = examples;
+        Ok(effect)
     }
     pub async fn undo(&self, segment_id: &str) -> Result<Correction, UndoCorrectionError> {
         let history = self.queries.corrections(segment_id).await?;
@@ -591,14 +643,25 @@ impl SpeakerService {
             action: "undo".into(),
             created_at: now(),
         };
-        if !self.writes.correct(&c, history.len()).await? {
+        let mut after = history.clone();
+        after.push(c.clone());
+        // The restored decision regains its example; the undone one loses its own.
+        let effect = self
+            .learning_effect(
+                segment_id,
+                &after,
+                prior.map(|p| origin("segment_correction", &p.id)),
+                undone.as_deref(),
+            )
+            .await?;
+        if !self
+            .writes
+            .correct(&c, history.len(), &effect.admit, &effect.remove)
+            .await?
+        {
             return Err(UndoCorrectionError::Conflict(
                 "Correction history changed; reread before undoing".into(),
             ));
-        }
-        if let Some(undone) = undone {
-            self.remove_admitted_examples("segment_correction", &undone)
-                .await?;
         }
         Ok(c)
     }
@@ -968,8 +1031,35 @@ impl SpeakerService {
                 });
             }
         }
+        let resolution_id = new_id();
+        let effect = match &correction {
+            Some(c) => {
+                let mut after = self.queries.corrections(&c.segment_id).await?;
+                after.push(c.clone());
+                let (admit_origin, undone) = if c.action == "undo" {
+                    // The restored decision regains its example; the undone acceptance loses its own.
+                    let mut active = vec![];
+                    for event in &after {
+                        if event.action == "undo" {
+                            active.pop();
+                        } else {
+                            active.push(event);
+                        }
+                    }
+                    (
+                        active.last().map(|p| origin("segment_correction", &p.id)),
+                        latest.map(|l| l.id.as_str()),
+                    )
+                } else {
+                    (Some(origin("suggestion_resolution", &resolution_id)), None)
+                };
+                self.learning_effect(&c.segment_id, &after, admit_origin, undone)
+                    .await?
+            }
+            None => LearningEffect::default(),
+        };
         let resolution = SuggestionResolution {
-            id: new_id(),
+            id: resolution_id,
             suggestion_id: input.id,
             action: input.action,
             profile_id: profile,
@@ -985,6 +1075,8 @@ impl SpeakerService {
                 suggestion.resolutions.len(),
                 correction.as_ref(),
                 expected_correction,
+                &effect.admit,
+                &effect.remove,
             )
             .await?
         {
@@ -993,31 +1085,7 @@ impl SpeakerService {
             ));
         }
         let mut resolution = resolution;
-        if let Some(profile) = &resolution.profile_id {
-            // The user confirmed this person for this evidence, so keep it as a reversible example.
-            let (example, _) = self
-                .admit_confirmed_interval(
-                    profile,
-                    &suggestion.recording_id,
-                    &suggestion.track_id,
-                    (suggestion.start_ms, suggestion.end_ms),
-                    parakeet_domain::ExampleOrigin {
-                        verified_by: "user_identification".into(),
-                        source_kind: "suggestion_resolution".into(),
-                        source_id: resolution.id.clone(),
-                    },
-                )
-                .await;
-            if let Some(example) = example {
-                self.writes.enroll(&example).await?;
-                resolution.admitted_example_id = Some(example.id);
-            }
-        } else if resolution.action == "undo"
-            && let Some(undone) = latest
-        {
-            self.remove_admitted_examples("suggestion_resolution", &undone.id)
-                .await?;
-        }
+        resolution.admitted_example_id = effect.admit.first().map(|e| e.id.clone());
         Ok(resolution)
     }
 }

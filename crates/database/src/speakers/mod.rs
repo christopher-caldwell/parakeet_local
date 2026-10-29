@@ -130,6 +130,8 @@ impl SpeakerWrites for SqliteStore {
         expected_revision: usize,
         correction: Option<&Correction>,
         expected_correction_revision: usize,
+        admit: &[VoiceExample],
+        remove: &[String],
     ) -> Result<bool, PersistenceError> {
         let mut tx = self.pool.begin().await.map_err(PersistenceError::new)?;
         let data = encode(r)?;
@@ -166,6 +168,7 @@ impl SpeakerWrites for SqliteStore {
                 return Ok(false);
             }
         }
+        apply_learning(&mut tx, admit, remove).await?;
         tx.commit().await.map_err(PersistenceError::new)?;
         Ok(true)
     }
@@ -288,21 +291,16 @@ impl SpeakerWrites for SqliteStore {
         &self,
         c: &Correction,
         expected_revision: usize,
+        admit: &[VoiceExample],
+        remove: &[String],
     ) -> Result<bool, PersistenceError> {
-        let expected_revision = expected_revision as i64;
-        let data = encode(c)?;
-        let result = sqlx::query_file!(
-            "src/speakers/correct.sql",
-            c.id,
-            c.segment_id,
-            c.profile_id,
-            data,
-            expected_revision
-        )
-        .execute(&self.pool)
-        .await
-        .map_err(PersistenceError::new)?;
-        Ok(result.rows_affected() > 0)
+        let mut tx = self.pool.begin().await.map_err(PersistenceError::new)?;
+        if !append_correction(&mut tx, c, expected_revision).await? {
+            return Ok(false);
+        }
+        apply_learning(&mut tx, admit, remove).await?;
+        tx.commit().await.map_err(PersistenceError::new)?;
+        Ok(true)
     }
 }
 
@@ -344,4 +342,26 @@ async fn append_correction(
     .await
     .map_err(PersistenceError::new)?;
     Ok(result.rows_affected() == 1)
+}
+
+/// Removes the examples a speaker decision contradicts, then inserts the ones it admits.
+async fn apply_learning(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    admit: &[VoiceExample],
+    remove: &[String],
+) -> Result<(), PersistenceError> {
+    for id in remove {
+        sqlx::query_file!("src/speakers/remove_example.sql", id)
+            .execute(&mut **tx)
+            .await
+            .map_err(PersistenceError::new)?;
+    }
+    for e in admit {
+        let data = encode(e)?;
+        sqlx::query_file!("src/speakers/enroll.sql", e.id, e.profile_id, data)
+            .execute(&mut **tx)
+            .await
+            .map_err(PersistenceError::new)?;
+    }
+    Ok(())
 }

@@ -109,6 +109,13 @@ impl Workbench {
         self.area = Area::Library;
         self.recording_tab = library::RecordingTab::Voices;
         self.train_hint = None;
+        self.train_person = None;
+        self.train_heard = None;
+        // People shares this field; a name left from there must not pre-fill a voice.
+        let name = self.person_name.clone();
+        let _ = cx.update_window(self.main_window, move |_, window, cx| {
+            name.update(cx, |input, cx| input.set_value("", window, cx));
+        });
         self.reset_reader_rows(true);
         self.refresh_profiles(cx);
         if let Some(detail) = &self.detail {
@@ -190,7 +197,20 @@ impl Workbench {
                         .child(self.play_button(&candidate, cx))
                         .child(caption(
                             "If it sounds like more than one person, choose Skip.",
-                        )),
+                        ))
+                        .when(
+                            detail.runs.iter().any(|r| {
+                                r.id == candidate.run_id
+                                    && r.result["metrics"]["speaker_slots_saturated"] == true
+                            }),
+                            |column| {
+                                column.child(
+                                    div().text_size(px(12.)).text_color(rgb(WARNING)).child(
+                                        "Speaker detection used all of its slots on this source, so different people may share this voice. Play a few samples before naming it.",
+                                    ),
+                                )
+                            },
+                        ),
                 ))
                 .child(step(2, "Type who it is", self.name_picker(cx)))
                 .child(step(3, "Save", self.save_row(&candidate, cx)));
@@ -404,22 +424,60 @@ impl Workbench {
         }
         view
     }
-    fn play_button(
-        &self,
-        candidate: &EnrollmentCandidate,
-        cx: &mut Context<Self>,
-    ) -> gpui_base::Button {
-        let play = candidate.clone();
-        primary("train-play", "Play a clip")
-            .self_start()
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.play_range(
-                    play.track_id.clone(),
-                    play.local_start_ms,
-                    play.local_end_ms,
-                    cx,
+    /// Every clip of a voice: the representative turn first, then the other pooled turns.
+    fn samples(candidate: &EnrollmentCandidate) -> Vec<(i64, i64)> {
+        std::iter::once((candidate.local_start_ms, candidate.local_end_ms))
+            .chain(candidate.more_ranges.iter().copied())
+            .collect()
+    }
+    /// Ranges of this voice the user has played; only these become voice examples.
+    fn heard(&self, candidate: &EnrollmentCandidate) -> Vec<(i64, i64)> {
+        self.train_heard
+            .as_ref()
+            .filter(|(id, _, _)| *id == candidate.id)
+            .map(|(_, _, heard)| heard.clone())
+            .unwrap_or_default()
+    }
+    fn play_sample(&mut self, candidate: &EnrollmentCandidate, cx: &mut Context<Self>) {
+        let samples = Self::samples(candidate);
+        let (next, mut heard) = match self.train_heard.take() {
+            Some((id, next, heard)) if id == candidate.id => (next, heard),
+            _ => (0, vec![]),
+        };
+        let (start, end) = samples[next % samples.len()];
+        if !heard.contains(&(start, end)) {
+            heard.push((start, end));
+        }
+        self.train_heard = Some((candidate.id.clone(), next + 1, heard));
+        self.train_hint = None;
+        self.play_range(candidate.track_id.clone(), start, end, cx);
+    }
+    fn play_button(&self, candidate: &EnrollmentCandidate, cx: &mut Context<Self>) -> Div {
+        let first = candidate.clone();
+        let another = candidate.clone();
+        let heard = self.heard(candidate).len();
+        let total = Self::samples(candidate).len();
+        div()
+            .flex()
+            .flex_wrap()
+            .gap_2()
+            .child(
+                primary("train-play", "Play a clip")
+                    .self_start()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.train_heard = None;
+                        this.play_sample(&first, cx)
+                    })),
+            )
+            .when(total > 1 && heard > 0, |row| {
+                row.child(
+                    quiet(
+                        "train-play-another",
+                        format!("Play another sample ({heard} of {total} heard)"),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| this.play_sample(&another, cx))),
                 )
-            }))
+            })
     }
     /// A name field, with the people already named offered as shortcuts that fill it in.
     fn name_picker(&self, cx: &mut Context<Self>) -> Div {
@@ -599,6 +657,12 @@ impl Workbench {
         })
     }
     fn train_save(&mut self, candidate: EnrollmentCandidate, cx: &mut Context<Self>) {
+        let heard = self.heard(&candidate);
+        if heard.is_empty() {
+            self.train_hint = Some("Play the clip first, so you know whose voice it is.".into());
+            cx.notify();
+            return;
+        }
         let typed = self.person_name.read(cx).value().trim().to_string();
         let person = if typed.is_empty() {
             match &self.train_person {
@@ -634,6 +698,7 @@ impl Workbench {
                         cluster: candidate.anonymous_speaker,
                         person,
                         confirmed: true,
+                        heard,
                     })
                     .await?;
                 let profiles = service.profiles().await?;

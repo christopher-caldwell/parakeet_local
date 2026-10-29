@@ -191,6 +191,8 @@ struct Workbench {
     calibration: Option<parakeet_domain::calibration::CalibrationReport>,
     train_person: Option<String>,
     train_hint: Option<String>,
+    /// Clips of the current voice the user has played: candidate id, next sample, ranges heard.
+    train_heard: Option<(String, usize, Vec<(i64, i64)>)>,
     train_done: Vec<ClusterIdentification>,
     recording_shortcut: bool,
     model_list: Vec<ModelInfo>,
@@ -1996,6 +1998,7 @@ fn run() -> anyhow::Result<()> {
                             calibration: None,
                             train_person: None,
                             train_hint: None,
+                            train_heard: None,
                             train_done: vec![],
                             recording_shortcut: false,
                             model_list: vec![],

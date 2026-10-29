@@ -422,6 +422,8 @@ async fn new_analysis_archives_receipt_and_keeps_corrections_and_original_runs()
                 created_at: now(),
             },
             0,
+            &[],
+            &[],
         )
         .await
         .unwrap();

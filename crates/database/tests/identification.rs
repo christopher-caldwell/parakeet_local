@@ -201,6 +201,8 @@ async fn fixture_with_overlap(
 }
 fn identify(profile: PersonChoice) -> IdentifyClusterInput {
     IdentifyClusterInput {
+        // The user played every clip of the cluster.
+        heard: vec![(0, 10_000_000)],
         recording_id: "r".into(),
         track_id: "track".into(),
         run_id: "diarization-full".into(),
@@ -555,4 +557,77 @@ async fn simultaneous_microphone_and_system_voices_remain_available_to_name() {
         2,
         "complete temporal overlap is not proof of echo and must not discard a real microphone voice"
     );
+}
+fn assign(segment: &str, profile: Option<&str>, action: &str) -> CorrectSegmentInput {
+    CorrectSegmentInput {
+        segment_id: segment.into(),
+        profile_id: profile.map(str::to_owned),
+        text: None,
+        action: action.into(),
+    }
+}
+#[tokio::test]
+async fn reassigning_a_segment_moves_its_example_and_undo_moves_it_back() {
+    let (_tmp, _store, service) = fixture().await;
+    let a = service.create("Person A").await.unwrap();
+    let b = service.create("Person B").await.unwrap();
+    service
+        .correct(assign("s3", Some(&a.id), "assign"))
+        .await
+        .unwrap();
+    assert_eq!(service.examples(Some(&a.id)).await.unwrap().len(), 1);
+    // The user says it was B after all: A must not keep B's voice.
+    let moved = service
+        .correct(assign("s3", Some(&b.id), "assign"))
+        .await
+        .unwrap();
+    assert!(moved.example.is_some());
+    assert!(service.examples(Some(&a.id)).await.unwrap().is_empty());
+    assert_eq!(service.examples(Some(&b.id)).await.unwrap().len(), 1);
+    // Undo restores A's decision and its example; B's goes.
+    service.undo("s3").await.unwrap();
+    assert_eq!(service.examples(Some(&a.id)).await.unwrap().len(), 1);
+    assert!(service.examples(Some(&b.id)).await.unwrap().is_empty());
+    // Unknown removes every example claiming that speech.
+    service
+        .correct(assign("s3", None, "unknown"))
+        .await
+        .unwrap();
+    assert!(service.examples(None).await.unwrap().is_empty());
+}
+#[tokio::test]
+async fn naming_a_cluster_never_learns_from_speech_assigned_to_someone_else() {
+    let (_tmp, _store, service) = fixture().await;
+    let other = service.create("Someone else").await.unwrap();
+    // s2 sits in cluster "a" but the user already said it is someone else.
+    service
+        .correct(assign("s2", Some(&other.id), "assign"))
+        .await
+        .unwrap();
+    let named = service
+        .identify_cluster(identify(PersonChoice::New("Person".into())))
+        .await
+        .unwrap();
+    assert!(
+        named
+            .skipped
+            .iter()
+            .any(|s| s.segment_id == "s2" && s.reason == "already_corrected")
+    );
+    let examples = service.examples(Some(&named.profile_id)).await.unwrap();
+    assert_eq!(examples.len(), 1);
+    assert!(
+        examples
+            .iter()
+            .all(|e| e.end_ms <= 7_000 || e.start_ms >= 13_500)
+    );
+}
+#[tokio::test]
+async fn naming_admits_only_the_clips_the_user_heard() {
+    let (_tmp, _store, service) = fixture().await;
+    let mut input = identify(PersonChoice::New("Person".into()));
+    input.heard = vec![];
+    let named = service.identify_cluster(input).await.unwrap();
+    // Nothing explicitly played: only the clip offered first (the longest clean turn).
+    assert_eq!(named.example_ids.len(), 1);
 }

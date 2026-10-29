@@ -104,6 +104,8 @@ async fn completed_run_replaces_view_without_destroying_imported_evidence_or_cor
             created_at: "now".into(),
         },
         0,
+        &[],
+        &[],
     )
     .await
     .unwrap();
@@ -200,7 +202,10 @@ async fn concurrent_corrections_compare_and_append() {
     let mut other = c.clone();
     other.id = "b".into();
     other.replacement_text = Some("two".into());
-    let (a, b) = tokio::join!(store.correct(&c, 0), store.correct(&other, 0));
+    let (a, b) = tokio::join!(
+        store.correct(&c, 0, &[], &[]),
+        store.correct(&other, 0, &[], &[])
+    );
     assert_ne!(a.unwrap(), b.unwrap());
     assert_eq!(store.corrections("segment").await.unwrap().len(), 1);
 }
@@ -497,7 +502,12 @@ async fn suggestion_resolution_is_durable_atomic_and_never_enrolls_predictions()
         created_at: "now".into(),
         admitted_example_id: None,
     };
-    assert!(!store.resolve_suggestion(&stale, 0, None, 0).await.unwrap());
+    assert!(
+        !store
+            .resolve_suggestion(&stale, 0, None, 0, &[], &[])
+            .await
+            .unwrap()
+    );
     assert_eq!(
         store
             .suggestion(&s.id)
@@ -2147,6 +2157,8 @@ async fn storage_preview_only_admits_old_owned_completed_scratch_without_losing_
                         created_at: "fixture".into(),
                     },
                     0,
+                    &[],
+                    &[],
                 )
                 .await
                 .unwrap();
@@ -2347,6 +2359,8 @@ async fn regression_library_search_must_find_corrected_current_text() {
             created_at: "now".into(),
         },
         0,
+        &[],
+        &[],
     )
     .await
     .unwrap();
@@ -2648,6 +2662,8 @@ async fn coordinated_transcription_publishes_all_sources_together_and_search_ign
             created_at: "now".into(),
         },
         0,
+        &[],
+        &[],
     )
     .await
     .unwrap();
@@ -2662,6 +2678,8 @@ async fn coordinated_transcription_publishes_all_sources_together_and_search_ign
             created_at: "now".into(),
         },
         1,
+        &[],
+        &[],
     )
     .await
     .unwrap();
