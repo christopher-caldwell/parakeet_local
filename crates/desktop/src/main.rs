@@ -182,6 +182,8 @@ struct Workbench {
     examples: Vec<VoiceExampleSummary>,
     candidates: Vec<EnrollmentCandidate>,
     voices_generation: u64,
+    /// The recording and analysis state the voice list was last loaded for.
+    voices_key: Option<String>,
     voices_loading: bool,
     analysis_active: bool,
     voices_error: Option<String>,
@@ -432,7 +434,7 @@ impl Workbench {
                                         this.editing_title=false;this.editing_segment=None;this.segment_page=0;
                                         this.recording_tab=library::RecordingTab::Transcript;
                                         this.show_transcript_find=false;this.transcript_query.clear();
-                                        this.cluster_review=None;this.selected_clusters.clear();this.candidates.clear();this.train_done.clear();this.train_person=None;this.train_hint=None;
+                                        this.cluster_review=None;this.selected_clusters.clear();this.candidates.clear();this.voices_key=None;this.train_done.clear();this.train_person=None;this.train_hint=None;
                                         this.suggestions.clear();this.suggestion_review=None;
                                         this.reader_list.reset(0);
                                         this.library_filter=library::LibraryFilter::All;
@@ -555,6 +557,7 @@ impl Workbench {
         self.suggestions.clear();
         self.suggestion_review = None;
         self.candidates.clear();
+        self.voices_key = None;
         self.analysis_active = false;
         self.train_done.clear();
         self.train_person = None;
@@ -2004,6 +2007,7 @@ fn run() -> anyhow::Result<()> {
                             examples: vec![],
                             candidates: vec![],
                             voices_generation: 0,
+                            voices_key: None,
                             voices_loading: false,
                             analysis_active: false,
                             voices_error: None,

@@ -463,8 +463,25 @@ impl Workbench {
             .segment_page
             .min(self.reader_matches.len().saturating_sub(1) / 40);
         let id = d.recording.id.clone();
+        // Voices only change with the analysis runs; a text or title save must not reload them.
+        let key = serde_json::json!([
+            id,
+            d.runs
+                .iter()
+                .map(|r| (&r.id, &r.status))
+                .collect::<Vec<_>>(),
+            d.analysis
+                .as_ref()
+                .ok()
+                .and_then(|p| p.as_ref())
+                .map(|p| &p.status),
+        ])
+        .to_string();
         self.detail = Some(d);
-        self.load_voices(id, cx);
+        if self.voices_key.as_ref() != Some(&key) {
+            self.voices_key = Some(key);
+            self.load_voices(id, cx);
+        }
         self.reset_reader_rows(false);
     }
     pub(super) fn subscribe_search(&mut self, cx: &mut Context<Self>) {
