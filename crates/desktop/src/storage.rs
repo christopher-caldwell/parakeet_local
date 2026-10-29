@@ -355,7 +355,7 @@ impl Workbench {
     /// startup; anything that fails verification is left exactly as it was.
     pub(super) fn archive_old_captures(&mut self, cx: &mut Context<Self>) {
         let service = self.archive.clone();
-        self.task(
+        self.background_task(
             "Compressing raw recordings older than a week",
             async move {
                 let now = std::time::SystemTime::now()

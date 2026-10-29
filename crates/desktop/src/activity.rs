@@ -2,8 +2,11 @@
 use super::*;
 
 impl Workbench {
+    fn live_activity(&self) -> bool {
+        self.pending > 0 || self.capture_stop.is_some() || self.dictation_stop.is_some()
+    }
     pub(super) fn start_heartbeat(&mut self, cx: &mut Context<Self>) {
-        if self.heartbeat_running || (self.pending == 0 && self.metrics_path.is_none()) {
+        if self.heartbeat_running || (!self.live_activity() && self.metrics_path.is_none()) {
             return;
         }
         self.heartbeat_running = true;
@@ -15,7 +18,7 @@ impl Workbench {
                     .timer(std::time::Duration::from_millis(100))
                     .await;
                 let result = this.update(cx, |this, cx| {
-                    if this.pending == 0 && this.metrics_path.is_none() {
+                    if !this.live_activity() && this.metrics_path.is_none() {
                         this.heartbeat_running = false;
                         return None;
                     }
@@ -24,8 +27,9 @@ impl Workbench {
                         .heartbeat_max_ms
                         .max(this.heartbeat_last.elapsed().as_secs_f64() * 1000.);
                     this.heartbeat_last = Instant::now();
-                    if this.capture_stop.is_some()
-                        || this.dictation_stop.is_some()
+                    // Only the screen showing live levels or progress needs redrawing.
+                    if (this.capture_stop.is_some() && this.area == Area::Capture)
+                        || (this.dictation_stop.is_some() && this.area == Area::Dictation)
                         || (this.area == Area::Models && this.pending > 0)
                     {
                         cx.notify();

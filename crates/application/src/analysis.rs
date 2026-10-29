@@ -284,7 +284,19 @@ impl MeetingAnalysisService {
             p.validate()?;
         }
         let key = stable_id("meeting-analysis-controller", &input.recording_id);
-        let _owner = self.ownership.try_acquire(&key).await?.ok_or_else(|| {
+        // `is_active` probes by briefly taking this lease, so retry a few times before
+        // concluding that another controller owns the recording.
+        let mut owner = None;
+        for attempt in 0..5 {
+            owner = self.ownership.try_acquire(&key).await?;
+            if owner.is_some() {
+                break;
+            }
+            if attempt < 4 {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        }
+        let _owner = owner.ok_or_else(|| {
             AnalyzeMeetingError::Conflict("another process is analyzing this recording".into())
         })?;
         let d = self

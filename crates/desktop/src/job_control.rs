@@ -45,8 +45,15 @@ impl Workbench {
                 let ended = this.update(cx, |this, cx| {
                     let controller_ended = selected == this.requested_recording
                         && activity == Some(false) && this.analysis_active;
+                    let mut changed = serde_json::to_value(&jobs).ok()
+                        != serde_json::to_value(&this.pending_jobs).ok();
                     if selected == this.requested_recording && let Some(active) = activity {
+                        changed |= this.analysis_active != active;
                         this.analysis_active = active;
+                    }
+                    if !changed {
+                        // Unchanged progress must not redraw the window every tick.
+                        return None;
                     }
                     let ended = this.detail.as_ref().filter(|detail| {
                         controller_ended || this.pending_jobs.iter().any(|run| run.recording_id == detail.recording.id && !jobs.iter().any(|job| job.id == run.id))

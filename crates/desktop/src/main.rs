@@ -258,7 +258,17 @@ impl Workbench {
         future: impl Future<Output = anyhow::Result<Update>> + Send + 'static,
         cx: &mut Context<Self>,
     ) {
-        self.launch(label, Box::pin(future), false, cx);
+        self.launch(label, Box::pin(future), false, false, cx);
+    }
+    /// Long-lived work (dictation listener, meeting capture, archiving) that must not disable
+    /// unrelated controls. Controls that truly conflict check that activity's own state.
+    fn background_task(
+        &mut self,
+        label: &str,
+        future: impl Future<Output = anyhow::Result<Update>> + Send + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        self.launch(label, Box::pin(future), false, true, cx);
     }
     fn playback_task(
         &mut self,
@@ -274,7 +284,7 @@ impl Workbench {
         }
         self.stop_playback(cx);
         self.playback_label = label.to_owned();
-        self.launch(label, Box::pin(future), true, cx);
+        self.launch(label, Box::pin(future), true, false, cx);
     }
     fn stop_playback(&mut self, cx: &mut Context<Self>) {
         if let Some(handle) = self.playback_abort.take() {
@@ -289,10 +299,13 @@ impl Workbench {
         label: &str,
         future: std::pin::Pin<Box<dyn Future<Output = anyhow::Result<Update>> + Send + 'static>>,
         playback: bool,
+        background: bool,
         cx: &mut Context<Self>,
     ) {
         self.status = label.into();
-        self.pending += 1;
+        if !background {
+            self.pending += 1;
+        }
         self.monitor_jobs(cx);
         self.start_heartbeat(cx);
         cx.notify();
@@ -305,7 +318,9 @@ impl Workbench {
         cx.spawn(async move |this, cx| {
             let result = handle.await;
             let _ = this.update(cx, |this, cx| {
-                this.pending = this.pending.saturating_sub(1);
+                if !background {
+                    this.pending = this.pending.saturating_sub(1);
+                }
                 if playback {
                     if playback_generation != this.playback_generation { cx.notify(); return; }
                     this.playback_abort = None;
@@ -1390,7 +1405,7 @@ impl Workbench {
         self.capture_stop = Some(stop.clone());
         let meeting = self.meeting.clone();
         let lib = self.library.clone();
-        self.task(
+        self.background_task(
             "Meeting capture",
             async move {
                 let (id, warning) = match meeting
@@ -1509,7 +1524,7 @@ impl Workbench {
                 cx.notify();
             }
         }
-        self.task(
+        self.background_task(
             "Listening for configured hold shortcuts",
             async move {
                 let result = listener.run(uid, stop).await;
