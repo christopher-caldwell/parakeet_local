@@ -20,6 +20,7 @@ This table is the authority; the dated records below keep the evidence behind ea
 | Capture format | Microphone keeps its own channel count at 48 kHz or more; stable through format renegotiation | Native format, stall and route self-tests |
 | Raw audio retention | 7 days, then WavPack with exact decoded-sample comparison | Synthetic audio plus SQLite tests; no real capture has aged seven days |
 | Storage | Usage accounting and the archive only; the retention preview and storage lock were removed | CLI contract and SQLite tests |
+| Usability pass (code review) | Shortcut recorder refuses Escape, bare Space and Command-letter keys and offers one-click modifier holds; Stop frees the recorder and dictation while the transcript finishes in the background; closed editors keep unsaved text; duplicate person names are refused; the transcript is one list; status messages are no longer erased by finished tasks | Unit (shortcut rules) and SQLite (duplicate names, record without a model); the app itself was not clicked through, and transcript scrolling is not re-measured |
 | Automated gates | `just verify`: formatting, Clippy with warnings denied, all Rust tests, native route, hold, format and stall self-tests | Passing at the commit that added this table |
 
 ## Dated records
