@@ -383,7 +383,7 @@ func record(_ o: [String: Any]) async throws -> [String: Any] {
     let micReport=mic.report();let sysReport=system.report();let duration=Int((monotonic()-origin)*1000)
     let report:[String:Any]=["id":sessionID,"sourceAlignment":["microphone":micReport,"system":sysReport],"elapsedDurationMs":duration,"microphoneInterruptions":micInterruptions,"requestedSystemAudio": o["system_audio"] as? Bool ?? false,"requestedMicrophoneUID":requestedUID as Any? ?? NSNull(),"effectiveMicrophoneUID":effectiveUID as Any? ?? NSNull(),"errors":startupErrors+(systemOutput?.errors ?? [])]
     let data=try JSONSerialization.data(withJSONObject:report,options:[.prettyPrinted,.sortedKeys]);try data.write(to:directory.appendingPathComponent("meeting-recording-metadata.json"),options:.atomic)
-    let title=(o["title"] as? String) ?? "Meeting";let manifest:[String:Any]=["schema":"com.parakeet.local.capture","schemaVersion":1,"meeting":["id":sessionID,"title":title,"createdAt":o["created_at"] as? String ?? ISO8601DateFormatter().string(from:Date()),"durationMs":duration]]
+    let title=(o["title"] as? String) ?? "Meeting";let manifest:[String:Any]=["schema":"com.parakeet.local.capture","schemaVersion":1,"meeting":["id":sessionID,"title":title,"kind":(o["kind"] as? String) ?? "meeting","createdAt":o["created_at"] as? String ?? ISO8601DateFormatter().string(from:Date()),"durationMs":duration]]
     try JSONSerialization.data(withJSONObject:manifest,options:[.prettyPrinted,.sortedKeys]).write(to:directory.appendingPathComponent("manifest.json"),options:.atomic)
     return report
 }

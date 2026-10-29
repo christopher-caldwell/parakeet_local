@@ -1391,6 +1391,7 @@ impl Workbench {
             None
         };
         let request = CaptureRecordingInput {
+            dictation: false,
             microphone_uid,
             system_audio,
             title: chrono::Local::now()

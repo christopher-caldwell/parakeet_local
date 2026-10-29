@@ -6,6 +6,9 @@ pub struct CaptureRecordingInput {
     pub system_audio: bool,
     pub title: String,
     pub maximum_seconds: u64,
+    /// A dictation is a short microphone capture kept out of the Meetings list.
+    #[serde(default)]
+    pub dictation: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub final_transcription: Option<crate::meeting::MeetingFinalization>,
 }

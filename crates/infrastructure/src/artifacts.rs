@@ -112,7 +112,12 @@ fn parse_folder(folder: &Path) -> Result<ImportBundle, CapabilityError> {
     let recording = Recording {
         id: id.clone(),
         source_key,
-        source_kind: "meeting".into(),
+        source_kind: if native && meeting["kind"] == "dictation" {
+            "dictation"
+        } else {
+            "meeting"
+        }
+        .into(),
         source_title: title,
         title_override: None,
         created_at: meeting["createdAt"]
@@ -505,6 +510,16 @@ mod tests {
             b.warnings
                 .iter()
                 .any(|w| w.contains("microphone source delivered audio"))
+        );
+    }
+    #[test]
+    fn dictation_captures_are_not_meetings() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("manifest.json"), r#"{"schema":"com.parakeet.local.capture","meeting":{"id":"dictation-test","title":"Dictation","kind":"dictation","createdAt":"2026-01-01"}}"#).unwrap();
+        std::fs::write(tmp.path().join("meeting-recording-metadata.json"), r#"{"requestedMicrophoneUID":"test-input","requestedSystemAudio":false,"errors":[],"sourceAlignment":{"microphone":{"writtenFrameCount":48000,"peakAmplitude":0.5,"startOffsetMs":0}}}"#).unwrap();
+        assert_eq!(
+            parse_folder(tmp.path()).unwrap().recording.source_kind,
+            "dictation"
         );
     }
     #[test]

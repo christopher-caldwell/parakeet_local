@@ -324,7 +324,7 @@ impl AudioCapture for NativeBridge {
             ));
         }
         let metadata = json!({"sourceAlignment":alignment,"requestedMicrophoneUID":options["microphone_uid"],"requestedSystemAudio":options["system_audio"],"recovered":true,"errors":["Interrupted capture: coverage and stream gaps require inspection"]});
-        let manifest = json!({"schema":"com.parakeet.local.capture","schemaVersion":1,"meeting":{"id":options["id"],"title":options["title"],"createdAt":options["created_at"],"durationMs":if unknown{None}else{maximum}}});
+        let manifest = json!({"schema":"com.parakeet.local.capture","schemaVersion":1,"meeting":{"id":options["id"],"title":options["title"],"kind":options["kind"],"createdAt":options["created_at"],"durationMs":if unknown{None}else{maximum}}});
         for (name, value) in [
             ("meeting-recording-metadata.json", metadata),
             ("manifest.json", manifest),
@@ -389,7 +389,7 @@ impl AudioCapture for NativeBridge {
             .map_err(CapabilityError::new)?;
         let options = directory.join("session.json");
         let created_at = now();
-        let value = json!({"id":id,"created_at":created_at,"directory":directory,"title":request.title,"microphone_uid":request.microphone_uid,"system_audio":request.system_audio,"maximum_seconds":request.maximum_seconds,"final_transcription":request.final_transcription,"state":"starting"});
+        let value = json!({"id":id,"created_at":created_at,"directory":directory,"title":request.title,"kind":if request.dictation{"dictation"}else{"meeting"},"microphone_uid":request.microphone_uid,"system_audio":request.system_audio,"maximum_seconds":request.maximum_seconds,"final_transcription":request.final_transcription,"state":"starting"});
         tokio::fs::write(
             &options,
             serde_json::to_vec_pretty(&value).map_err(CapabilityError::new)?,

@@ -6,6 +6,7 @@ pub enum LibraryFilter {
     All,
     Meetings,
     Media,
+    Dictations,
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum RecordingTab {
@@ -17,6 +18,7 @@ pub enum RecordingTab {
 fn recording_kind(kind: &str) -> &'static str {
     match kind {
         "meeting" => "Meeting",
+        "dictation" => "Dictation",
         "youtube" => "YouTube",
         "file" => "Audio file",
         _ => "Recording",
@@ -300,9 +302,11 @@ impl Workbench {
     }
     fn recording_list(&self, cx: &mut Context<Self>) -> Div {
         let matching = |r: &&Recording| match self.library_filter {
-            LibraryFilter::All => true,
+            // Dictations are many and short; they have their own list.
+            LibraryFilter::All => r.source_kind != "dictation",
             LibraryFilter::Meetings => r.source_kind == "meeting",
-            LibraryFilter::Media => r.source_kind != "meeting",
+            LibraryFilter::Media => !["meeting", "dictation"].contains(&r.source_kind.as_str()),
+            LibraryFilter::Dictations => r.source_kind == "dictation",
         };
         let visible = self.records.iter().filter(matching).collect::<Vec<_>>();
         let mut filters = div().flex().gap_1();
@@ -310,6 +314,7 @@ impl Workbench {
             (LibraryFilter::All, "All"),
             (LibraryFilter::Meetings, "Meetings"),
             (LibraryFilter::Media, "Media"),
+            (LibraryFilter::Dictations, "Dictations"),
         ]
         .into_iter()
         .enumerate()
@@ -337,7 +342,7 @@ impl Workbench {
             let id = recording.id.clone();
             let active = self.requested_recording.as_deref() == Some(id.as_str());
             let glyph = match recording.source_kind.as_str() {
-                "meeting" => "mic",
+                "meeting" | "dictation" => "mic",
                 "youtube" => "link",
                 _ => "file",
             };

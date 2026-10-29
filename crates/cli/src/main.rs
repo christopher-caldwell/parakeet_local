@@ -1275,6 +1275,7 @@ async fn execute(cli: Cli) -> anyhow::Result<Value> {
                     .record(
                         parakeet_application::meeting::RecordMeetingInput {
                             capture: parakeet_application::capture::CaptureRecordingInput {
+                                dictation: false,
                                 microphone_uid,
                                 system_audio: system,
                                 title,

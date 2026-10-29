@@ -531,6 +531,7 @@ async fn after_stop_intent_preflights_and_completes_shared_workflow() {
         .record(
             RecordMeetingInput {
                 capture: CaptureRecordingInput {
+                    dictation: false,
                     microphone_uid: None,
                     system_audio: true,
                     title: "Synthetic meeting".into(),
@@ -576,6 +577,7 @@ async fn after_stop_analysis_failure_can_resume_through_finalization() {
         .record(
             RecordMeetingInput {
                 capture: CaptureRecordingInput {
+                    dictation: false,
                     microphone_uid: None,
                     system_audio: true,
                     title: "Synthetic meeting".into(),
@@ -670,6 +672,7 @@ async fn wrong_model_role_refuses_capture_and_pending_analysis_protects_processi
             .record(
                 RecordMeetingInput {
                     capture: CaptureRecordingInput {
+                        dictation: false,
                         microphone_uid: None,
                         system_audio: true,
                         title: "Synthetic meeting".into(),
@@ -695,6 +698,7 @@ async fn wrong_model_role_refuses_capture_and_pending_analysis_protects_processi
             .record(
                 RecordMeetingInput {
                     capture: CaptureRecordingInput {
+                        dictation: false,
                         microphone_uid: None,
                         system_audio: true,
                         title: "Synthetic meeting".into(),

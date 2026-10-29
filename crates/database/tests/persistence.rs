@@ -1188,6 +1188,7 @@ async fn meeting_capture_saves_a_durable_plan_and_finalization_is_idempotent() {
         .record(
             parakeet_application::meeting::RecordMeetingInput {
                 capture: parakeet_application::capture::CaptureRecordingInput {
+                    dictation: false,
                     microphone_uid: None,
                     system_audio: true,
                     title: "Fixture capture".into(),
@@ -2788,6 +2789,7 @@ async fn meeting_without_a_verified_asr_model_records_audio_and_reports_the_skip
         .record(
             parakeet_application::meeting::RecordMeetingInput {
                 capture: parakeet_application::capture::CaptureRecordingInput {
+                    dictation: false,
                     microphone_uid: None,
                     system_audio: true,
                     title: "Fixture capture".into(),
