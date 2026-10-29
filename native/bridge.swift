@@ -418,6 +418,8 @@ struct ModifierHolds {
         active.removeAll(); return .cancel
     }
     var isEmpty: Bool { armed.isEmpty && active.isEmpty }
+    /// Whether `code` is a modifier being held for dictation; any other modifier or a click is a chord.
+    func tracks(_ code: Int64) -> Bool { armed[code] != nil || active[code] != nil }
 }
 func modifierHoldSelfTest() -> [String: Any] {
     var cases: [String: Bool] = [:]
@@ -426,6 +428,7 @@ func modifierHoldSelfTest() -> [String: Any] {
     h = ModifierHolds(); h.press(54, binding: "dictate", at: 0); cases["tap_never_starts"] = h.tick(at: 0.1).isEmpty && h.release(54) == .none && h.tick(at: 1).isEmpty
     h = ModifierHolds(); h.press(54, binding: "dictate", at: 0); cases["hold_starts_and_ends"] = h.tick(at: 0.3) == [.down("dictate")] && h.release(54) == .up("dictate")
     h = ModifierHolds(); h.press(54, binding: "dictate", at: 0); _ = h.tick(at: 0.3); cases["key_during_hold_cancels"] = h.otherKey() == .cancel && h.release(54) == .none
+    h = ModifierHolds(); h.press(54, binding: "dictate", at: 0); cases["other_modifier_is_a_chord"] = h.tracks(54) && !h.tracks(56) && h.otherKey() == .none && h.tick(at: 1).isEmpty
     return ["passed": cases.values.allSatisfy { $0 }, "cases": cases]
 }
 final class Hotkeys {
@@ -444,12 +447,16 @@ final class Hotkeys {
     func run(path:String) throws {
         bindings=try JSONDecoder().decode([Binding].self,from:Data(contentsOf:URL(fileURLWithPath:path))).filter(\.enabled)
         for b in bindings{guard keycodes[b.key.lowercased()] != nil || modifierKeys[b.key.lowercased()] != nil else{throw failure("Unsupported native shortcut key: "+b.key)}}
-        let mask=CGEventMask(1<<CGEventType.keyDown.rawValue | 1<<CGEventType.keyUp.rawValue | 1<<CGEventType.flagsChanged.rawValue)
+        let types:[CGEventType]=[.keyDown,.keyUp,.flagsChanged,.leftMouseDown,.rightMouseDown,.otherMouseDown]
+        let mask=types.reduce(CGEventMask(0)){$0 | (CGEventMask(1) << CGEventMask($1.rawValue))}
         let pointer=Unmanaged.passUnretained(self).toOpaque()
         port=CGEvent.tapCreate(tap:.cgSessionEventTap,place:.headInsertEventTap,options:.defaultTap,eventsOfInterest:mask,callback:{_,type,event,pointer in
             guard let pointer=pointer else{return Unmanaged.passUnretained(event)};let this=Unmanaged<Hotkeys>.fromOpaque(pointer).takeUnretainedValue()
             if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {this.down.removeAll();this.holds=ModifierHolds();emit(["event":"cancel","reason":"event_tap_disabled"]);if let port=this.port{CGEvent.tapEnable(tap:port,enable:true)};return Unmanaged.passUnretained(event)}
+            // A click while a modifier is held is a chord (⌘-click), never dictation.
+            if type == .leftMouseDown || type == .rightMouseDown || type == .otherMouseDown { if !this.holds.isEmpty{this.apply(this.holds.otherKey())};return Unmanaged.passUnretained(event) }
             let code=event.getIntegerValueField(.keyboardEventKeycode)
+            if type == .flagsChanged && !this.holds.isEmpty && !this.holds.tracks(code) { this.apply(this.holds.otherKey()) }
             if type == .flagsChanged {
                 // Modifier-only holds: pressed when this modifier's own bit is set, released when it clears.
                 guard let binding=this.bindings.first(where:{this.modifierKeys[$0.key.lowercased()]?.code==code}),let key=this.modifierKeys[binding.key.lowercased()] else{return Unmanaged.passUnretained(event)}
