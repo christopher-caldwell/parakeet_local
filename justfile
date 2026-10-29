@@ -29,7 +29,14 @@ check:
     scripts/cargo check --workspace --all-targets --quiet
 
 # Everything CI-like: format, lint, test
-verify: fmt-check lint test
+verify: fmt-check lint test native-test
+
+# Compile and check microphone routing logic without opening an audio device
+native-test:
+    scripts/build-native
+    target/native/parakeet-bridge microphone-route-self-test
+    target/native/parakeet-bridge microphone-format-self-test .local/scratchpad/native-tests
+    target/native/parakeet-bridge microphone-stall-self-test .local/scratchpad/native-tests
 
 # Build the app bundle (debug)
 build:

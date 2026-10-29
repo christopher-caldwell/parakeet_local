@@ -16,6 +16,85 @@ use tokio::{
     process::Command,
 };
 
+/// A healthy system stream must not hide a failed or missing requested microphone.
+fn merge_capture_event(latest: &mut Value, event: Value) {
+    let name = event["event"].as_str().unwrap_or("unknown");
+    let mut merged = latest.as_object().cloned().unwrap_or_default();
+    if let Some(fields) = event.as_object() {
+        merged.extend(fields.clone());
+    }
+    if name == "capture_started" {
+        merged.insert("started".into(), json!(true));
+    }
+    if matches!(name, "source_failed" | "source_interrupted") {
+        merged.insert("needs_attention".into(), json!(true));
+    }
+    if matches!(name, "completed" | "failed") {
+        for source in ["microphone", "system"] {
+            if let Some(health) = merged.get_mut(source).and_then(Value::as_object_mut) {
+                health.insert("is_receiving".into(), json!(false));
+            }
+        }
+    }
+    let requested = [
+        (
+            "microphone",
+            merged
+                .get("requested_microphone_uid")
+                .is_some_and(Value::is_string),
+        ),
+        (
+            "system",
+            merged.get("requested_system_audio") == Some(&json!(true)),
+        ),
+    ];
+    let ready = requested.iter().any(|(_, wanted)| *wanted)
+        && requested.iter().all(|(source, wanted)| {
+            !wanted
+                || merged
+                    .get(*source)
+                    .is_some_and(|h| h["is_receiving"] == true)
+        });
+    let attention = merged.get("needs_attention") == Some(&json!(true));
+    let state = match name {
+        "health" if ready && attention => "recording_with_warnings",
+        "health" if ready => "recording",
+        "health" => "waiting_or_stalled",
+        // Completion of the helper is not evidence that every requested source was saved.
+        "completed" => "finalizing",
+        "failed" if merged.get("started") != Some(&json!(true)) => "start_failed",
+        "failed" => "failed",
+        "source_failed" => "source_failed",
+        "source_interrupted" => "source_interrupted",
+        "source_resumed" => "recording_with_warnings",
+        _ => "starting",
+    };
+    if name == "source_resumed" {
+        merged.insert(
+            "message".into(),
+            json!("The microphone resumed. Some audio may be missing; check the saved recording."),
+        );
+    }
+    merged.insert("state".into(), json!(state));
+    *latest = Value::Object(merged);
+}
+
+fn finish_capture_status(latest: &mut Value, needs_attention: bool) {
+    latest["needs_attention"] = json!(needs_attention);
+    latest["state"] = json!(if needs_attention {
+        "completed_with_warnings"
+    } else {
+        "completed"
+    });
+    if needs_attention {
+        latest["message"] = json!(
+            "Some audio may be missing or silent. Open the recording's Audio & sources and listen before relying on the transcript."
+        );
+    } else if let Some(fields) = latest.as_object_mut() {
+        fields.remove("message");
+    }
+}
+
 #[derive(Clone)]
 pub struct NativeBridge {
     state: Arc<std::sync::Mutex<Value>>,
@@ -345,41 +424,7 @@ impl AudioCapture for NativeBridge {
                 if let Ok(event) = serde_json::from_str::<Value>(&line)
                     && let Ok(mut latest) = state.lock()
                 {
-                    let name = event["event"].as_str().unwrap_or("unknown").to_owned();
-                    let mut merged = latest.as_object().cloned().unwrap_or_default();
-                    if let Some(fields) = event.as_object() {
-                        for (key, value) in fields {
-                            merged.insert(key.clone(), value.clone());
-                        }
-                    }
-                    if name == "completed" || name == "failed" {
-                        for source in ["microphone", "system"] {
-                            if let Some(health) =
-                                merged.get_mut(source).and_then(Value::as_object_mut)
-                            {
-                                health.insert("is_receiving".into(), json!(false));
-                            }
-                        }
-                    }
-                    let ready = ["microphone", "system"].iter().any(|source| {
-                        merged
-                            .get(*source)
-                            .is_some_and(|health| health["is_receiving"] == true)
-                    });
-                    let state = match name.as_str() {
-                        "first_buffer" => "recording",
-                        "health" if ready => "recording",
-                        "health" => "waiting_or_stalled",
-                        "capture_started" => "starting",
-                        "completed" => "completed",
-                        "failed" => "failed",
-                        "source_failed" => "source_failed",
-                        "source_interrupted" => "source_interrupted",
-                        "source_resumed" => "recording",
-                        _ => "starting",
-                    };
-                    merged.insert("state".into(), json!(state));
-                    *latest = Value::Object(merged);
+                    merge_capture_event(&mut latest, event);
                 }
                 eprintln!("capture: {line}");
             }
@@ -443,6 +488,12 @@ impl AudioCapture for NativeBridge {
                 .iter()
                 .any(|t| t.available && t.duration_ms.is_some_and(|d| d > 0))
         {
+            if let Ok(mut state) = self.state.lock() {
+                state["state"] = json!("failed");
+                state["message"] = json!(
+                    "No usable audio was captured. Check the selected sources before recording again."
+                );
+            }
             return Err(CapabilityError::message(
                 "capture has no usable audio; retained session for recovery",
             ));
@@ -452,6 +503,9 @@ impl AudioCapture for NativeBridge {
         } else {
             "partial_needs_inspection"
         });
+        if let Ok(mut state) = self.state.lock() {
+            finish_capture_status(&mut state, !bundle.warnings.is_empty());
+        }
         Ok(bundle)
     }
 }
@@ -553,5 +607,78 @@ pub struct StderrDictationObserver;
 impl parakeet_application::dictation::DictationObserver for StderrDictationObserver {
     fn event(&self, event: Value) {
         eprintln!("dictation: {event}");
+    }
+}
+
+#[cfg(test)]
+mod capture_status_tests {
+    use super::*;
+
+    fn both_sources() -> Value {
+        json!({"requested_microphone_uid":"test-microphone","requested_system_audio":true})
+    }
+
+    fn health(microphone: bool, system: bool) -> Value {
+        json!({"event":"health","microphone":{"is_receiving":microphone},"system":{"is_receiving":system}})
+    }
+
+    #[test]
+    fn healthy_system_audio_does_not_hide_a_missing_microphone() {
+        let mut status = both_sources();
+        merge_capture_event(&mut status, health(false, true));
+        assert_eq!(status["state"], "waiting_or_stalled");
+        merge_capture_event(&mut status, health(true, true));
+        assert_eq!(status["state"], "recording");
+        status["requested_microphone_uid"] = Value::Null;
+        merge_capture_event(&mut status, health(false, true));
+        assert_eq!(status["state"], "recording");
+    }
+
+    #[test]
+    fn interruptions_survive_healthy_events_and_completion_waits_for_inspection() {
+        let mut status = both_sources();
+        merge_capture_event(
+            &mut status,
+            json!({"event":"source_interrupted","message":"waiting for input"}),
+        );
+        merge_capture_event(&mut status, health(false, true));
+        assert_eq!(status["needs_attention"], true);
+        merge_capture_event(&mut status, json!({"event":"source_resumed"}));
+        assert!(
+            !status["message"]
+                .as_str()
+                .unwrap()
+                .contains("waiting for input")
+        );
+        merge_capture_event(&mut status, health(true, true));
+        assert_eq!(status["state"], "recording_with_warnings");
+        merge_capture_event(&mut status, json!({"event":"completed"}));
+        assert_eq!(status["state"], "finalizing");
+        assert_eq!(status["microphone"]["is_receiving"], false);
+        finish_capture_status(&mut status, true);
+        assert_eq!(status["state"], "completed_with_warnings");
+    }
+
+    #[test]
+    fn successful_capture_is_green_only_after_artifact_inspection() {
+        let mut status = both_sources();
+        merge_capture_event(&mut status, health(true, true));
+        merge_capture_event(&mut status, json!({"event":"completed"}));
+        assert_eq!(status["state"], "finalizing");
+        finish_capture_status(&mut status, false);
+        assert_eq!(status["state"], "completed");
+        assert!(status["message"].is_null());
+    }
+
+    #[test]
+    fn failed_microphone_preflight_is_not_a_started_recording() {
+        let mut status = both_sources();
+        merge_capture_event(&mut status, json!({"event":"source_failed"}));
+        merge_capture_event(&mut status, json!({"event":"failed"}));
+        assert_eq!(status["state"], "start_failed");
+        assert_ne!(status["started"], true);
+        merge_capture_event(&mut status, json!({"event":"capture_started"}));
+        merge_capture_event(&mut status, json!({"event":"failed"}));
+        assert_eq!(status["state"], "failed");
     }
 }

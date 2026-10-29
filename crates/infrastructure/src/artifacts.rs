@@ -87,6 +87,13 @@ fn parse_folder(folder: &Path) -> Result<ImportBundle, CapabilityError> {
         .or_else(|| folder.file_name().and_then(|s| s.to_str()))
         .ok_or_else(|| CapabilityError::message("missing source identity"))?;
     let native = manifest["schema"].as_str() == Some("com.parakeet.local.capture");
+    if native
+        && metadata["errors"]
+            .as_array()
+            .is_some_and(|errors| !errors.is_empty())
+    {
+        warnings.push("Capture reported a source failure; inspect the saved source audio".into());
+    }
     let source_key = format!(
         "{}:{}",
         if native {
@@ -500,6 +507,20 @@ mod tests {
                 .any(|w| w.contains("microphone source delivered audio"))
         );
     }
+    #[test]
+    fn startup_failure_is_not_erased_when_a_source_later_delivers_frames() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("manifest.json"), r#"{"schema":"com.parakeet.local.capture","meeting":{"id":"capture-test","title":"Test","createdAt":"2026-01-01"}}"#).unwrap();
+        std::fs::write(tmp.path().join("meeting-recording-metadata.json"), r#"{"requestedMicrophoneUID":"test-input","requestedSystemAudio":false,"errors":["Microphone delivered no buffers before the deadline"],"sourceAlignment":{"microphone":{"writtenFrameCount":480000,"peakAmplitude":0.5,"startOffsetMs":6000}}}"#).unwrap();
+        let bundle = parse_folder(tmp.path()).unwrap();
+        assert!(
+            bundle
+                .warnings
+                .iter()
+                .any(|w| w.contains("Capture reported a source failure"))
+        );
+    }
+
     #[test]
     fn malformed_manifest_is_reported() {
         let tmp = tempfile::tempdir().unwrap();

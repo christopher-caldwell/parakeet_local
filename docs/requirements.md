@@ -45,6 +45,7 @@ Each gate is passed by doing the owner's real workflow, not by tests alone. Work
 
 - Meetings record with local transcription; independent mic and system capture with real offsets; sort by audio time; keep overlap, untimed text and raw output.
 - A silent or failed microphone must not yield an apparently successful recording; device changes are handled and surfaced.
+- A meeting that requests a microphone must not start until that explicitly selected input delivers audio buffers and its effective device is verified. An unavailable input disables microphone recording; a startup failure blocks the meeting rather than silently recording system audio alone. Muted buffers are valid input, not a startup failure. Interruptions after startup retain audio and remain visible in the saved recording. (Owner clarification, October 28.)
 - Treat the false-attribution defect class as a priority: evaluate silence/noise, mic-system duplication, bleed, echo removal, missing audio, chunk boundaries and word alignment.
 
 ## Dictation, AI, media (B§8, B§13, B§14)
