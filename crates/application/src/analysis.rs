@@ -297,7 +297,9 @@ impl MeetingAnalysisService {
             }
         }
         let _owner = owner.ok_or_else(|| {
-            AnalyzeMeetingError::Conflict("another process is analyzing this recording".into())
+            AnalyzeMeetingError::Conflict(
+                "this recording is busy: another analysis or the audio archive is using it".into(),
+            )
         })?;
         let d = self
             .queries
@@ -365,7 +367,7 @@ impl MeetingAnalysisService {
                             && r.kind == "transcription"
                             && r.model == asr.id
                             && r.model_revision == asr.revision
-                            && r.configuration["track"] == json!(track)
+                            && same_source(&r.configuration["track"], &json!(track))
                             && r.result["metrics"]["source_sha256"] == hash
                             && d.segments.iter().any(|s| s.run_id == r.id)
                     })
@@ -411,19 +413,25 @@ impl MeetingAnalysisService {
             }
         };
         // Recheck the exact sources even for a completed/idempotent request.
-        for source in &plan.sources {
+        for source in &mut plan.sources {
             let current = d
                 .tracks
                 .iter()
                 .find(|t| t.id == source.track.id)
                 .ok_or_else(|| AnalyzeMeetingError::Conflict("saved source was removed".into()))?;
-            if json!(current) != json!(source.track)
-                || self.check_source(current).await? != source.sha256
-            {
+            let hash = self.check_source(current).await?;
+            let unchanged = json!(current) == json!(source.track);
+            if unchanged && hash == source.sha256 {
+                continue;
+            }
+            if unchanged || !same_source(&json!(source.track), &json!(current)) {
                 return Err(AnalyzeMeetingError::Conflict(
                     "source identity changed; start a new analysis after inspection".into(),
                 ));
             }
+            // The file was relinked or archived with verified identical audio: continue on it.
+            source.track = current.clone();
+            source.sha256 = hash;
         }
         // Validate historical receipts even when no new inference is required.
         for source in &plan.sources {
@@ -438,7 +446,7 @@ impl MeetingAnalysisService {
                             && r.kind == kind
                             && r.model == model.id
                             && r.model_revision == model.revision
-                            && r.configuration["track"] == json!(source.track)
+                            && same_source(&r.configuration["track"], &json!(source.track))
                     }) {
                         return Err(AnalyzeMeetingError::Conflict(
                             "saved analysis result no longer matches its evidence".into(),
@@ -547,7 +555,7 @@ impl MeetingAnalysisService {
                         && r.model == model.id
                         && r.model_revision == model.revision
                         && r.configuration["meeting_analysis_id"] == plan.id
-                        && r.configuration["track"] == json!(source.track)
+                        && same_source(&r.configuration["track"], &json!(source.track))
                 });
                 if let Some(id) = saved {
                     if !detail.runs.iter().any(|r| {
@@ -561,7 +569,7 @@ impl MeetingAnalysisService {
                                 }
                             && r.model == model.id
                             && r.model_revision == model.revision
-                            && r.configuration["track"] == json!(source.track)
+                            && same_source(&r.configuration["track"], &json!(source.track))
                     }) {
                         return Err(AnalyzeMeetingError::Conflict(
                             "saved source result no longer matches its evidence".into(),
@@ -742,4 +750,44 @@ fn read_plan(recording: &Recording) -> Result<Option<MeetingAnalysis>, Validatio
         ));
     }
     Ok(Some(plan))
+}
+
+/// Whether a track snapshot saved with a result (`recorded`) still names the same audio as
+/// `current`: identical, or moved by a relink or lossless archive whose samples were verified
+/// against the recorded content.
+pub(crate) fn same_source(recorded: &Value, current: &Value) -> bool {
+    if recorded == current {
+        return true;
+    }
+    let content = &recorded["provenance"]["content_sha256"];
+    recorded["id"] == current["id"]
+        && content.is_string()
+        && current["provenance"]["locator_history"]
+            .as_array()
+            .is_some_and(|history| history.iter().any(|h| h["path"] == recorded["path"]))
+        && (current["provenance"]["content_sha256"] == *content
+            || current["provenance"]["archived"]["original_content_sha256"] == *content)
+}
+
+#[cfg(test)]
+mod source_tests {
+    use super::*;
+    #[test]
+    fn a_verified_archive_or_relink_is_the_same_source_but_other_audio_is_not() {
+        let recorded = json!({"id":"t","path":"/a/mic.caf","provenance":{"content_sha256":"old"}});
+        let archived = json!({"id":"t","path":"/a/mic.x.wv","provenance":{"content_sha256":"new",
+            "archived":{"original_content_sha256":"old"},"locator_history":[{"path":"/a/mic.caf"}]}});
+        let relinked = json!({"id":"t","path":"/b/mic.caf","provenance":{"content_sha256":"old",
+            "locator_history":[{"path":"/a/mic.caf"}]}});
+        let replaced = json!({"id":"t","path":"/b/mic.caf","provenance":{"content_sha256":"other",
+            "locator_history":[{"path":"/a/mic.caf"}]}});
+        assert!(same_source(&recorded, &recorded));
+        assert!(same_source(&recorded, &archived));
+        assert!(same_source(&recorded, &relinked));
+        assert!(!same_source(&recorded, &replaced));
+        assert!(!same_source(
+            &recorded,
+            &json!({"id":"t","path":"/b/x.caf","provenance":{"content_sha256":"old"}})
+        ));
+    }
 }
