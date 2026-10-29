@@ -676,3 +676,34 @@ async fn retracting_a_name_removes_every_example_learned_from_its_lines() {
     service.undo_identification(&named.id).await.unwrap();
     assert!(service.examples(None).await.unwrap().is_empty());
 }
+#[tokio::test]
+async fn a_name_already_in_use_is_refused_for_a_new_person() {
+    let (_tmp, _store, service) = fixture().await;
+    let person = service.create("Person A").await.unwrap();
+    assert!(service.create(" person a ").await.is_err());
+    assert!(
+        service
+            .identify_cluster(identify(PersonChoice::New("PERSON A".into())))
+            .await
+            .is_err()
+    );
+    let other = service.create("Person B").await.unwrap();
+    assert!(
+        service
+            .rename(parakeet_application::speakers::RenameSpeakerInput {
+                id: other.id.clone(),
+                name: "Person A".into(),
+            })
+            .await
+            .is_err()
+    );
+    // Renaming someone to their own name, in another case, is fine.
+    service
+        .rename(parakeet_application::speakers::RenameSpeakerInput {
+            id: person.id,
+            name: "PERSON A".into(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(service.profiles().await.unwrap().len(), 2);
+}

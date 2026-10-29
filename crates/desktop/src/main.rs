@@ -230,7 +230,6 @@ struct Workbench {
     playback_label: String,
     render_peak_ms: f64,
     render_count: u64,
-    segment_page: usize,
     requested_recording: Option<String>,
 }
 fn anonymous_label(s: &str) -> String {
@@ -588,7 +587,6 @@ impl Workbench {
         self.train_done.clear();
         self.train_person = None;
         self.selected_track = None;
-        self.segment_page = 0;
         self.editing_title = false;
         self.close_editor(cx);
         self.recording_tab = library::RecordingTab::Transcript;
@@ -781,6 +779,11 @@ impl Render for Workbench {
                     if self.profiles.is_empty() {
                         content = content.child(caption("Nobody named yet."));
                     }
+                    let typed = self.person_name.read(cx).value().trim().to_owned();
+                    let typed_exists = self
+                        .profiles
+                        .iter()
+                        .any(|p| p.name.trim().eq_ignore_ascii_case(&typed));
                     content = content.child(
                         panel()
                             .child(caption(if self.selected_profile.is_some() {
@@ -789,26 +792,35 @@ impl Render for Workbench {
                                 "Add someone new."
                             }))
                             .child(field(&self.person_name).w(px(280.)))
+                            .when(typed_exists && self.selected_profile.is_none(), |panel| {
+                                panel.child(caption(format!(
+                                    "{typed} is already one of your people."
+                                )))
+                            })
                             .child(
                                 div()
                                     .flex()
                                     .flex_wrap()
                                     .gap_2()
-                                    .child(primary("add-person", "Add as new person").on_click(
-                                        cx.listener(|this, _, _, cx| {
-                                            let name =
-                                                this.person_name.read(cx).value().to_string();
-                                            let service = this.speakers.clone();
-                                            this.task(
-                                                "Creating speaker profile",
-                                                async move {
-                                                    service.create(&name).await?;
-                                                    Ok(Update::Profiles(service.profiles().await?))
-                                                },
-                                                cx,
-                                            );
-                                        }),
-                                    ))
+                                    .child(
+                                        primary("add-person", "Add as new person")
+                                            .disabled(typed.is_empty() || typed_exists)
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                let name =
+                                                    this.person_name.read(cx).value().to_string();
+                                                let service = this.speakers.clone();
+                                                this.task(
+                                                    "Creating speaker profile",
+                                                    async move {
+                                                        service.create(&name).await?;
+                                                        Ok(Update::Profiles(
+                                                            service.profiles().await?,
+                                                        ))
+                                                    },
+                                                    cx,
+                                                );
+                                            })),
+                                    )
                                     .child(
                                         button("rename-person", "Rename selected")
                                             .disabled(self.selected_profile.is_none())
@@ -2094,7 +2106,6 @@ fn run() -> anyhow::Result<()> {
                             playback_label: String::new(),
                             render_peak_ms: 0.,
                             render_count: 0,
-                            segment_page: 0,
                             requested_recording: None,
                         });
                         view.update(cx, |this, cx| {

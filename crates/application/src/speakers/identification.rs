@@ -123,6 +123,9 @@ impl SpeakerService {
         {
             return Err(IdentifyClusterError::NotFound(id.clone()));
         }
+        if let PersonChoice::New(name) = &input.person {
+            self.unique_name(name, None).await??;
+        }
         // Segments the cluster speaks alone; everything else is listed, never guessed.
         let attributions = parakeet_domain::reconciliation::reconcile(&detail.segments, &intervals);
         let mut targets = vec![];

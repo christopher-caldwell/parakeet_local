@@ -690,9 +690,6 @@ impl Workbench {
     }
     fn transcript_view(&self, detail: &reader::Document, cx: &mut Context<Self>) -> Div {
         let segments = &self.reader_matches;
-        let page = self.segment_page.min(segments.len().saturating_sub(1) / 40);
-        let begin = page * 40;
-        let end = (begin + 40).min(segments.len());
         let toolbar = div()
             .flex_shrink_0()
             .px_5()
@@ -705,9 +702,7 @@ impl Workbench {
                     "No matching speech".into()
                 } else {
                     format!(
-                        "{}–{} of {} {} · All sources",
-                        begin + 1,
-                        end,
+                        "{} {} · All sources",
                         segments.len(),
                         if segments.len() == 1 {
                             "segment"
@@ -748,27 +743,7 @@ impl Workbench {
                         cx.notify();
                     })),
                 )
-            })
-            .child(
-                quiet("previous-segments", "Previous")
-                    .disabled(page == 0)
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.segment_page = this.segment_page.saturating_sub(1);
-                        this.reset_reader_rows(true);
-                        this.close_editor(cx);
-                        cx.notify();
-                    })),
-            )
-            .child(
-                quiet("next-segments", "Next")
-                    .disabled(end >= segments.len())
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.segment_page += 1;
-                        this.reset_reader_rows(true);
-                        this.close_editor(cx);
-                        cx.notify();
-                    })),
-            );
+            });
         let mut toolbar = div().flex_shrink_0().flex().flex_col().child(toolbar);
         if self.show_transcript_find {
             toolbar = toolbar.child(
@@ -790,7 +765,7 @@ impl Workbench {
                 else {
                     return div().into_any_element();
                 };
-                let Some(index) = indices.get(begin + i) else {
+                let Some(index) = indices.get(i) else {
                     return div().into_any_element();
                 };
                 let Some(segment) = detail.segments.get(*index) else {
@@ -814,6 +789,17 @@ impl Workbench {
             .min_h_0()
             .flex()
             .flex_col();
+        if detail
+            .source_attributions
+            .iter()
+            .any(|a| a.reasons.iter().any(|r| r == "not_checked_for_echo"))
+        {
+            rows = rows.child(
+                caption("Microphone lines aren't marked Me until the microphone has been checked for meeting audio leaking into it. That check runs with speaker detection (Name voices).")
+                    .px_5()
+                    .pt_2(),
+            );
+        }
         if self.show_word_evidence {
             rows = rows.child(caption("Original estimated word timing is separate from your corrections. Unknown words remain unattributed.").px_5().py_3());
         }
@@ -915,10 +901,8 @@ impl Workbench {
             .map(|a| match a.category.as_str() {
                 "me" => ("Me · microphone".to_owned(), MUTED),
                 "them" => ("Them · system audio".to_owned(), MUTED),
-                _ if a.reasons == ["not_checked_for_echo"] => (
-                    "Microphone · not yet checked for meeting-audio echo".to_owned(),
-                    MUTED,
-                ),
+                // Explained once above the transcript rather than on every line.
+                _ if a.reasons == ["not_checked_for_echo"] => ("Microphone".to_owned(), MUTED),
                 _ => (
                     format!(
                         "Unknown source · {}",
@@ -1026,7 +1010,11 @@ impl Workbench {
                     .child(
                         quiet(
                             format!("edit-segment-{}", segment.id),
-                            if editing { "Close" } else { "Edit" },
+                            if editing {
+                                "Close"
+                            } else {
+                                "Edit text or speaker"
+                            },
                         )
                         .text_size(px(11.))
                         .px_2()
@@ -1154,17 +1142,28 @@ impl Workbench {
             .flex_wrap()
             .gap_2()
             .child(caption("Speaker").py_1());
+        // The line's current speaker is shown selected.
+        let current = correction.speaker.as_ref();
         let unknown_id = id.clone();
-        people = people.child(button(format!("unknown-{}", id), "Unknown").on_click(
-            cx.listener(move |this, _, _, cx| this.assign_segment(unknown_id.clone(), None, cx)),
-        ));
+        people =
+            people.child(
+                choice(
+                    format!("unknown-{}", id),
+                    "Unknown",
+                    matches!(current, Some(SpeakerOverride::Unknown)),
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.assign_segment(unknown_id.clone(), None, cx)
+                })),
+            );
         for profile in &self.profiles {
             let profile_id = profile.id.clone();
             let segment_id = id.clone();
             people = people.child(
-                button(
+                choice(
                     format!("assign-{}-{}", id, profile.id),
                     profile.name.clone(),
+                    matches!(current, Some(SpeakerOverride::Profile(p)) if *p == profile.id),
                 )
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.assign_segment(segment_id.clone(), Some(profile_id.clone()), cx)

@@ -99,36 +99,26 @@ impl Workbench {
             .as_ref()
             .map(|d| d.matching(&self.transcript_query))
             .unwrap_or_default();
-        self.segment_page = 0;
         self.reset_reader_rows(true);
     }
-    /// Invalidate variable-height measurements after page/data/editor changes.
+    /// Invalidate variable-height measurements after data/editor changes. The whole transcript
+    /// is one list; only rows near the viewport are measured and drawn.
     /// Preserve the logical top when only the row's content changed.
     pub(super) fn reset_reader_rows(&self, from_top: bool) {
         let offset = self.reader_list.logical_scroll_top();
-        let count = self
-            .reader_matches
-            .len()
-            .saturating_sub(self.segment_page * 40)
-            .min(40);
         self.reader_list.reset(0);
-        let start = self.segment_page * 40;
         self.reader_list.splice_focusable(
             0..0,
-            self.reader_matches
-                .iter()
-                .skip(start)
-                .take(count)
-                .map(|index| {
-                    let editing = self
-                        .detail
-                        .as_ref()
-                        .and_then(|d| d.segments.get(*index))
-                        .is_some_and(|segment| {
-                            self.editing_segment.as_deref() == Some(segment.id.as_str())
-                        });
-                    editing.then(|| self.reader_editor_focus.clone())
-                }),
+            self.reader_matches.iter().map(|index| {
+                let editing = self
+                    .detail
+                    .as_ref()
+                    .and_then(|d| d.segments.get(*index))
+                    .is_some_and(|segment| {
+                        self.editing_segment.as_deref() == Some(segment.id.as_str())
+                    });
+                editing.then(|| self.reader_editor_focus.clone())
+            }),
         );
         if !from_top {
             self.reader_list.scroll_to(offset);

@@ -71,7 +71,6 @@ impl Workbench {
     pub(super) fn show_new_recording(&mut self, d: reader::Document, cx: &mut Context<Self>) {
         self.editing_title = false;
         self.close_editor(cx);
-        self.segment_page = 0;
         self.recording_tab = library::RecordingTab::Transcript;
         self.show_transcript_find = false;
         self.transcript_query.clear();
@@ -535,9 +534,6 @@ impl Workbench {
             *row = d.recording.clone();
         }
         self.reader_matches = d.matching(&self.transcript_query);
-        self.segment_page = self
-            .segment_page
-            .min(self.reader_matches.len().saturating_sub(1) / 40);
         let id = d.recording.id.clone();
         // Voices only change with the analysis runs; a text or title save must not reload them.
         let key = serde_json::json!([
