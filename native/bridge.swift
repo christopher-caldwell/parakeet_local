@@ -118,11 +118,12 @@ final class TrackWriter {
     private var file: AVAudioFile?; private var first: Double?; private var rate: Double = 0
     private var written: Int64 = 0; private var timeline: Int64 = 0; private var dropped = 0; private var gaps: [[String: Any]] = []; private var errors: [String] = []; private var failed=false; private var peak: Float = 0; private var drift: [[String: Any]] = []; private var timeline_ = Timeline()
     init(source: String, directory: URL, origin: Double) { self.source = source; self.path = directory.appendingPathComponent(source + "-raw.caf"); self.origin = origin; self.queue = DispatchQueue(label: "parakeet.writer." + source) }
-    // Keep a stable recording format through Bluetooth/device renegotiation. Conversion
+    // Keep a stable recording format through Bluetooth/device renegotiation: the first buffer's
+    // channel count (playback makes mono audible in both ears) at 48 kHz or more. Conversion
     // happens on the writer queue, never on the real-time callback. The archive later
     // preserves these captured PCM samples exactly; it performs no further quantization.
     private func recordingBuffer(_ input: AVAudioPCMBuffer) throws -> AVAudioPCMBuffer {
-        let target = file?.processingFormat ?? AVAudioFormat(standardFormatWithSampleRate: max(48000, input.format.sampleRate), channels: max(2, input.format.channelCount))!
+        let target = file?.processingFormat ?? AVAudioFormat(standardFormatWithSampleRate: max(48000, input.format.sampleRate), channels: input.format.channelCount)!
         if lastInputFormat != input.format {
             formatChanges.append(["atFrame": timeline, "inputSampleRate": input.format.sampleRate, "inputChannels": input.format.channelCount, "recordingSampleRate": target.sampleRate, "recordingChannels": target.channelCount])
             lastInputFormat = input.format
@@ -132,6 +133,8 @@ final class TrackWriter {
         if converter == nil {
             converter = AVAudioConverter(from: input.format, to: target)
             converter?.primeMethod = .normal
+            // A later device with more channels is mixed down, never truncated to its first one.
+            converter?.downmix = true
         }
         guard let converter = converter,
               let output = AVAudioPCMBuffer(pcmFormat: target, frameCapacity: AVAudioFrameCount(ceil(Double(input.frameLength) * target.sampleRate / input.format.sampleRate)) + 32) else {
@@ -592,8 +595,8 @@ func microphoneFormatSelfTest(_ scratch: URL) throws -> [String: Any] {
     let tailPresent = tail.frameLength > 0 && abs(tail.floatChannelData![0][0] - 0.5) < 0.01
     let errors = (report["errors"] as? [String] ?? []).count
     let gaps = (report["gaps"] as? [[String: Any]] ?? []).count
-    let passed = errors == 0 && gaps == 0 && abs(file.length - 24000) < 128 && tailPresent && file.processingFormat.channelCount == 2
-    return ["event": "microphone_format_self_test", "passed": passed, "formats": formats.count, "frames": file.length, "errors": errors, "gaps": gaps, "finalBufferPresent": tailPresent]
+    let passed = errors == 0 && gaps == 0 && abs(file.length - 24000) < 128 && tailPresent && file.processingFormat.channelCount == 1
+    return ["event": "microphone_format_self_test", "passed": passed, "formats": formats.count, "frames": file.length, "errors": errors, "gaps": gaps, "finalBufferPresent": tailPresent, "channels": file.processingFormat.channelCount, "tailValue": tail.frameLength > 0 ? Double(tail.floatChannelData![0][0]) : -1]
 }
 
 /// Real converter/writer regression; synthetic samples only, no audio device opened.
