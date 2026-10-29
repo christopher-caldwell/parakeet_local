@@ -389,8 +389,52 @@ func record(_ o: [String: Any]) async throws -> [String: Any] {
 }
 
 struct Binding: Decodable {let id:String;let key:String;let modifiers:[String];let enabled:Bool}
+/// A modifier held on its own starts dictation only after a short hold with no other key, so
+/// ordinary shortcuts such as Right-Command-C never open the microphone.
+struct ModifierHolds {
+    static let minimumHold = 0.25
+    enum Effect: Equatable { case none, down(String), up(String), cancel }
+    private var armed: [Int64: (binding: String, at: Double)] = [:]
+    private(set) var active: [Int64: String] = [:]
+    mutating func press(_ code: Int64, binding: String, at now: Double) { if active[code] == nil && armed[code] == nil { armed[code] = (binding, now) } }
+    /// Called periodically; starts holds that lasted long enough.
+    mutating func tick(at now: Double) -> [Effect] {
+        var effects: [Effect] = []
+        for (code, hold) in armed where now - hold.at >= Self.minimumHold { armed[code] = nil; active[code] = hold.binding; effects.append(.down(hold.binding)) }
+        return effects
+    }
+    mutating func release(_ code: Int64) -> Effect {
+        if armed.removeValue(forKey: code) != nil { return .none }
+        if let binding = active.removeValue(forKey: code) { return .up(binding) }
+        return .none
+    }
+    /// Any other key while a modifier is held means a chord, not dictation.
+    mutating func otherKey() -> Effect {
+        armed.removeAll()
+        if active.isEmpty { return .none }
+        active.removeAll(); return .cancel
+    }
+    var isEmpty: Bool { armed.isEmpty && active.isEmpty }
+}
+func modifierHoldSelfTest() -> [String: Any] {
+    var cases: [String: Bool] = [:]
+    var h = ModifierHolds()
+    h.press(54, binding: "dictate", at: 0); cases["chord_never_starts"] = h.otherKey() == .none && h.tick(at: 1).isEmpty && h.release(54) == .none
+    h = ModifierHolds(); h.press(54, binding: "dictate", at: 0); cases["tap_never_starts"] = h.tick(at: 0.1).isEmpty && h.release(54) == .none && h.tick(at: 1).isEmpty
+    h = ModifierHolds(); h.press(54, binding: "dictate", at: 0); cases["hold_starts_and_ends"] = h.tick(at: 0.3) == [.down("dictate")] && h.release(54) == .up("dictate")
+    h = ModifierHolds(); h.press(54, binding: "dictate", at: 0); _ = h.tick(at: 0.3); cases["key_during_hold_cancels"] = h.otherKey() == .cancel && h.release(54) == .none
+    return ["passed": cases.values.allSatisfy { $0 }, "cases": cases]
+}
 final class Hotkeys {
-    var port: CFMachPort?;var bindings:[Binding]=[];var down:[Int64:String]=[:]
+    var port: CFMachPort?;var bindings:[Binding]=[];var down:[Int64:String]=[:];var holds=ModifierHolds();var holdTimer:Timer?
+    func apply(_ effect: ModifierHolds.Effect) {
+        switch effect {
+        case .none: break
+        case .down(let binding): do { emit(["event":"down","binding":binding,"target":try target()]) } catch { emit(["event":"cancel","reason":error.localizedDescription]) }
+        case .up(let binding): emit(["event":"up","binding":binding])
+        case .cancel: emit(["event":"cancel","reason":"other_key_during_modifier_hold"])
+        }
+    }
     let keycodes:[String:Int64]=["home":115,"end":119,"pageup":116,"pagedown":121,"f1":122,"f2":120,"f3":99,"f4":118,"f5":96,"f6":97,"f7":98,"f8":100,"f9":101,"f10":109,"f11":103,"f12":111,"space":49,"escape":53,"a":0,"s":1,"d":2,"f":3,"h":4,"g":5,"z":6,"x":7,"c":8,"v":9,"b":11,"q":12,"w":13,"e":14,"r":15,"y":16,"t":17,"1":18,"2":19,"3":20,"4":21,"6":22,"5":23,"9":25,"7":26,"8":28,"0":29,"o":31,"u":32,"i":34,"p":35,"l":37,"j":38,"k":40,"n":45,"m":46]
     /// Modifiers held alone: keycode and the device-dependent flag bit that tells left from right.
     let modifierKeys:[String:(code:Int64,bit:UInt64)]=["leftcontrol":(59,0x1),"leftshift":(56,0x2),"rightshift":(60,0x4),"leftcommand":(55,0x8),"rightcommand":(54,0x10),"leftoption":(58,0x20),"rightoption":(61,0x40),"rightcontrol":(62,0x2000),"fn":(63,0x800000)]
@@ -401,16 +445,25 @@ final class Hotkeys {
         let pointer=Unmanaged.passUnretained(self).toOpaque()
         port=CGEvent.tapCreate(tap:.cgSessionEventTap,place:.headInsertEventTap,options:.defaultTap,eventsOfInterest:mask,callback:{_,type,event,pointer in
             guard let pointer=pointer else{return Unmanaged.passUnretained(event)};let this=Unmanaged<Hotkeys>.fromOpaque(pointer).takeUnretainedValue()
-            if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {this.down.removeAll();emit(["event":"cancel","reason":"event_tap_disabled"]);if let port=this.port{CGEvent.tapEnable(tap:port,enable:true)};return Unmanaged.passUnretained(event)}
+            if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {this.down.removeAll();this.holds=ModifierHolds();emit(["event":"cancel","reason":"event_tap_disabled"]);if let port=this.port{CGEvent.tapEnable(tap:port,enable:true)};return Unmanaged.passUnretained(event)}
             let code=event.getIntegerValueField(.keyboardEventKeycode)
             if type == .flagsChanged {
                 // Modifier-only holds: pressed when this modifier's own bit is set, released when it clears.
                 guard let binding=this.bindings.first(where:{this.modifierKeys[$0.key.lowercased()]?.code==code}),let key=this.modifierKeys[binding.key.lowercased()] else{return Unmanaged.passUnretained(event)}
                 if event.flags.rawValue & key.bit != 0 {
-                    if this.down[code]==nil{this.down[code]=binding.id;do{emit(["event":"down","binding":binding.id,"target":try target()])}catch{emit(["event":"cancel","reason":error.localizedDescription])}}
-                } else if let owner=this.down.removeValue(forKey:code){emit(["event":"up","binding":owner])}
+                    this.holds.press(code,binding:binding.id,at:monotonic())
+                    if this.holdTimer==nil {
+                        let timer=Timer(timeInterval:0.05,repeats:true){[weak this] timer in
+                            guard let this=this else{timer.invalidate();return}
+                            for effect in this.holds.tick(at:monotonic()){this.apply(effect)}
+                            if this.holds.isEmpty{timer.invalidate();this.holdTimer=nil}
+                        }
+                        RunLoop.current.add(timer,forMode:.common);this.holdTimer=timer
+                    }
+                } else { this.apply(this.holds.release(code)) }
                 return Unmanaged.passUnretained(event)
             }
+            if type == .keyDown && !this.holds.isEmpty { this.apply(this.holds.otherKey()) }
             if type == .keyUp, let owner=this.down.removeValue(forKey:code){emit(["event":"up","binding":owner]);return nil}
             if type == .keyDown && code == 53 && !this.down.isEmpty { this.down.removeAll();emit(["event":"cancel","reason":"escape"]);return nil }
             if type == .keyDown {
@@ -433,6 +486,9 @@ final class Hotkeys {
             case "clipboard-test-child":guard args.count==4 else{throw failure("test child requires private pasteboard and directory")};try clipboardTestChild(board:args[2],directory:args[3])
             case "clipboard-recover":guard args.count==3 else{throw failure("clipboard recovery requires its own directory")};emit(try recoverClipboard(URL(fileURLWithPath:args[2])))
             case "timeline-self-test":emit(timelineSelfTest())
+            case "modifier-hold-self-test":
+                let result=modifierHoldSelfTest();emit(result)
+                if result["passed"] as? Bool != true { exit(1) }
             case "microphone-route-self-test":
                 let result=microphoneRouteSelfTest();emit(result)
                 if result["passed"] as? Bool != true { exit(1) }

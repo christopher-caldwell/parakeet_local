@@ -35,6 +35,7 @@ verify: fmt-check lint test native-test
 native-test:
     scripts/build-native
     target/native/parakeet-bridge microphone-route-self-test
+    target/native/parakeet-bridge modifier-hold-self-test
     target/native/parakeet-bridge microphone-format-self-test .local/scratchpad/native-tests
     target/native/parakeet-bridge microphone-stall-self-test .local/scratchpad/native-tests
 
