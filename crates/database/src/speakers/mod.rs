@@ -87,6 +87,18 @@ impl SpeakerQueries for SqliteStore {
             .map(|r| decode(&r.data))
             .collect()
     }
+    async fn recording_examples(
+        &self,
+        recording_id: &str,
+    ) -> Result<Vec<VoiceExample>, PersistenceError> {
+        sqlx::query_file!("src/speakers/recording_examples.sql", recording_id)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(PersistenceError::new)?
+            .iter()
+            .map(|r| decode(&r.data))
+            .collect()
+    }
     async fn segment(&self, id: &str) -> Result<Option<TranscriptSegment>, PersistenceError> {
         sqlx::query_file!("src/speakers/segment.sql", id)
             .fetch_optional(&self.pool)

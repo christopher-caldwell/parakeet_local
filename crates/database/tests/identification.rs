@@ -631,3 +631,48 @@ async fn naming_admits_only_the_clips_the_user_heard() {
     // Nothing explicitly played: only the clip offered first (the longest clean turn).
     assert_eq!(named.example_ids.len(), 1);
 }
+#[tokio::test]
+async fn retracting_a_name_removes_every_example_learned_from_its_lines() {
+    let (_tmp, _store, service) = fixture().await;
+    let other = service.create("Person B").await.unwrap();
+    let named = service
+        .identify_cluster(identify(PersonChoice::New("Person".into())))
+        .await
+        .unwrap();
+    assert_eq!(
+        service
+            .examples(Some(&named.profile_id))
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+    // Undoing one named line returns it to the model and takes its example with it.
+    service.undo("s2").await.unwrap();
+    assert_eq!(
+        service
+            .examples(Some(&named.profile_id))
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    // Moving s1 away and back re-admits its example under the restored decision...
+    service
+        .correct(assign("s1", Some(&other.id), "assign"))
+        .await
+        .unwrap();
+    service.undo("s1").await.unwrap();
+    assert_eq!(
+        service
+            .examples(Some(&named.profile_id))
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(service.examples(Some(&other.id)).await.unwrap().is_empty());
+    // ...and undoing the name removes it as well.
+    service.undo_identification(&named.id).await.unwrap();
+    assert!(service.examples(None).await.unwrap().is_empty());
+}

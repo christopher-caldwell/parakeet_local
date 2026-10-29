@@ -70,6 +70,11 @@ pub struct CorrectSegmentInput {
 pub trait SpeakerQueries: Send + Sync {
     async fn profiles(&self) -> Result<Vec<SpeakerProfile>, PersistenceError>;
     async fn examples(&self, profile: Option<&str>) -> Result<Vec<VoiceExample>, PersistenceError>;
+    /// Examples cut from one recording, of any person.
+    async fn recording_examples(
+        &self,
+        recording_id: &str,
+    ) -> Result<Vec<VoiceExample>, PersistenceError>;
     async fn segment(&self, id: &str) -> Result<Option<TranscriptSegment>, PersistenceError>;
     async fn corrections(&self, segment_id: &str) -> Result<Vec<Correction>, PersistenceError>;
     async fn suggestions(
@@ -522,28 +527,22 @@ impl SpeakerService {
             example_note: effect.note,
         })
     }
-    /// What a segment's new speaker decision does to the learned voices. Examples the decision
-    /// contradicts are removed: those of anyone else when the segment is now a person, all of them
-    /// when it is now Unknown, and those admitted from segment decisions when it returns to the
-    /// model's attribution. A clean segment confirmed as a person admits one example.
+    /// What a segment's new speaker decision does to the learned voices. Examples overlapping the
+    /// segment that the decision contradicts are removed: those of anyone else when the segment is
+    /// now a person, all of them when it is now Unknown, and, when it returns to the model's
+    /// attribution, those admitted from segment decisions plus any learned for the person an undo
+    /// retracted.
+    /// A clean segment confirmed as a person admits one example.
     pub(super) async fn learning_effect(
         &self,
         segment_id: &str,
         history_after: &[Correction],
         admit_origin: Option<parakeet_domain::ExampleOrigin>,
-        undone_origin: Option<&str>,
+        retracted_profile: Option<&str>,
     ) -> Result<LearningEffect, PersistenceError> {
         use parakeet_domain::corrections::{SpeakerOverride, resolve};
         let mut effect = LearningEffect::default();
         let speaker = resolve(segment_id, history_after).speaker;
-        let all = self.queries.examples(None).await?;
-        if let Some(undone) = undone_origin {
-            effect.remove.extend(
-                all.iter()
-                    .filter(|e| e.origin.as_ref().is_some_and(|o| o.source_id == undone))
-                    .map(|e| e.id.clone()),
-            );
-        }
         let located = match self.queries.segment(segment_id).await? {
             Some(segment) => match self.library.detail(&segment.recording_id).await? {
                 Some(detail) => identification::segment_local_range(&segment, &detail)
@@ -559,21 +558,24 @@ impl SpeakerService {
                 .then(|| "no example admitted: segment timing or source is unresolved".into());
             return Ok(effect);
         };
-        for e in all.iter().filter(|e| {
-            e.recording_id == segment.recording_id
-                && e.track_id == track_id
-                && e.start_ms < end
-                && e.end_ms > start
-        }) {
+        for e in self
+            .queries
+            .recording_examples(&segment.recording_id)
+            .await?
+            .iter()
+            .filter(|e| e.track_id == track_id && e.start_ms < end && e.end_ms > start)
+        {
             let contradicted = match &speaker {
                 Some(SpeakerOverride::Profile(person)) => e.profile_id != *person,
                 Some(SpeakerOverride::Unknown) => true,
+                // Examples the user enrolled by hand are not tied to this line's decision.
                 None => e.origin.as_ref().is_some_and(|o| {
-                    ["segment_correction", "suggestion_resolution"]
-                        .contains(&o.source_kind.as_str())
+                    retracted_profile == Some(e.profile_id.as_str())
+                        || ["segment_correction", "suggestion_resolution"]
+                            .contains(&o.source_kind.as_str())
                 }),
             };
-            if contradicted && !effect.remove.contains(&e.id) {
+            if contradicted {
                 effect.remove.push(e.id.clone());
             }
         }
@@ -603,7 +605,14 @@ impl SpeakerService {
             return Ok(effect);
         };
         let (examples, why) = self
-            .admit_cluster_examples(person, &detail, track, vec![(start, end)], origin)
+            .admit_cluster_examples(
+                person,
+                &detail,
+                track,
+                vec![(start, end)],
+                origin,
+                &effect.remove,
+            )
             .await;
         effect.note = if examples.is_empty() {
             why.map(|why| format!("no example admitted: {why}"))
@@ -615,25 +624,12 @@ impl SpeakerService {
     }
     pub async fn undo(&self, segment_id: &str) -> Result<Correction, UndoCorrectionError> {
         let history = self.queries.corrections(segment_id).await?;
-        if history.is_empty() {
+        let mut stack = active_decisions(&history);
+        let Some(undone) = stack.pop() else {
             return Err(UndoCorrectionError::NotFound(
                 "no correction to undo".into(),
             ));
-        }
-        let mut stack = Vec::new();
-        for event in &history {
-            if event.action == "undo" {
-                stack.pop();
-            } else {
-                stack.push(event);
-            }
-        }
-        if stack.is_empty() {
-            return Err(UndoCorrectionError::NotFound(
-                "no correction to undo".into(),
-            ));
-        }
-        let undone = stack.pop().map(|c| c.id.clone());
+        };
         let prior = stack.last();
         let c = Correction {
             id: new_id(),
@@ -651,7 +647,7 @@ impl SpeakerService {
                 segment_id,
                 &after,
                 prior.map(|p| origin("segment_correction", &p.id)),
-                undone.as_deref(),
+                undone.profile_id.as_deref(),
             )
             .await?;
         if !self
@@ -665,6 +661,18 @@ impl SpeakerService {
         }
         Ok(c)
     }
+}
+/// The decisions still in effect after undos, oldest first; each undo retracts the latest one.
+pub(crate) fn active_decisions(history: &[Correction]) -> Vec<&Correction> {
+    let mut active = vec![];
+    for event in history {
+        if event.action == "undo" {
+            active.pop();
+        } else {
+            active.push(event);
+        }
+    }
+    active
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -961,6 +969,7 @@ impl SpeakerService {
         }
         let mut expected_correction = 0;
         let mut correction = None;
+        let mut segment_history = vec![];
         if let Some(profile_id) = &profile {
             let segment_id = input.segment_id.as_ref().ok_or_else(|| {
                 ValidationError(
@@ -990,6 +999,7 @@ impl SpeakerService {
             }
             let history = self.queries.corrections(segment_id).await?;
             expected_correction = history.len();
+            segment_history = history.clone();
             correction = Some(Correction {
                 id: new_id(),
                 segment_id: segment_id.clone(),
@@ -999,6 +1009,7 @@ impl SpeakerService {
                 created_at: now(),
             });
         }
+        let mut retracted = None;
         if input.action == "undo" {
             let latest = latest.expect("validated latest resolution");
             if let (Some(correction_id), Some(segment_id)) =
@@ -1011,15 +1022,9 @@ impl SpeakerService {
                     ));
                 }
                 expected_correction = history.len();
-                let mut active = Vec::new();
-                for event in &history {
-                    if event.action == "undo" {
-                        active.pop();
-                    } else {
-                        active.push(event);
-                    }
-                }
-                active.pop();
+                segment_history = history.clone();
+                let mut active = active_decisions(&history);
+                retracted = active.pop().and_then(|c| c.profile_id.clone());
                 let prior = active.last();
                 correction = Some(Correction {
                     id: new_id(),
@@ -1034,26 +1039,17 @@ impl SpeakerService {
         let resolution_id = new_id();
         let effect = match &correction {
             Some(c) => {
-                let mut after = self.queries.corrections(&c.segment_id).await?;
+                let mut after = segment_history;
                 after.push(c.clone());
-                let (admit_origin, undone) = if c.action == "undo" {
+                let admit_origin = if c.action == "undo" {
                     // The restored decision regains its example; the undone acceptance loses its own.
-                    let mut active = vec![];
-                    for event in &after {
-                        if event.action == "undo" {
-                            active.pop();
-                        } else {
-                            active.push(event);
-                        }
-                    }
-                    (
-                        active.last().map(|p| origin("segment_correction", &p.id)),
-                        latest.map(|l| l.id.as_str()),
-                    )
+                    active_decisions(&after)
+                        .last()
+                        .map(|p| origin("segment_correction", &p.id))
                 } else {
-                    (Some(origin("suggestion_resolution", &resolution_id)), None)
+                    Some(origin("suggestion_resolution", &resolution_id))
                 };
-                self.learning_effect(&c.segment_id, &after, admit_origin, undone)
+                self.learning_effect(&c.segment_id, &after, admit_origin, retracted.as_deref())
                     .await?
             }
             None => LearningEffect::default(),

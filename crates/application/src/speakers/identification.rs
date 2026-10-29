@@ -170,7 +170,7 @@ impl SpeakerService {
             &contradicted_ranges(&detail, &input.track_id, offset, &profile_id),
         );
         let (examples, example_note) = self
-            .admit_cluster_examples(&profile_id, &detail, track, windows, origin)
+            .admit_cluster_examples(&profile_id, &detail, track, windows, origin, &[])
             .await;
         if let PersonChoice::New(name) = &input.person {
             Recording::validate_title(name)?;
@@ -247,35 +247,43 @@ impl SpeakerService {
         }
         let mut undo = vec![];
         let mut left = vec![];
+        let mut removed = identification.example_ids.clone();
         for item in &identification.segments {
             let history = self.queries.corrections(&item.segment_id).await?;
-            if history.last().map(|c| &c.id) != Some(&item.correction_id) {
+            let mut stack = super::active_decisions(&history);
+            // Only a line whose current decision is still this name reverts; later edits stay.
+            if stack.last().map(|c| &c.id) != Some(&item.correction_id) {
                 left.push(item.segment_id.clone());
                 continue;
             }
-            let mut stack = vec![];
-            for event in &history {
-                if event.action == "undo" {
-                    stack.pop();
-                } else {
-                    stack.push(event);
-                }
-            }
             stack.pop();
             let prior = stack.last();
-            undo.push((
-                Correction {
-                    id: new_id(),
-                    segment_id: item.segment_id.clone(),
-                    profile_id: prior.and_then(|c| c.profile_id.clone()),
-                    replacement_text: prior.and_then(|c| c.replacement_text.clone()),
-                    action: "undo".into(),
-                    created_at: now(),
-                },
-                history.len(),
-            ));
+            let c = Correction {
+                id: new_id(),
+                segment_id: item.segment_id.clone(),
+                profile_id: prior.and_then(|c| c.profile_id.clone()),
+                replacement_text: prior.and_then(|c| c.replacement_text.clone()),
+                action: "undo".into(),
+                created_at: now(),
+            };
+            // Examples of this person later re-admitted from these lines go with the name too.
+            let mut after = history.clone();
+            after.push(c.clone());
+            let effect = self
+                .learning_effect(
+                    &item.segment_id,
+                    &after,
+                    None,
+                    Some(&identification.profile_id),
+                )
+                .await?;
+            for example in effect.remove {
+                if !removed.contains(&example) {
+                    removed.push(example);
+                }
+            }
+            undo.push((c, history.len()));
         }
-        let removed = identification.example_ids.clone();
         identification.undone_at = Some(now());
         if !self
             .writes
@@ -309,6 +317,7 @@ impl SpeakerService {
         track: &AudioTrack,
         windows: Vec<(i64, i64)>,
         origin: ExampleOrigin,
+        removing: &[String],
     ) -> (Vec<VoiceExample>, Option<String>) {
         let mut usable: Vec<_> = windows
             .into_iter()
@@ -322,8 +331,12 @@ impl SpeakerService {
             );
         }
         usable.sort_by(|a, b| (b.1 - b.0).cmp(&(a.1 - a.0)).then(a.0.cmp(&b.0)));
-        let existing = match self.queries.examples(Some(profile_id)).await {
-            Ok(examples) => examples,
+        // Examples the same decision removes no longer count against room or overlap.
+        let existing: Vec<VoiceExample> = match self.queries.examples(Some(profile_id)).await {
+            Ok(examples) => examples
+                .into_iter()
+                .filter(|e| !removing.contains(&e.id))
+                .collect(),
             Err(error) => return (vec![], Some(error.to_string())),
         };
         let admitted_here = existing
@@ -431,9 +444,11 @@ pub(crate) fn heard_windows(
     heard: &[(i64, i64)],
     contradicted: &[(i64, i64)],
 ) -> Vec<(i64, i64)> {
+    let overlaps_others = |&(a, b): &(i64, i64)| contradicted.iter().any(|&(x, y)| x < b && y > a);
     let heard: Vec<(i64, i64)> = if heard.is_empty() {
         windows
             .iter()
+            .filter(|w| !overlaps_others(w))
             .max_by(|a, b| (a.1 - a.0).cmp(&(b.1 - b.0)).then(b.0.cmp(&a.0)))
             .map(|&(a, b)| (a, b.min(a + *EXAMPLE_SPEECH_MS.end())))
             .into_iter()
@@ -449,7 +464,7 @@ pub(crate) fn heard_windows(
                 .map(move |&(x, y)| (a.max(x), b.min(y)))
                 .filter(|(a, b)| b > a)
         })
-        .filter(|&(a, b)| !contradicted.iter().any(|&(x, y)| x < b && y > a))
+        .filter(|w| !overlaps_others(w))
         .collect()
 }
 pub(super) fn segment_local_range(
@@ -474,6 +489,11 @@ mod tests {
         assert_eq!(
             heard_windows(windows.clone(), &[], &[]),
             vec![(10_000, 30_000)]
+        );
+        // The longest turn holds a line assigned to someone else: the next clean one is used.
+        assert_eq!(
+            heard_windows(windows.clone(), &[], &[(12_000, 14_000)]),
+            vec![(0, 8_000)]
         );
         // Two clips heard; a turn the user assigned to someone else is excluded.
         assert_eq!(
