@@ -21,7 +21,7 @@ The score/margin/count above are placeholders, not an approved personal policy. 
 
 Each recording's **Processing → Meeting & speakers** panel provides analyze/resume, new anonymous analysis, explicit-policy analysis and review of prepared voices. "Name the voices" opens the recording's **Name voices** tab, where each prepared voice is played, named by typing a person, and saved; naming still requires you to type or pick the person. Match checks (under People) support accepting/replacing/rejecting suggestions and correction history.
 
-**Record a meeting** has a separate default-off after-Stop speaker option. Enabling it also enables final transcription; disabling final transcription disables speaker analysis. CLI `--analyze-speakers` explicitly requests the whole pipeline for that capture. Both ASR and diarization readiness are checked before capture. An unavailable model does not silently download weights or begin a supposedly ready analysis.
+**Record a meeting** has a separate after-Stop speaker option, on by default since October 28 (accuracy first; without its echo check microphone speech is never labeled "Me"). A saved preference is kept. Enabling it also enables final transcription; disabling final transcription disables speaker analysis. CLI `--analyze-speakers` explicitly requests the whole pipeline for that capture. Both ASR and diarization readiness are checked before capture: when the preference finds a model missing, the meeting still records and the app says why speakers were not detected; an explicit request fails before capture. An unavailable model is never downloaded silently.
 
 ## Evidence and persistence
 
