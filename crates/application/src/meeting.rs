@@ -270,8 +270,12 @@ impl MeetingService {
             match self.plan("selected-asr").await {
                 Ok(plan) => Some(plan),
                 // Record-only fallback: never lose the meeting because no verified model exists.
-                Err(FinalizeMeetingError::Invalid(reason)) if input_skip && !analyze_speakers => {
+                // Speaker detection needs the transcript, so it is skipped for the same reason.
+                Err(FinalizeMeetingError::Invalid(reason)) if input_skip => {
                     transcription_skipped = Some(reason.to_string());
+                    if analyze_speakers {
+                        analysis_skipped = Some(reason.to_string());
+                    }
                     None
                 }
                 Err(error) => return Err(error.into()),

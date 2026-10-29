@@ -2487,29 +2487,33 @@ async fn meeting_without_a_verified_asr_model_records_audio_and_reports_the_skip
         processing,
         ownership,
     );
-    let report = service
-        .record(
-            parakeet_application::meeting::RecordMeetingInput {
-                capture: parakeet_application::capture::CaptureRecordingInput {
-                    dictation: false,
-                    microphone_uid: None,
-                    system_audio: true,
-                    title: "Fixture capture".into(),
-                    maximum_seconds: 1,
-                    final_transcription: None,
+    // Speaker detection after Stop is on by default; it must not stop the meeting being saved.
+    for analyze_speakers in [false, true] {
+        let report = service
+            .record(
+                parakeet_application::meeting::RecordMeetingInput {
+                    capture: parakeet_application::capture::CaptureRecordingInput {
+                        dictation: false,
+                        microphone_uid: None,
+                        system_audio: true,
+                        title: "Fixture capture".into(),
+                        maximum_seconds: 1,
+                        final_transcription: None,
+                    },
+                    transcribe_after_stop: true,
+                    skip_unavailable_model: true,
+                    analyze_speakers,
+                    matching_policy: None,
                 },
-                transcribe_after_stop: true,
-                skip_unavailable_model: true,
-                analyze_speakers: false,
-                matching_policy: None,
-            },
-            Arc::new(AtomicBool::new(false)),
-        )
-        .await
-        .unwrap();
-    assert!(report.finalization.is_none());
-    assert!(report.transcription_skipped.is_some());
-    assert!(store.detail(&report.recording_id).await.unwrap().is_some());
+                Arc::new(AtomicBool::new(false)),
+            )
+            .await
+            .unwrap();
+        assert!(report.finalization.is_none());
+        assert!(report.transcription_skipped.is_some());
+        assert_eq!(report.analysis_skipped.is_some(), analyze_speakers);
+        assert!(store.detail(&report.recording_id).await.unwrap().is_some());
+    }
     assert!(engine.calls.lock().unwrap().is_empty());
 }
 
