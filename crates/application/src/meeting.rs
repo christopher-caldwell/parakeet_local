@@ -173,6 +173,9 @@ pub struct RecordedMeeting {
     /// Why speaker detection after Stop did not run although the preference asked for it.
     #[serde(default)]
     pub analysis_skipped: Option<String>,
+    /// The saved audio still has a transcription plan to finish with `finalize`.
+    #[serde(default)]
+    pub transcription_planned: bool,
 }
 operation_error!(ListPendingMeetingsError,sources{Persistence:PersistenceError=>"persistence",Invalid:ValidationError=>"invalid_input"},values{});
 #[derive(Debug, Clone)]
@@ -249,7 +252,31 @@ impl MeetingService {
             updated_at: now(),
         })
     }
+    /// Records and then finishes the meeting's transcription and speaker work in one call.
     pub async fn record(
+        &self,
+        input: RecordMeetingInput,
+        stop: Arc<AtomicBool>,
+    ) -> Result<RecordedMeeting, RecordMeetingError> {
+        let mut recorded = self.record_audio(input, stop).await?;
+        if recorded.transcription_planned {
+            recorded.finalization = Some(
+                self.finalize(crate::meeting::FinalizeMeetingInput {
+                    id: recorded.recording_id.clone(),
+                    model: None,
+                })
+                .await
+                .map_err(|source| RecordMeetingError::Finalization {
+                    recording_id: recorded.recording_id.clone(),
+                    source,
+                })?,
+            );
+        }
+        Ok(recorded)
+    }
+    /// Records and saves the audio with its transcription plan, returning as soon as the audio
+    /// is saved so the caller can record again while `finalize` runs.
+    pub async fn record_audio(
         &self,
         input: RecordMeetingInput,
         stop: Arc<AtomicBool>,
@@ -316,27 +343,12 @@ impl MeetingService {
         };
         let planned_transcription = request.final_transcription.is_some();
         let bundle = self.capture.record(request, stop).await?;
-        let recording_id = bundle.recording.id;
-        let finalization = if planned_transcription {
-            Some(
-                self.finalize(crate::meeting::FinalizeMeetingInput {
-                    id: recording_id.to_string(),
-                    model: None,
-                })
-                .await
-                .map_err(|source| RecordMeetingError::Finalization {
-                    recording_id: recording_id.clone(),
-                    source,
-                })?,
-            )
-        } else {
-            None
-        };
         Ok(RecordedMeeting {
-            recording_id,
-            finalization,
+            recording_id: bundle.recording.id,
+            finalization: None,
             transcription_skipped,
             analysis_skipped,
+            transcription_planned: planned_transcription,
         })
     }
     pub async fn pending(&self) -> Result<Vec<MeetingFinalization>, ListPendingMeetingsError> {

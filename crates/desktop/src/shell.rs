@@ -40,8 +40,84 @@ impl Workbench {
             cx,
         );
     }
+    /// Finishes a just-recorded meeting's transcript and speaker work without holding up the
+    /// recorder, dictation or the rest of the app.
+    pub(super) fn finish_meeting_after_stop(&mut self, id: String, cx: &mut Context<Self>) {
+        self.finishing_meetings.insert(id.clone());
+        let service = self.meeting.clone();
+        let library = self.library.clone();
+        self.background_task(
+            "Transcribing the meeting",
+            async move {
+                let warning = service
+                    .finalize(parakeet_application::meeting::FinalizeMeetingInput {
+                        id: id.clone(),
+                        model: None,
+                    })
+                    .await
+                    .err()
+                    .map(|e| e.to_string());
+                let detail = library
+                    .show(&id)
+                    .await
+                    .map(reader::Document::new)
+                    .map_err(|e| e.to_string());
+                Ok(Update::MeetingFinished(id, detail, warning))
+            },
+            cx,
+        );
+    }
+    /// Opens a recording that was just made, from a clean reading state.
+    pub(super) fn show_new_recording(&mut self, d: reader::Document, cx: &mut Context<Self>) {
+        self.editing_title = false;
+        self.close_editor(cx);
+        self.segment_page = 0;
+        self.recording_tab = library::RecordingTab::Transcript;
+        self.show_transcript_find = false;
+        self.transcript_query.clear();
+        self.cluster_review = None;
+        self.selected_clusters.clear();
+        self.candidates.clear();
+        self.voices_key = None;
+        self.train_done.clear();
+        self.train_person = None;
+        self.train_hint = None;
+        self.suggestions.clear();
+        self.suggestion_review = None;
+        self.reader_list.reset(0);
+        self.library_filter = library::LibraryFilter::All;
+        let find = self.transcript_find.clone();
+        let search = self.search.clone();
+        let _ = cx.update_window(self.main_window, move |_, window, cx| {
+            find.update(cx, |input, cx| input.set_value("", window, cx));
+            search.update(cx, |input, cx| input.set_value("", window, cx));
+        });
+        let rid = d.recording.id.clone();
+        self.requested_recording = Some(rid.clone());
+        let service = self.speakers.clone();
+        self.task(
+            "Reading saved name suggestions",
+            async move {
+                Ok(Update::Suggestions(
+                    rid.clone(),
+                    service.suggestions(Some(&rid)).await?,
+                ))
+            },
+            cx,
+        );
+        self.selected_track = d.tracks.iter().find(|t| t.available).map(|t| t.id.clone());
+        if let Some(row) = self.records.iter_mut().find(|r| r.id == d.recording.id) {
+            *row = d.recording.clone();
+        }
+        self.receive_detail(d, cx);
+        self.area = Area::Library;
+        self.reload(cx);
+    }
     pub(super) fn navigate(&mut self, area: Area, cx: &mut Context<Self>) {
         self.area = area;
+        // A shortcut recording left armed would turn the next key typed elsewhere into one.
+        self.recording_shortcut = false;
+        self.shortcut_hint = None;
         match area {
             Area::Storage => self.measure_storage(cx),
             Area::Jobs => {

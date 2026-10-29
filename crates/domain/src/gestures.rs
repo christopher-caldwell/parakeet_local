@@ -70,6 +70,25 @@ impl Shortcut {
                 "Command-Space conflicts with the standard macOS Spotlight shortcut".into(),
             ));
         }
+        // While dictation is on, a matched key is taken from every app. These only apply to
+        // active shortcuts, so an older one can still be turned off or removed.
+        if self.enabled && key == "escape" {
+            return Err(crate::ValidationError(
+                "Escape cancels dictation, so it can't start it; choose another key".into(),
+            ));
+        }
+        if self.enabled && key == "space" && self.modifiers.is_empty() {
+            return Err(crate::ValidationError(
+                "Space on its own would stop you typing spaces; add a modifier such as Option"
+                    .into(),
+            ));
+        }
+        if self.enabled && typing && self.modifiers == ["cmd"] {
+            return Err(crate::ValidationError(format!(
+                "Command-{} is an app shortcut (like Command-C for Copy); add Control or Option",
+                key.to_uppercase()
+            )));
+        }
         Ok(())
     }
 
@@ -164,6 +183,14 @@ mod tests {
         assert!(shortcut("d", &[]).validate().is_err());
         assert!(shortcut("rightoption", &["cmd"]).validate().is_err());
         assert!(shortcut("volumeup", &[]).validate().is_err());
+        // Keys apps and typing need are refused while active, but an old one can be turned off.
+        assert!(shortcut("c", &["cmd"]).validate().is_err());
+        assert!(shortcut("space", &[]).validate().is_err());
+        assert!(shortcut("escape", &[]).validate().is_err());
+        assert!(shortcut("space", &["alt"]).validate().is_ok());
+        let mut old = shortcut("c", &["cmd"]);
+        old.enabled = false;
+        assert!(old.validate().is_ok());
     }
     #[test]
     fn modifier_only_holds_own_their_release_and_conflicts_are_detected() {

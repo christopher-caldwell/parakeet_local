@@ -42,10 +42,43 @@ fn capture_state_label(state: &str) -> &str {
     }
 }
 
+/// Modifier keys held on their own, as offered on the Dictation screen.
+const HOLD_KEYS: [(&str, &str); 4] = [
+    ("rightcommand", "Right ⌘"),
+    ("rightoption", "Right ⌥"),
+    ("rightcontrol", "Right ⌃"),
+    ("fn", "Fn"),
+];
 fn shortcut_label(binding: &gestures::Shortcut) -> String {
-    let mut parts = binding.modifiers.clone();
-    parts.push(binding.key.clone());
-    parts.join(" + ")
+    let key = binding.key.to_lowercase();
+    let hold = [
+        ("leftcommand", "Left ⌘"),
+        ("leftoption", "Left ⌥"),
+        ("leftcontrol", "Left ⌃"),
+        ("rightshift", "Right ⇧"),
+        ("leftshift", "Left ⇧"),
+    ];
+    if let Some((_, name)) = HOLD_KEYS.iter().chain(&hold).find(|(id, _)| *id == key) {
+        return format!("Hold {name}");
+    }
+    let mut label: String = ["ctrl", "alt", "shift", "cmd"]
+        .iter()
+        .filter(|m| binding.modifiers.iter().any(|b| b == *m))
+        .map(|m| match *m {
+            "ctrl" => "⌃",
+            "alt" => "⌥",
+            "shift" => "⇧",
+            _ => "⌘",
+        })
+        .collect();
+    label.push_str(&match key.as_str() {
+        "space" => "Space".to_owned(),
+        "pageup" => "Page Up".to_owned(),
+        "pagedown" => "Page Down".to_owned(),
+        "home" | "end" => format!("{}{}", key[..1].to_uppercase(), &key[1..]),
+        _ => key.to_uppercase(),
+    });
+    label
 }
 
 impl Workbench {
@@ -802,6 +835,9 @@ impl Workbench {
                 "Press the keys you want to hold while speaking. Escape cancels.",
             ));
         }
+        if let Some(hint) = &self.shortcut_hint {
+            view = view.child(caption(hint.clone()).text_color(rgb(WARNING)));
+        }
         view = view.child(
             div()
                 .flex()
@@ -820,24 +856,26 @@ impl Workbench {
                     .disabled(on || self.dictation_starting)
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.recording_shortcut = true;
+                        this.shortcut_hint = None;
                         this.status = "Press the shortcut; Escape cancels".into();
                         cx.notify();
                     })),
                 )
+                .child(caption("or hold one key:"))
+                .children(HOLD_KEYS.iter().enumerate().map(|(index, (key, name))| {
+                    quiet(("hold-key", index), *name)
+                        .disabled(on || self.dictation_starting)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.add_shortcut(key.to_string(), vec![], cx)
+                        }))
+                }))
                 .when(self.show_status_details, |row| {
                     row.child(field(&self.shortcut_key).w(px(160.))).child(
                         quiet("add-shortcut", "Add by key name")
                             .disabled(on || self.dictation_starting)
                             .on_click(cx.listener(|this, _, _, cx| {
                                 let key = this.shortcut_key.read(cx).value().to_string();
-                                let mut bindings = this.shortcuts.clone();
-                                bindings.push(gestures::Shortcut {
-                                    id: new_id(),
-                                    key,
-                                    modifiers: vec![],
-                                    enabled: true,
-                                });
-                                this.persist_shortcuts(bindings, cx);
+                                this.add_shortcut(key, vec![], cx);
                             })),
                     )
                 }),

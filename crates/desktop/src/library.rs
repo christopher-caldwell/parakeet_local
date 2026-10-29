@@ -121,6 +121,28 @@ impl Workbench {
             cx,
         );
     }
+    /// Closes the line editor. Text that differs from the saved line is kept as a draft, so
+    /// Escape, paging or opening another recording never throws away what you typed.
+    pub(super) fn close_editor(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self.editing_segment.take() else {
+            return;
+        };
+        let text = self.edit_text.read(cx).value().to_string();
+        let saved = self.detail.as_ref().and_then(|d| {
+            let index = d.segments.iter().position(|s| s.id == id)?;
+            Some(
+                d.row_corrections[index]
+                    .text
+                    .clone()
+                    .unwrap_or_else(|| d.segments[index].text.clone()),
+            )
+        });
+        if saved.is_some_and(|saved| saved != text) {
+            self.drafts.insert(id, text);
+        } else {
+            self.drafts.remove(&id);
+        }
+    }
     pub(super) fn save_segment_text(&mut self, cx: &mut Context<Self>) {
         let Some(segment_id) = self.editing_segment.clone() else {
             return;
@@ -733,7 +755,7 @@ impl Workbench {
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.segment_page = this.segment_page.saturating_sub(1);
                         this.reset_reader_rows(true);
-                        this.editing_segment = None;
+                        this.close_editor(cx);
                         cx.notify();
                     })),
             )
@@ -743,7 +765,7 @@ impl Workbench {
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.segment_page += 1;
                         this.reset_reader_rows(true);
-                        this.editing_segment = None;
+                        this.close_editor(cx);
                         cx.notify();
                     })),
             );
@@ -962,6 +984,10 @@ impl Workbench {
                     .when(imported, |row| {
                         row.child(pill("Imported · unverified", MUTED))
                     })
+                    .when(
+                        !editing && self.drafts.contains_key(segment.id.as_str()),
+                        |row| row.child(pill("Unsaved edit · open Edit to finish", WARNING)),
+                    )
                     .when(suggested, |row| {
                         row.child(pill("Suggested · not confirmed", WARNING))
                     })
@@ -1009,12 +1035,18 @@ impl Workbench {
                         .on_click(cx.listener(
                             move |this, _, window, cx| {
                                 if this.editing_segment.as_deref() == Some(segment_id.as_str()) {
-                                    this.editing_segment = None;
+                                    this.close_editor(cx);
                                 } else {
+                                    this.close_editor(cx);
                                     this.editing_segment = Some(segment_id.clone());
-                                    this.edit_text.update(cx, |input, cx| {
-                                        input.set_value(edit_text.clone(), window, cx)
-                                    });
+                                    // An unsaved draft of this line comes back where it was left.
+                                    let text = this
+                                        .drafts
+                                        .get(segment_id.as_str())
+                                        .cloned()
+                                        .unwrap_or_else(|| edit_text.clone());
+                                    this.edit_text
+                                        .update(cx, |input, cx| input.set_value(text, window, cx));
                                     this.edit_text.focus_handle(cx).focus(window, cx);
                                 }
                                 this.reset_reader_rows(false);

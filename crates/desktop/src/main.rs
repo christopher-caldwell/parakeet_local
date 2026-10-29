@@ -91,7 +91,10 @@ enum Update {
     SuggestionReview(SpeakerSuggestionReview),
     Settings(Vec<gestures::Shortcut>, Vec<PromptProfile>),
     Devices(serde_json::Value),
-    Captured(Result<reader::Document, String>, Option<String>),
+    /// The meeting audio is saved; `true` when its transcription still has to be finished.
+    Captured(Result<reader::Document, String>, Option<String>, bool),
+    /// Transcription and speaker work after Stop ended for this recording.
+    MeetingFinished(String, Result<reader::Document, String>, Option<String>),
     MeetingFinalized(Result<reader::Document, String>, Option<String>),
     MeetingPlans(Vec<parakeet_application::meeting::MeetingFinalization>),
 }
@@ -182,6 +185,10 @@ struct Workbench {
     examples: Vec<VoiceExampleSummary>,
     candidates: Vec<EnrollmentCandidate>,
     voices_generation: u64,
+    /// Unsaved text of transcript lines whose editor was closed, kept until saved or cleared.
+    drafts: std::collections::HashMap<String, String>,
+    /// Meetings whose transcript and speaker work after Stop is still running.
+    finishing_meetings: std::collections::BTreeSet<String>,
     /// The recording and analysis state the voice list was last loaded for.
     voices_key: Option<String>,
     voices_loading: bool,
@@ -193,6 +200,8 @@ struct Workbench {
     train_heard: Option<train::HeardClips>,
     train_done: Vec<ClusterIdentification>,
     recording_shortcut: bool,
+    /// Why the shortcut just pressed or chosen was not added.
+    shortcut_hint: Option<String>,
     model_list: Vec<ModelInfo>,
     shortcuts: Vec<gestures::Shortcut>,
     prompts: Vec<PromptProfile>,
@@ -303,6 +312,7 @@ impl Workbench {
         cx: &mut Context<Self>,
     ) {
         self.status = label.into();
+        let label = label.to_owned();
         if !background {
             self.pending += 1;
         }
@@ -416,7 +426,7 @@ impl Workbench {
                             }
                             Update::RefreshSelected | Update::SegmentSaved(_) => {
                                 if let Update::SegmentSaved(id) = update
-                                    && this.editing_segment.as_deref() == Some(id.as_str()) { this.editing_segment = None; }
+                                    && this.editing_segment.as_deref() == Some(id.as_str()) { this.editing_segment = None; this.drafts.remove(&id); }
                                 if let Some(id) = this.requested_recording.clone() {
                                     let library = this.library.clone();
                                     this.task(
@@ -427,39 +437,32 @@ impl Workbench {
                                 }
                             }
                             Update::Devices(d) => this.devices = d,
-                            Update::Captured(result, warning) => {
+                            Update::Captured(result, warning, finalize) => {
+                                // The recorder is free as soon as the audio is saved; the
+                                // transcript is finished in the background.
                                 this.capture_stop = None;
                                 match result {
                                     Ok(d) => {
-                                        this.editing_title=false;this.editing_segment=None;this.segment_page=0;
-                                        this.recording_tab=library::RecordingTab::Transcript;
-                                        this.show_transcript_find=false;this.transcript_query.clear();
-                                        this.cluster_review=None;this.selected_clusters.clear();this.candidates.clear();this.voices_key=None;this.train_done.clear();this.train_person=None;this.train_hint=None;
-                                        this.suggestions.clear();this.suggestion_review=None;
-                                        this.reader_list.reset(0);
-                                        this.library_filter=library::LibraryFilter::All;
-                                        let find=this.transcript_find.clone();let search=this.search.clone();
-                                        let _=cx.update_window(this.main_window,move|_,window,cx|{
-                                            find.update(cx,|input,cx|input.set_value("",window,cx));
-                                            search.update(cx,|input,cx|input.set_value("",window,cx));
-                                        });
-                                        this.requested_recording = Some(d.recording.id.clone());
-                                        {let service=this.speakers.clone();let rid=d.recording.id.clone();
-                                        this.task("Reading saved name suggestions",async move{Ok(Update::Suggestions(rid.clone(),service.suggestions(Some(&rid)).await?))},cx);}
-                                        this.selected_track = d
-                                            .tracks
-                                            .iter()
-                                            .find(|t| t.available)
-                                            .map(|t| t.id.clone());
-                                        if let Some(row) =
-                                            this.records.iter_mut().find(|r| r.id == d.recording.id)
-                                        {
-                                            *row = d.recording.clone();
+                                        let id = d.recording.id.clone();
+                                        let title = d.recording.title().to_owned();
+                                        if finalize {
+                                            this.finish_meeting_after_stop(id, cx);
                                         }
-                                        this.receive_detail(d, cx);
-                                        this.area = Area::Library;
-                                        this.reload(cx);
-                                        if let Some(warning)=warning {this.status=warning.clone();this.last_error=Some(warning);cx.notify();return;}
+                                        // Open it only from the Record screen, so a recording that
+                                        // ends while you work elsewhere doesn't take the screen.
+                                        if this.area == Area::Capture {
+                                            this.show_new_recording(d, cx);
+                                        } else {
+                                            this.reload(cx);
+                                        }
+                                        this.status = if finalize {
+                                            format!("“{title}” saved · transcribing in the background")
+                                        } else {
+                                            format!("“{title}” saved")
+                                        };
+                                        if let Some(warning)=warning {this.status=warning.clone();this.last_error=Some(warning);}
+                                        cx.notify();
+                                        return;
                                     }
                                     Err(e) => {
                                         this.last_error = Some(e.clone());
@@ -468,6 +471,26 @@ impl Workbench {
                                         return;
                                     }
                                 }
+                            }
+                            Update::MeetingFinished(id, result, warning) => {
+                                this.finishing_meetings.remove(&id);
+                                let title = match result {
+                                    Ok(d) => {
+                                        let title = d.recording.title().to_owned();
+                                        this.receive_detail(d, cx);
+                                        title
+                                    }
+                                    Err(_) => "The meeting".into(),
+                                };
+                                this.reload(cx);
+                                this.load_meeting_plans(cx);
+                                this.status = format!("“{title}” is transcribed");
+                                if let Some(warning) = warning {
+                                    this.status = format!("“{title}”: {warning}");
+                                    this.last_error = Some(this.status.clone());
+                                }
+                                cx.notify();
+                                return;
                             }
                             Update::CopyText(text) => {cx.write_to_clipboard(ClipboardItem::new_string(text));this.status="Transcript copied".into();cx.notify();return;},
                             Update::LibrarySearch(generation,r) => {if generation==this.search_generation {this.records=r;}},
@@ -516,7 +539,10 @@ impl Workbench {
                                 return;
                             }
                         }
-                        this.status = "Ready".into();
+                        // A message an update just set, or another task's, stays visible.
+                        if this.status == label {
+                            this.status = "Ready".into();
+                        }
                     }
                     Ok(Err(e)) => {if e.chain().any(|cause|matches!(cause.downcast_ref::<ProcessingError>(),Some(ProcessingError::Cancelled(_)))){this.status="Processing cancelled. Source audio and saved chunks are retained.".into();}else{this.status=format!("Failed: {e:#}");this.last_error=Some(this.status.clone());}},
                     Err(e) => {this.status=format!("Background task failed: {e}");this.last_error=Some(this.status.clone());},
@@ -564,7 +590,7 @@ impl Workbench {
         self.selected_track = None;
         self.segment_page = 0;
         self.editing_title = false;
-        self.editing_segment = None;
+        self.close_editor(cx);
         self.recording_tab = library::RecordingTab::Transcript;
         self.transcript_query.clear();
         self.transcript_find
@@ -1166,7 +1192,7 @@ impl Render for Workbench {
                         .update(cx, |input, cx| input.set_value("", window, cx));
                 }
                 this.editing_title = false;
-                this.editing_segment = None;
+                this.close_editor(cx);
                 this.reset_reader_rows(false);
                 this.show_media_import = false;
                 this.show_import_path = false;
@@ -1195,14 +1221,7 @@ impl Render for Workbench {
                         modifiers.push(name.into());
                     }
                 }
-                let mut bindings = this.shortcuts.clone();
-                bindings.push(gestures::Shortcut {
-                    id: new_id(),
-                    key: event.keystroke.key.clone(),
-                    modifiers,
-                    enabled: true,
-                });
-                this.persist_shortcuts(bindings, cx);
+                this.add_shortcut(event.keystroke.key.clone(), modifiers, cx);
             }))
             .size_full()
             .tab_group()
@@ -1353,6 +1372,30 @@ impl Workbench {
             cx,
         );
     }
+    /// Adds a dictation shortcut after checking it here, so a key that would take over typing or
+    /// clash with another shortcut is explained instead of failing the save.
+    fn add_shortcut(&mut self, key: String, modifiers: Vec<String>, cx: &mut Context<Self>) {
+        let binding = gestures::Shortcut {
+            id: new_id(),
+            key: key.trim().to_lowercase(),
+            modifiers,
+            enabled: true,
+        };
+        self.shortcut_hint = if let Err(error) = binding.validate() {
+            Some(error.0)
+        } else if self.shortcuts.iter().any(|b| b.conflicts(&binding)) {
+            Some("You already have this shortcut.".into())
+        } else {
+            None
+        };
+        if self.shortcut_hint.is_some() {
+            cx.notify();
+            return;
+        }
+        let mut bindings = self.shortcuts.clone();
+        bindings.push(binding);
+        self.persist_shortcuts(bindings, cx);
+    }
     fn persist_shortcuts(&mut self, bindings: Vec<gestures::Shortcut>, cx: &mut Context<Self>) {
         let service = self.settings.clone();
         if let Some(stop) = self.dictation_stop.take() {
@@ -1409,8 +1452,8 @@ impl Workbench {
         self.background_task(
             "Meeting capture",
             async move {
-                let (id, warning) = match meeting
-                    .record(
+                let (id, warning, finalize) = match meeting
+                    .record_audio(
                         parakeet_application::meeting::RecordMeetingInput {
                             capture: request,
                             transcribe_after_stop: transcribe,
@@ -1428,12 +1471,14 @@ impl Workbench {
                             .transcription_skipped
                             .map(|why| format!("Audio saved without a transcript: {why}"))
                             .or(report.analysis_skipped.map(|why| {
-                                format!("Transcribed, but speakers were not detected: {why}")
+                                format!("Audio saved; speakers won't be detected: {why}")
                             })),
+                        report.transcription_planned,
                     ),
                     Err(error) => (
                         error.retained_recording_id().map(str::to_owned),
                         Some(error.to_string()),
+                        false,
                     ),
                 };
                 let result = match id {
@@ -1444,7 +1489,7 @@ impl Workbench {
                         .map_err(|e| e.to_string()),
                     None => Err(warning.clone().unwrap_or_else(|| "Recording failed".into())),
                 };
-                Ok(Update::Captured(result, warning))
+                Ok(Update::Captured(result, warning, finalize))
             },
             cx,
         );
@@ -2008,6 +2053,8 @@ fn run() -> anyhow::Result<()> {
                             examples: vec![],
                             candidates: vec![],
                             voices_generation: 0,
+                            drafts: Default::default(),
+                            finishing_meetings: Default::default(),
                             voices_key: None,
                             voices_loading: false,
                             analysis_active: false,
@@ -2018,6 +2065,7 @@ fn run() -> anyhow::Result<()> {
                             train_heard: None,
                             train_done: vec![],
                             recording_shortcut: false,
+                            shortcut_hint: None,
                             model_list: vec![],
                             shortcuts: vec![],
                             prompts: vec![],
