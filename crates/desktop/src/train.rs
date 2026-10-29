@@ -600,7 +600,7 @@ impl Workbench {
             return view;
         };
         view = view.child(caption(format!(
-            "{} examples · {} people · {} tuning / {} held-out recordings · {}",
+            "Checked {} voice examples of {} people: {} recordings to choose the settings and {} others to test them. {}",
             report.examples,
             report.profiles,
             report.tuning_recordings,
@@ -611,15 +611,18 @@ impl Workbench {
             let held = &report.held_out;
             view = view
                 .child(caption(format!(
-                    "Proposed: similarity ≥ {:.2}, separation ≥ {:.2}, ≥ {} examples. Held-out: {} of {} known voices recognized, {} false accepts in {} trials.",
-                    policy.minimum_score,
-                    policy.minimum_margin,
-                    policy.minimum_examples,
+                    "On the test recordings, {} of {} known voices were recognized, and {} of {} checks matched the wrong person.",
                     held.correct_accepts,
                     held.known_trials,
                     held.false_accepts(),
                     held.trials
                 )))
+                .when(self.show_status_details, |view| {
+                    view.child(caption(format!(
+                        "Settings: similarity ≥ {:.2}, separation ≥ {:.2}, at least {} examples per person.",
+                        policy.minimum_score, policy.minimum_margin, policy.minimum_examples
+                    )))
+                })
                 .child(
                     button("train-adopt", "Use these criteria for suggestions")
                         .self_start()

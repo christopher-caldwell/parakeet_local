@@ -184,8 +184,27 @@ impl Workbench {
 }
 
 impl Workbench {
-    /// Raw captures stay untouched for a week, then become verified lossless copies. Runs once at
-    /// startup; anything that fails verification is left exactly as it was.
+    /// Archives due captures now and then every few hours, since the app often stays open for
+    /// days for dictation.
+    pub(super) fn keep_archiving(&mut self, cx: &mut Context<Self>) {
+        self.archive_old_captures(cx);
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(6 * 60 * 60))
+                    .await;
+                if this
+                    .update(cx, |this, cx| this.archive_old_captures(cx))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+    /// Raw captures stay untouched for a week, then become verified lossless copies. Anything
+    /// that fails verification is left exactly as it was.
     pub(super) fn archive_old_captures(&mut self, cx: &mut Context<Self>) {
         let service = self.archive.clone();
         self.background_task(
@@ -195,9 +214,10 @@ impl Workbench {
                     .duration_since(std::time::UNIX_EPOCH)?
                     .as_millis() as u64;
                 let report = service.archive_due(now, false).await?;
-                Ok(Update::Message(if report.archived.is_empty() && report.failed.is_empty() {
-                    "Ready".into()
-                } else {
+                if report.archived.is_empty() && report.failed.is_empty() {
+                    return Ok(Update::Quiet);
+                }
+                Ok(Update::Message({
                     let saved: u64 = report
                         .archived
                         .iter()

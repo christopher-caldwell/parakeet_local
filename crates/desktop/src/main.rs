@@ -95,6 +95,8 @@ enum Update {
     Captured(Result<reader::Document, String>, Option<String>, bool),
     /// Transcription and speaker work after Stop ended for this recording.
     MeetingFinished(String, Result<reader::Document, String>, Option<String>),
+    /// Work that finished with nothing to report.
+    Quiet,
     /// A downloaded media file and its transcription (with a warning when it failed).
     MediaImported(Result<(reader::Document, Option<String>), String>),
     MeetingFinalized(Result<reader::Document, String>, Option<String>),
@@ -568,6 +570,7 @@ impl Workbench {
                                 this.shortcuts = s;
                                 this.prompts = p;
                             }
+                            Update::Quiet => {}
                             Update::Message(m) => {
                                 this.status = m;
                                 cx.notify();
@@ -2149,7 +2152,7 @@ fn run() -> anyhow::Result<()> {
                         });
                         view.update(cx, |this, cx| {
                             this.start_heartbeat(cx);
-                            this.archive_old_captures(cx);
+                            this.keep_archiving(cx);
                             #[cfg(feature = "performance")]
                             this.start_performance_observer(window, cx);
                             this.subscribe_search(cx);

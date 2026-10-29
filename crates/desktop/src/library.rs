@@ -1484,7 +1484,18 @@ impl Workbench {
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .child(ui::model_name(&run.model).to_owned()),
                             )
-                            .child(pill(run.status.clone(), color)),
+                            .child(pill(
+                                match run.status.as_str() {
+                                    "completed" => "Completed",
+                                    "failed" => "Failed",
+                                    "interrupted" => "Interrupted",
+                                    "running" => "Running",
+                                    "pending" => "Waiting",
+                                    "superseded" => "Replaced",
+                                    other => other,
+                                },
+                                color,
+                            )),
                     )
                     .child(caption(format!(
                         "{} · {}{}",

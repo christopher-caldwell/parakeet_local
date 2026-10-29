@@ -959,7 +959,18 @@ impl Workbench {
                     .gap_1()
                     .child(caption(format!(
                         "{} · {}",
-                        receipt.created_at, receipt.status
+                        chrono::DateTime::parse_from_rfc3339(&receipt.created_at)
+                            .map(|d| d
+                                .with_timezone(&chrono::Local)
+                                .format("%b %-d, %-I:%M %p")
+                                .to_string())
+                            .unwrap_or_else(|_| receipt.created_at.clone()),
+                        match receipt.status.as_str() {
+                            "inserted" => "Pasted",
+                            "cancelled" => "Cancelled",
+                            "retained_after_failure" => "Not pasted · text kept",
+                            other => other,
+                        }
                     )))
                     .child(receipt.raw.clone())
                     .when(self.show_status_details, |row| {
@@ -1038,7 +1049,7 @@ impl Workbench {
         view = view.child(facts);
         view = view.child(group(
             "macOS permissions",
-            "Allow access for the features you use. After changing a permission in System Settings, refresh below.",
+            "Allow access for the features you use. After changing a permission in System Settings, refresh below. For System audio and Shortcuts, macOS may ask you to quit and reopen Parakeet Local before the change takes effect.",
         ));
         let permissions = [
             (
