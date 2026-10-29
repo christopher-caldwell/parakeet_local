@@ -347,7 +347,12 @@ impl LibraryService {
         }
         Ok(())
     }
-    pub async fn export_markdown(&self, id: &str) -> Result<String, ExportMarkdownError> {
+    /// Markdown transcript; `people` names the speakers the user confirmed.
+    pub async fn export_markdown(
+        &self,
+        id: &str,
+        people: &[SpeakerProfile],
+    ) -> Result<String, ExportMarkdownError> {
         let d = self.show(id).await?;
         let mut text = format!(
             "# {}\n\nRecording: {}\n\n",
@@ -371,7 +376,11 @@ impl LibraryService {
                 })
                 .unwrap_or("Unknown source");
             let speaker = match correction.speaker.as_ref() {
-                Some(parakeet_domain::corrections::SpeakerOverride::Profile(id)) => id.as_str(),
+                Some(parakeet_domain::corrections::SpeakerOverride::Profile(id)) => people
+                    .iter()
+                    .find(|p| p.id == *id)
+                    .map(|p| p.name.as_str())
+                    .unwrap_or("Removed person"),
                 _ => source,
             };
             let time = segment

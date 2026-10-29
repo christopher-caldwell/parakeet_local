@@ -2512,3 +2512,20 @@ async fn meeting_without_a_verified_asr_model_records_audio_and_reports_the_skip
     assert!(store.detail(&report.recording_id).await.unwrap().is_some());
     assert!(engine.calls.lock().unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn concurrent_preference_changes_both_survive() {
+    use parakeet_application::settings::AudioSettingsService;
+    let (_tmp, store) = database().await;
+    let store = std::sync::Arc::new(store);
+    let service = AudioSettingsService::new(store.clone(), store);
+    let (a, b) = tokio::join!(
+        service.update(|p| p.skipped_voices.push("voice".into())),
+        service.update(|p| p.system_audio = true),
+    );
+    a.unwrap();
+    b.unwrap();
+    let saved = service.get().await.unwrap();
+    assert_eq!(saved.skipped_voices, vec!["voice".to_owned()]);
+    assert!(saved.system_audio);
+}

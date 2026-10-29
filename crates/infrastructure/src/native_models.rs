@@ -15,6 +15,23 @@ pub struct NemotronJob<'a> {
     pub executable: &'a std::path::Path,
     pub control: &'a parakeet_application::processing_control::ProcessingControl,
 }
+/// This job's derived PCM and request files, removed however the job ends (success, error or
+/// cancellation). Original sources and raw model evidence are never inside it.
+struct JobScratch(std::path::PathBuf);
+impl JobScratch {
+    fn create(path: std::path::PathBuf) -> Result<Self, CapabilityError> {
+        std::fs::create_dir_all(&path).map_err(CapabilityError::new)?;
+        Ok(Self(path))
+    }
+}
+impl Drop for JobScratch {
+    fn drop(&mut self) {
+        for name in ["audio.f32", "speech.f32", "request.json"] {
+            let _ = std::fs::remove_file(self.0.join(name));
+        }
+        let _ = std::fs::remove_dir(&self.0);
+    }
+}
 pub fn nemotron(job: NemotronJob<'_>) -> Result<EngineOutput, CapabilityError> {
     let NemotronJob {
         runtime,
@@ -28,8 +45,8 @@ pub fn nemotron(job: NemotronJob<'_>) -> Result<EngineOutput, CapabilityError> {
         control,
     } = job;
 
-    let scratch = models.root.join("work").join(&run.id);
-    std::fs::create_dir_all(&scratch).map_err(CapabilityError::new)?;
+    let job_scratch = JobScratch::create(models.root.join("work").join(&run.id))?;
+    let scratch = job_scratch.0.clone();
     let pcm = scratch.join("audio.f32");
     use parakeet_application::processing_control::ProcessingStage;
     control.check()?;
@@ -99,10 +116,7 @@ pub fn nemotron(job: NemotronJob<'_>) -> Result<EngineOutput, CapabilityError> {
         object.remove("intervals");
     }
     let metrics = json!({"wall_seconds":wall,"model_load_seconds":raw["model_load_seconds"],"decode_seconds":decode_seconds,"decode_storage":"streamed_f32_disk_v1","pcm_bytes":samples*4,"audio_seconds":audio_seconds,"real_time_factor":wall/audio_seconds,"helper_metrics":helper_metrics,"overlap_preserved":true,"timing_space":if track.meeting_offset_ms().is_some(){"meeting"}else{"track_local_only_in_raw"},"embedding_capability":false});
-    // Only this job's derived PCM scratch is removed. Original sources and raw model evidence remain intact.
-    let _ = std::fs::remove_file(&pcm);
-    let _ = std::fs::remove_file(&options);
-    let _ = std::fs::remove_dir(&scratch);
+    drop(job_scratch);
     Ok(EngineOutput {
         segments: vec![],
         intervals,
@@ -253,8 +267,8 @@ pub fn parakeet(job: ParakeetJob<'_>) -> Result<EngineOutput, CapabilityError> {
         executable,
         control,
     } = job;
-    let scratch = models.root.join("work").join(&run.id);
-    std::fs::create_dir_all(&scratch).map_err(CapabilityError::new)?;
+    let job_scratch = JobScratch::create(models.root.join("work").join(&run.id))?;
+    let scratch = job_scratch.0.clone();
     let pcm = scratch.join("speech.f32");
     let mut writer =
         std::io::BufWriter::new(std::fs::File::create(&pcm).map_err(CapabilityError::new)?);
@@ -371,10 +385,8 @@ pub fn parakeet(job: ParakeetJob<'_>) -> Result<EngineOutput, CapabilityError> {
         if let Some(object) = helper_metrics.as_object_mut() {
             object.remove("segments");
         }
-        let _ = std::fs::remove_file(&options);
     }
-    let _ = std::fs::remove_file(&pcm);
-    let _ = std::fs::remove_dir(&scratch);
+    drop(job_scratch);
     order_segments(&mut segments);
     control.publish(
         ProcessingStage::Finishing,

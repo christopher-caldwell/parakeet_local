@@ -57,20 +57,16 @@ impl Workbench {
     }
     /// Skipping is remembered, so people who will not come up again stop being offered.
     fn set_voices_skipped(&mut self, ids: Vec<String>, skipped: bool, cx: &mut Context<Self>) {
-        let list = &mut self.audio_preferences.skipped_voices;
-        for id in ids {
-            list.retain(|existing| *existing != id);
-            if skipped {
-                list.push(id);
-            }
-        }
-        let preferences = self.audio_preferences.clone();
-        let service = self.audio_settings.clone();
-        self.task(
+        self.change_preferences(
             "Saving voices to skip",
-            async move {
-                service.save(&preferences).await?;
-                Ok(Update::Message("Saved".into()))
+            "Saved",
+            move |p| {
+                for id in &ids {
+                    p.skipped_voices.retain(|existing| existing != id);
+                    if skipped {
+                        p.skipped_voices.push(id.clone());
+                    }
+                }
             },
             cx,
         );
@@ -631,19 +627,15 @@ impl Workbench {
                         .on_click(cx.listener(|this, _, _, cx| {
                             let Some(report) = this.calibration.clone() else { return };
                             let Some(policy) = report.policy.clone() else { return };
-                            let mut preferences = this.audio_preferences.clone();
-                            preferences.matching_policy = Some(SavedMatchingPolicy {
+                            let saved = SavedMatchingPolicy {
                                 policy,
                                 saved_at: now(),
                                 provenance: report,
-                            });
-                            let service = this.audio_settings.clone();
-                            this.task(
+                            };
+                            this.change_preferences(
                                 "Saving calibrated criteria",
-                                async move {
-                                    service.save(&preferences).await?;
-                                    Ok(Update::PolicyAdopted(preferences))
-                                },
+                                "Calibrated criteria saved; suggestions stay opt-in and are never confirmed names",
+                                move |p| p.matching_policy = Some(saved.clone()),
                                 cx,
                             );
                         })),

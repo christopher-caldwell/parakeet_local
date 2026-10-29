@@ -540,15 +540,11 @@ impl Workbench {
                 )
                 .disabled(recording || self.dictation_stop.is_some())
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    this.audio_preferences.microphone_uid = Some(uid.clone());
-                    let preferences = this.audio_preferences.clone();
-                    let service = this.audio_settings.clone();
-                    this.task(
+                    let uid = uid.clone();
+                    this.change_preferences(
                         "Saving explicit microphone",
-                        async move {
-                            service.save(&preferences).await?;
-                            Ok(Update::Message("Selected microphone saved".into()))
-                        },
+                        "Selected microphone saved",
+                        move |p| p.microphone_uid = Some(uid.clone()),
                         cx,
                     );
                 }))
@@ -578,18 +574,16 @@ impl Workbench {
                     )
                     .disabled(busy)
                     .on_click(cx.listener(|this, _, _, cx| {
-                        this.audio_preferences.transcribe_meetings_after_stop =
-                            !this.audio_preferences.transcribe_meetings_after_stop;
-                        if !this.audio_preferences.transcribe_meetings_after_stop {
-                            this.audio_preferences.analyze_meetings_after_stop = false;
-                        }
-                        let preferences = this.audio_preferences.clone();
-                        let service = this.audio_settings.clone();
-                        this.task(
+                        let on = !this.audio_preferences.transcribe_meetings_after_stop;
+                        this.change_preferences(
                             "Saving meeting transcription preference",
-                            async move {
-                                service.save(&preferences).await?;
-                                Ok(Update::Message("Meeting transcription preference saved".into()))
+                            "Meeting transcription preference saved",
+                            move |p| {
+                                p.transcribe_meetings_after_stop = on;
+                                if !on {
+                                    p.analyze_meetings_after_stop = false;
+                                    p.suggest_speakers_after_stop = false;
+                                }
                             },
                             cx,
                         );
@@ -604,18 +598,17 @@ impl Workbench {
                     )
                     .disabled(busy)
                     .on_click(cx.listener(|this, _, _, cx| {
-                        this.audio_preferences.analyze_meetings_after_stop =
-                            !this.audio_preferences.analyze_meetings_after_stop;
-                        if this.audio_preferences.analyze_meetings_after_stop {
-                            this.audio_preferences.transcribe_meetings_after_stop = true;
-                        }
-                        let preferences = this.audio_preferences.clone();
-                        let service = this.audio_settings.clone();
-                        this.task(
+                        let on = !this.audio_preferences.analyze_meetings_after_stop;
+                        this.change_preferences(
                             "Saving speaker analysis preference",
-                            async move {
-                                service.save(&preferences).await?;
-                                Ok(Update::Message("Speaker analysis preference saved".into()))
+                            "Speaker analysis preference saved",
+                            move |p| {
+                                p.analyze_meetings_after_stop = on;
+                                if on {
+                                    p.transcribe_meetings_after_stop = true;
+                                } else {
+                                    p.suggest_speakers_after_stop = false;
+                                }
                             },
                             cx,
                         );
@@ -630,16 +623,11 @@ impl Workbench {
                     )
                     .disabled(busy || self.audio_preferences.matching_policy.is_none() || !analyze)
                     .on_click(cx.listener(|this, _, _, cx| {
-                        this.audio_preferences.suggest_speakers_after_stop =
-                            !this.audio_preferences.suggest_speakers_after_stop;
-                        let preferences = this.audio_preferences.clone();
-                        let service = this.audio_settings.clone();
-                        this.task(
+                        let on = !this.audio_preferences.suggest_speakers_after_stop;
+                        this.change_preferences(
                             "Saving suggestion preference",
-                            async move {
-                                service.save(&preferences).await?;
-                                Ok(Update::Message("Suggestion preference saved".into()))
-                            },
+                            "Suggestion preference saved",
+                            move |p| p.suggest_speakers_after_stop = on,
                             cx,
                         );
                     })),

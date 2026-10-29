@@ -105,7 +105,7 @@ pub fn run_trials(
 fn grid() -> Vec<MatchPolicy> {
     let mut grid = vec![];
     for score in (50..=95).step_by(5) {
-        for margin in (0..=30).step_by(5) {
+        for margin in (0..=50).step_by(5) {
             for examples in 1..=3 {
                 grid.push(MatchPolicy {
                     minimum_score: score as f64 / 100.,

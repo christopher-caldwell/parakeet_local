@@ -74,7 +74,7 @@ enum Update {
     ),
     IdentificationUndone(UndoIdentificationReport),
     Calibration(parakeet_domain::calibration::CalibrationReport),
-    PolicyAdopted(AudioPreferences),
+    Preferences(AudioPreferences, String),
     RefreshSelected,
     SegmentSaved(String),
     Models(Vec<ModelInfo>),
@@ -353,7 +353,7 @@ impl Workbench {
                                 return;
                             }
                             Update::Calibration(report) => { this.calibration = Some(report); }
-                            Update::PolicyAdopted(preferences) => { this.audio_preferences = preferences; this.status = "Calibrated criteria saved; suggestions stay opt-in and are never confirmed names".into(); }
+                            Update::Preferences(preferences, message) => { this.audio_preferences = preferences; this.status = message; }
                             Update::IdentificationUndone(report) => {
                                 if let Some(done) = this.train_done.iter_mut().find(|i| i.id == report.identification.id) { *done = report.identification.clone(); }
                                 this.status = format!("Reverted {} lines and removed {} examples", report.reverted_segments, report.removed_examples);
@@ -1443,6 +1443,24 @@ impl Workbench {
                 };
                 Ok(Update::Captured(result, warning))
             },
+            cx,
+        );
+    }
+    /// Applies a preference change on screen now and saves it against the stored preferences,
+    /// so a change made elsewhere meanwhile is not overwritten by this screen's copy.
+    fn change_preferences(
+        &mut self,
+        label: &str,
+        saved: &str,
+        change: impl Fn(&mut AudioPreferences) + Clone + Send + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        change(&mut self.audio_preferences);
+        let service = self.audio_settings.clone();
+        let message = saved.to_owned();
+        self.task(
+            label,
+            async move { Ok(Update::Preferences(service.update(change).await?, message)) },
             cx,
         );
     }
