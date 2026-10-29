@@ -98,6 +98,7 @@ async fn real_model_reuse_verification_and_idle_expiry() {
         track: track.clone(),
         start_ms: 0,
         end_ms: track.duration_ms.unwrap().min(10_000),
+        more_ranges: vec![],
         model: "speakrs-community-1-cpu".into(),
     };
     let ecold = engine.embed(&embedding).await.unwrap();
@@ -119,4 +120,102 @@ async fn real_model_reuse_verification_and_idle_expiry() {
         "{}",
         json!({"asr_cold":cold.metrics,"asr_warm":warm.metrics,"embedding_cold":ecold.metrics,"embedding_warm":ewarm.metrics,"asr_identical_text_and_times":true,"word_timing_repeat_stable":true,"switching_back_preserves_segment_output":true,"embedding_cosine_above_0_999999":true,"invalid_verification_refused_while_cached":true,"idle_expiry_tested_seconds":75,"both_models_reloaded_after_expiry":true})
     );
+}
+
+/// Explicit opt-in: public silence, noise and tone files must publish no text.
+#[tokio::test]
+#[ignore = "requires explicit local model probe root and public non-speech audio"]
+async fn silence_noise_and_tone_publish_no_text() {
+    let root = PathBuf::from(std::env::var_os("PARAKEET_MODEL_PROBE_ROOT").expect("model copies"));
+    let dir = PathBuf::from(std::env::var_os("PARAKEET_NONSPEECH_DIR").expect("public non-speech"));
+    let models = Arc::new(ModelFiles::new(root));
+    assert!(models.verify("whisper-base.en").await.unwrap().verified);
+    let engine = LocalSpeech::new(models, PathBuf::from("unused-native-helper"));
+    for name in ["silence.wav", "noise.wav", "tone.wav"] {
+        let bundle = MacParakeetArtifacts
+            .import_file(&dir.join(name))
+            .await
+            .unwrap();
+        let track = &bundle.tracks[0];
+        let request = RunProcessingInput {
+            recording_id: bundle.recording.id.clone(),
+            track_id: track.id.clone(),
+            model: "whisper-base.en".into(),
+            start_ms: 0,
+            duration_ms: track.duration_ms,
+            word_timestamps: false,
+        };
+        let run = ProcessingRun {
+            id: parakeet_application::new_id(),
+            recording_id: bundle.recording.id.clone(),
+            kind: "transcription".into(),
+            model: request.model.clone(),
+            model_revision: "probe".into(),
+            status: "running".into(),
+            started_at: "now".into(),
+            completed_at: None,
+            configuration: json!({}),
+            result: json!({}),
+            error: None,
+        };
+        let output = engine.process(&request, track, &run).await.unwrap();
+        println!(
+            "{name}: segments={} speech_seconds={}",
+            output.segments.len(),
+            output.metrics["speech_seconds"]
+        );
+        assert!(
+            output.segments.iter().all(|s| s.text.trim().is_empty()),
+            "{name} published text"
+        );
+    }
+}
+
+/// Explicit opt-in: public meeting speech must still be transcribed after silence removal.
+#[tokio::test]
+#[ignore = "requires explicit local model probe root and public speech audio"]
+async fn public_speech_survives_speech_chunking() {
+    let root = PathBuf::from(std::env::var_os("PARAKEET_MODEL_PROBE_ROOT").expect("model copies"));
+    let audio =
+        PathBuf::from(std::env::var_os("PARAKEET_MODEL_PROBE_AUDIO").expect("public audio"));
+    let models = Arc::new(ModelFiles::new(root));
+    assert!(models.verify("whisper-base.en").await.unwrap().verified);
+    let engine = LocalSpeech::new(models, PathBuf::from("unused-native-helper"));
+    let bundle = MacParakeetArtifacts.import_file(&audio).await.unwrap();
+    let track = &bundle.tracks[0];
+    let request = RunProcessingInput {
+        recording_id: bundle.recording.id.clone(),
+        track_id: track.id.clone(),
+        model: "whisper-base.en".into(),
+        start_ms: 0,
+        duration_ms: Some(track.duration_ms.unwrap().min(120_000)),
+        word_timestamps: false,
+    };
+    let run = ProcessingRun {
+        id: parakeet_application::new_id(),
+        recording_id: bundle.recording.id.clone(),
+        kind: "transcription".into(),
+        model: request.model.clone(),
+        model_revision: "probe".into(),
+        status: "running".into(),
+        started_at: "now".into(),
+        completed_at: None,
+        configuration: json!({}),
+        result: json!({}),
+        error: None,
+    };
+    let output = engine.process(&request, track, &run).await.unwrap();
+    let words: usize = output
+        .segments
+        .iter()
+        .map(|s| s.text.split_whitespace().count())
+        .sum();
+    println!(
+        "audio={}s speech={}s chunks={} words={words} rtf={}",
+        output.metrics["audio_seconds"],
+        output.metrics["speech_seconds"],
+        output.metrics["inference_chunks"],
+        output.metrics["real_time_factor"]
+    );
+    assert!(words > 100, "speech recall collapsed");
 }

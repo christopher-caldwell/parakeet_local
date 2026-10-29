@@ -10,7 +10,7 @@ for option in "$@"; do
     *) echo "Usage: scripts/build-app [--release] [--performance]" >&2; exit 2 ;;
   esac
 done
-scripts/cargo build -p parakeet-cli -p parakeet-desktop $build_release $build_features
+scripts/cargo build --quiet -p parakeet-cli -p parakeet-desktop $build_release $build_features
 scripts/build-native
 scripts/build-model-runtime
 bundle='target/Parakeet Local.app'
@@ -49,4 +49,4 @@ for item in [bundle, *bundle.rglob('*')]:
         if attribute in attributes:
             subprocess.run(['/usr/bin/xattr', '-d', attribute, str(item)], check=True)
 PY
-codesign --force --deep --sign - "$bundle"
+codesign --force --deep --sign - "$bundle" 2>/dev/null

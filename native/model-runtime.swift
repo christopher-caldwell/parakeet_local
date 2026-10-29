@@ -7,6 +7,7 @@ import Darwin
             guard CommandLine.arguments.count==2 else {throw NSError(domain:"ParakeetModel",code:1,userInfo:[NSLocalizedDescriptionKey:"Expected one JSON request file"])}
             let parent=getppid();if parent==1{exit(1)};let watchdog=DispatchSource.makeTimerSource(queue:DispatchQueue.global());watchdog.schedule(deadline:.now()+1,repeating:1);watchdog.setEventHandler{if getppid() != parent{exit(1)}};watchdog.resume();defer{watchdog.cancel()}
             let data=try Data(contentsOf:URL(fileURLWithPath:CommandLine.arguments[1]));let o=try JSONSerialization.jsonObject(with:data) as! [String:Any]
+            if (o["task"] as? String)=="asr" {let reply=try await runAsr(o);let output=try JSONSerialization.data(withJSONObject:reply,options:[.sortedKeys]);FileHandle.standardOutput.write(output);FileHandle.standardOutput.write(Data([10]));return}
             let directory=URL(fileURLWithPath:o["directory"] as! String);let audio=URL(fileURLWithPath:o["audio_f32"] as! String)
             let started=Date();var config=(o["preset"] as? String)=="offline" ? Nemotron3Config.offline : Nemotron3Config.fast128
             config.modelFileName="monolithic/v2/"+config.modelFileName

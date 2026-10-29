@@ -5,8 +5,10 @@ mod library;
 #[cfg(feature = "performance")]
 mod performance;
 mod reader;
+mod screens;
 mod shell;
 mod storage;
+mod train;
 mod ui;
 use gpui::{div, prelude::*, px, rgb, size, *};
 use gpui_base::input::{Input, InputEvent, InputState, Textarea, TextareaState};
@@ -55,33 +57,25 @@ enum Update {
     Detail(reader::Document),
     Profiles(Vec<SpeakerProfile>),
     Examples(String, Vec<VoiceExampleSummary>),
-    Candidates(String, Vec<EnrollmentCandidate>),
+    Candidates(
+        String,
+        u64,
+        Result<(Vec<EnrollmentCandidate>, Vec<ClusterIdentification>, bool), String>,
+    ),
+    Permissions(Result<serde_json::Value, String>),
+    DictationReady(Result<(serde_json::Value, serde_json::Value), String>),
+    Identified(Box<(ClusterIdentification, Vec<SpeakerProfile>, reader::Document)>),
+    IdentificationUndone(UndoIdentificationReport),
+    Calibration(parakeet_domain::calibration::CalibrationReport),
+    Preferences(AudioPreferences, String),
     RefreshSelected,
     SegmentSaved(String),
     Models(Vec<ModelInfo>),
-    DictationStopped(String),
+    DictationStopped(Result<(), String>),
     Dictations(Vec<DictationReceipt>),
     Message(String),
     Jobs(Vec<ProcessingRun>),
-    StoragePreview(
-        Result<
-            (
-                Arc<parakeet_application::storage::RetentionPreview>,
-                Vec<parakeet_application::cleanup::CleanupReview>,
-            ),
-            String,
-        >,
-    ),
-    CleanupReviews(
-        Result<
-            (
-                Vec<parakeet_application::cleanup::CleanupReview>,
-                Option<parakeet_application::cleanup::CleanupReview>,
-            ),
-            String,
-        >,
-    ),
-    StoragePolicySaved(Result<parakeet_application::storage::RetentionPolicySnapshot, String>),
+    StorageUsage(Result<Arc<parakeet_application::storage::StorageUsage>, String>),
     Recovered(
         parakeet_application::jobs::ProcessingRecoveryReport,
         Vec<ProcessingRun>,
@@ -90,10 +84,19 @@ enum Update {
     SuggestionReview(SpeakerSuggestionReview),
     Settings(Vec<gestures::Shortcut>, Vec<PromptProfile>),
     Devices(serde_json::Value),
-    Captured(Result<reader::Document, String>, Option<String>),
+    /// The meeting audio is saved; `true` when its transcription still has to be finished.
+    Captured(Result<reader::Document, String>, Option<String>, bool),
+    /// Transcription and speaker work after Stop ended for this recording.
+    MeetingFinished(String, Result<reader::Document, String>, Option<String>),
+    /// Work that finished with nothing to report.
+    Quiet,
+    /// A downloaded media file and its transcription (with a warning when it failed).
+    MediaImported(Result<(reader::Document, Option<String>), String>),
     MeetingFinalized(Result<reader::Document, String>, Option<String>),
     MeetingPlans(Vec<parakeet_application::meeting::MeetingFinalization>),
 }
+/// What the open recording's voice list was loaded for: its id, run statuses and analysis status.
+type VoicesKey = (String, Vec<(String, String)>, Option<String>);
 struct Workbench {
     #[cfg(feature = "performance")]
     performance: Option<performance::Recorder>,
@@ -113,12 +116,8 @@ struct Workbench {
     recovery: Arc<parakeet_application::jobs::ProcessingRecoveryService>,
     pending_jobs: Vec<ProcessingRun>,
     storage: Arc<parakeet_application::storage::StorageService>,
-    cleanup: Arc<parakeet_application::cleanup::CleanupService<SqliteStore, SqliteStore>>,
-    cleanup_reviews: Vec<parakeet_application::cleanup::CleanupReview>,
-    cleanup_selected: Option<parakeet_application::cleanup::CleanupReview>,
-    storage_preview: Option<Arc<parakeet_application::storage::RetentionPreview>>,
-    storage_policy: Option<parakeet_application::storage::RetentionPolicySnapshot>,
-    storage_days: Entity<InputState>,
+    archive: Arc<parakeet_application::audio_archive::AudioArchiveService>,
+    storage_usage: Option<Arc<parakeet_application::storage::StorageUsage>>,
     storage_busy: bool,
     storage_show_warnings: bool,
     job_control: Arc<parakeet_application::processing_control::ProcessingControlService>,
@@ -144,6 +143,9 @@ struct Workbench {
     dictation_overlay: Option<WindowHandle<DictationOverlay>>,
     dictation_state: Arc<Mutex<serde_json::Value>>,
     devices: serde_json::Value,
+    permissions: Option<serde_json::Value>,
+    permissions_error: Option<String>,
+    dictation_starting: bool,
     audio_preferences: AudioPreferences,
     focus: FocusHandle,
     main_window: AnyWindowHandle,
@@ -168,6 +170,9 @@ struct Workbench {
     show_media_import: bool,
     show_import_path: bool,
     show_status_details: bool,
+    show_ai_routes: bool,
+    /// Grid columns for card screens, from the window width.
+    columns: usize,
     last_error: Option<String>,
     confirm_action: Option<shell::ConfirmAction>,
     show_location_tools: bool,
@@ -178,7 +183,28 @@ struct Workbench {
     profiles: Vec<SpeakerProfile>,
     examples: Vec<VoiceExampleSummary>,
     candidates: Vec<EnrollmentCandidate>,
+    voices_generation: u64,
+    /// A YouTube download and transcription is running.
+    media_importing: bool,
+    /// When the current meeting capture started, for its elapsed time.
+    capture_started: Option<Instant>,
+    /// Unsaved text of transcript lines whose editor was closed, kept until saved or cleared.
+    drafts: std::collections::HashMap<String, String>,
+    /// Meetings whose transcript and speaker work after Stop is still running.
+    finishing_meetings: std::collections::BTreeSet<String>,
+    /// The recording and analysis state the voice list was last loaded for.
+    voices_key: Option<VoicesKey>,
+    voices_loading: bool,
+    analysis_active: bool,
+    voices_error: Option<String>,
+    calibration: Option<parakeet_domain::calibration::CalibrationReport>,
+    train_person: Option<String>,
+    train_hint: Option<String>,
+    train_heard: Option<train::HeardClips>,
+    train_done: Vec<ClusterIdentification>,
     recording_shortcut: bool,
+    /// Why the shortcut just pressed or chosen was not added.
+    shortcut_hint: Option<String>,
     model_list: Vec<ModelInfo>,
     shortcuts: Vec<gestures::Shortcut>,
     prompts: Vec<PromptProfile>,
@@ -202,12 +228,13 @@ struct Workbench {
     prompt_route: String,
     status: String,
     pending: usize,
+    /// Minutes-long processing tasks in flight; see `heavy_task`.
+    heavy: usize,
     playback_abort: Option<tokio::task::AbortHandle>,
     playback_generation: u64,
     playback_label: String,
     render_peak_ms: f64,
     render_count: u64,
-    segment_page: usize,
     requested_recording: Option<String>,
 }
 fn anonymous_label(s: &str) -> String {
@@ -244,17 +271,49 @@ impl Workbench {
         future: impl Future<Output = anyhow::Result<Update>> + Send + 'static,
         cx: &mut Context<Self>,
     ) {
-        self.launch(label, Box::pin(future), false, cx);
+        self.launch(label, Box::pin(future), false, false, false, cx);
+    }
+    /// Minutes-long processing of one recording (speaker detection, transcription, downloads).
+    /// It is shown as activity and blocks only controls that would start the same kind of work,
+    /// so naming voices or correcting lines elsewhere keeps working.
+    fn heavy_task(
+        &mut self,
+        label: &str,
+        future: impl Future<Output = anyhow::Result<Update>> + Send + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        self.launch(label, Box::pin(future), false, false, true, cx);
+    }
+    /// Short tasks and heavy processing together: what "something is working" means.
+    fn busy(&self) -> bool {
+        self.pending > 0 || self.heavy > 0
+    }
+    /// Long-lived work (dictation listener, meeting capture, archiving) that must not disable
+    /// unrelated controls. Controls that truly conflict check that activity's own state.
+    fn background_task(
+        &mut self,
+        label: &str,
+        future: impl Future<Output = anyhow::Result<Update>> + Send + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        self.launch(label, Box::pin(future), false, true, false, cx);
     }
     fn playback_task(
         &mut self,
         label: &str,
         future: impl Future<Output = anyhow::Result<Update>> + Send + 'static,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
+        if self.capture_stop.is_some() {
+            // Playback is a separate process that screen capture would record as system audio.
+            self.status = "Review playback is paused while a meeting is recording".into();
+            cx.notify();
+            return false;
+        }
         self.stop_playback(cx);
         self.playback_label = label.to_owned();
-        self.launch(label, Box::pin(future), true, cx);
+        self.launch(label, Box::pin(future), true, false, false, cx);
+        true
     }
     fn stop_playback(&mut self, cx: &mut Context<Self>) {
         if let Some(handle) = self.playback_abort.take() {
@@ -269,10 +328,20 @@ impl Workbench {
         label: &str,
         future: std::pin::Pin<Box<dyn Future<Output = anyhow::Result<Update>> + Send + 'static>>,
         playback: bool,
+        background: bool,
+        heavy: bool,
         cx: &mut Context<Self>,
     ) {
-        self.status = label.into();
-        self.pending += 1;
+        // Housekeeping with no label (periodic archiving) leaves the visible message alone.
+        if !label.is_empty() {
+            self.status = label.into();
+        }
+        let label = label.to_owned();
+        if heavy {
+            self.heavy += 1;
+        } else if !background {
+            self.pending += 1;
+        }
         self.monitor_jobs(cx);
         self.start_heartbeat(cx);
         cx.notify();
@@ -285,7 +354,11 @@ impl Workbench {
         cx.spawn(async move |this, cx| {
             let result = handle.await;
             let _ = this.update(cx, |this, cx| {
-                this.pending = this.pending.saturating_sub(1);
+                if heavy {
+                    this.heavy = this.heavy.saturating_sub(1);
+                } else if !background {
+                    this.pending = this.pending.saturating_sub(1);
+                }
                 if playback {
                     if playback_generation != this.playback_generation { cx.notify(); return; }
                     this.playback_abort = None;
@@ -305,14 +378,59 @@ impl Workbench {
                                     this.examples = examples;
                                 }
                             }
-                            Update::Candidates(recording,c) => {if this.requested_recording.as_deref()==Some(recording.as_str()){this.candidates = c;}},
-                            Update::StoragePreview(result) => {this.storage_busy=false;match result {Ok((preview,reviews))=>{this.storage_policy=Some(preview.saved_policy.clone());this.storage_preview=Some(preview);if let Some(selected)=&this.cleanup_selected {this.cleanup_selected=reviews.iter().find(|r|r.id==selected.id).cloned();}this.cleanup_reviews=reviews;},Err(error)=>{this.last_error=Some(error);this.status="Storage inspection failed; no files changed".into();cx.notify();return;}}},
-                            Update::CleanupReviews(result) => {this.storage_busy=false; match result {Ok((reviews,selected))=> {this.cleanup_reviews=reviews;this.cleanup_selected=selected;if let Some(r)=&this.cleanup_selected {this.status=format!("{} · {} files · no space reclaimed",storage::cleanup_state_label(r.state),r.files.len());if !r.errors.is_empty() {this.last_error=Some(r.errors.join("; "));}}else{this.status="No files qualified for this bounded review; no files moved".into();}},Err(error)=>{this.last_error=Some(error);this.status="Cleanup request failed; inspect saved reviews before retrying".into();}}cx.notify();return;},
-                            Update::StoragePolicySaved(result) => {this.storage_busy=false;match result {Ok(policy)=>{this.storage_policy=Some(policy);this.storage_preview=None;this.status="Preview policy saved. No files were removed; refresh to inspect it.".into();},Err(error)=>{this.last_error=Some(error);this.status="Preview policy could not be saved; refresh before retrying".into();}}cx.notify();return;},
+                            Update::Identified(done) => {
+                                let (identification, profiles, detail) = *done;
+                                this.status = format!("Named {} lines; {} voice examples saved", identification.segments.len(), identification.example_ids.len());
+                                this.train_done.push(identification);
+                                this.profiles = profiles;
+                                this.train_person = None;
+                                let name = this.person_name.clone();
+                                let _ = cx.update_window(this.main_window, move |_, window, cx| {
+                                    name.update(cx, |input, cx| input.set_value("", window, cx));
+                                });
+                                this.receive_detail(detail, cx);
+                                cx.notify();
+                                return;
+                            }
+                            Update::Calibration(report) => { this.calibration = Some(report); }
+                            Update::Preferences(preferences, message) => { this.audio_preferences = preferences; this.status = message; }
+                            Update::IdentificationUndone(report) => {
+                                if let Some(done) = this.train_done.iter_mut().find(|i| i.id == report.identification.id) { *done = report.identification.clone(); }
+                                this.status = format!("Reverted {} lines and removed {} examples", report.reverted_segments, report.removed_examples);
+                                if let Some(d)=&this.detail { let id=d.recording.id.clone(); let library=this.library.clone(); this.task("Reloading derived speaker attribution",async move{Ok(Update::detail(library.show(&id).await?))},cx); }
+                                cx.notify();
+                                return;
+                            }
+                            Update::Candidates(recording, generation, result) => {
+                                if this.requested_recording.as_deref() == Some(recording.as_str()) && generation == this.voices_generation {
+                                    this.voices_loading = false;
+                                    match result {
+                                        Ok((candidates, named, active)) => { this.analysis_active = active; this.candidates = candidates; this.train_done = named; this.voices_error = None; }
+                                        Err(error) => this.voices_error = Some(error),
+                                    }
+                                }
+                            }
+                            Update::Permissions(result) => match result {
+                                Ok(value) => { this.permissions = Some(value); this.permissions_error = None; }
+                                Err(error) => { this.permissions = None; this.permissions_error = Some(error); }
+                            },
+                            Update::DictationReady(result) => {
+                                this.dictation_starting = false;
+                                match result {
+                                    Ok((permissions, devices)) => {
+                                        this.permissions = Some(permissions); this.devices = devices;
+                                        if let Some(reason) = this.dictation_blocker() {
+                                            this.dictation_feedback(reason);
+                                        } else { this.begin_dictation(cx); }
+                                    }
+                                    Err(error) => this.dictation_feedback(format!("Could not check dictation readiness: {error}")),
+                                }
+                            }
+                            Update::StorageUsage(result) => {this.storage_busy=false;match result {Ok(usage)=>this.storage_usage=Some(usage),Err(error)=>{this.last_error=Some(error);this.status="Storage inspection failed; no files changed".into();cx.notify();return;}}},
                             Update::Jobs(jobs) => {this.pending_jobs = jobs;this.load_meeting_plans(cx);},
                             Update::MeetingPlans(plans) => this.meeting_plans = plans,
                             Update::MeetingFinalized(result, warning) => {
-                                match result {Ok(d)=>this.receive_detail(d),Err(e)=>{this.status=e.clone();this.last_error=Some(e);cx.notify();return;}}
+                                match result {Ok(d)=>this.receive_detail(d, cx),Err(e)=>{this.status=e.clone();this.last_error=Some(e);cx.notify();return;}}
                                 this.load_meeting_plans(cx);
                                 if let Some(warning)=warning {this.status=warning.clone();this.last_error=Some(warning);cx.notify();return;}
                             },
@@ -336,7 +454,7 @@ impl Workbench {
                             }
                             Update::RefreshSelected | Update::SegmentSaved(_) => {
                                 if let Update::SegmentSaved(id) = update
-                                    && this.editing_segment.as_deref() == Some(id.as_str()) { this.editing_segment = None; }
+                                    && this.editing_segment.as_deref() == Some(id.as_str()) { this.editing_segment = None; this.drafts.remove(&id); }
                                 if let Some(id) = this.requested_recording.clone() {
                                     let library = this.library.clone();
                                     this.task(
@@ -347,51 +465,97 @@ impl Workbench {
                                 }
                             }
                             Update::Devices(d) => this.devices = d,
-                            Update::Captured(result, warning) => {
+                            Update::Captured(result, warning, finalize) => {
+                                // The recorder is free as soon as the audio is saved; the
+                                // transcript is finished in the background.
                                 this.capture_stop = None;
+                                this.capture_started = None;
                                 match result {
                                     Ok(d) => {
-                                        this.editing_title=false;this.editing_segment=None;this.segment_page=0;
-                                        this.recording_tab=library::RecordingTab::Transcript;
-                                        this.show_transcript_find=false;this.transcript_query.clear();
-                                        this.cluster_review=None;this.selected_clusters.clear();this.candidates.clear();
-                                        this.suggestions.clear();this.suggestion_review=None;
-                                        this.reader_list.reset(0);
-                                        this.library_filter=library::LibraryFilter::All;
-                                        let find=this.transcript_find.clone();let search=this.search.clone();
-                                        let _=cx.update_window(this.main_window,move|_,window,cx|{
-                                            find.update(cx,|input,cx|input.set_value("",window,cx));
-                                            search.update(cx,|input,cx|input.set_value("",window,cx));
-                                        });
-                                        this.requested_recording = Some(d.recording.id.clone());
-                                        this.selected_track = d
-                                            .tracks
-                                            .iter()
-                                            .find(|t| t.available)
-                                            .map(|t| t.id.clone());
-                                        if let Some(row) =
-                                            this.records.iter_mut().find(|r| r.id == d.recording.id)
-                                        {
-                                            *row = d.recording.clone();
+                                        let id = d.recording.id.clone();
+                                        let title = d.recording.title().to_owned();
+                                        if finalize {
+                                            this.finish_meeting_after_stop(id, cx);
                                         }
-                                        this.receive_detail(d);
-                                        this.area = Area::Library;
-                                        this.reload(cx);
-                                        if let Some(warning)=warning {this.status=warning.clone();this.last_error=Some(warning);cx.notify();return;}
+                                        // Open it only from the Record screen, so a recording that
+                                        // ends while you work elsewhere doesn't take the screen.
+                                        if this.area == Area::Capture {
+                                            this.show_new_recording(d, cx);
+                                        } else {
+                                            this.reload(cx);
+                                        }
+                                        this.status = if finalize {
+                                            format!("“{title}” saved · transcribing in the background")
+                                        } else {
+                                            format!("“{title}” saved")
+                                        };
+                                        if let Some(warning)=warning {this.status=warning.clone();this.last_error=Some(warning);}
+                                        cx.notify();
+                                        return;
                                     }
                                     Err(e) => {
+                                        this.last_error = Some(e.clone());
                                         this.status = e;
                                         cx.notify();
                                         return;
                                     }
                                 }
                             }
+                            Update::MediaImported(outcome) => {
+                                this.media_importing = false;
+                                match outcome {
+                                    Ok((d, warning)) => {
+                                        let title = d.recording.title().to_owned();
+                                        this.show_media_import = false;
+                                        let url = this.media_url.clone();
+                                        let _ = cx.update_window(this.main_window, move |_, window, cx| {
+                                            url.update(cx, |input, cx| input.set_value("", window, cx));
+                                        });
+                                        if this.area == Area::Library {
+                                            this.show_new_recording(d, cx);
+                                        } else {
+                                            this.reload(cx);
+                                        }
+                                        this.status = format!("“{title}” imported");
+                                        if let Some(warning) = warning {
+                                            this.status = warning.clone();
+                                            this.last_error = Some(warning);
+                                        }
+                                    }
+                                    Err(error) => {
+                                        this.status = format!("Import failed: {error}");
+                                        this.last_error = Some(this.status.clone());
+                                    }
+                                }
+                                cx.notify();
+                                return;
+                            }
+                            Update::MeetingFinished(id, result, warning) => {
+                                this.finishing_meetings.remove(&id);
+                                let title = match result {
+                                    Ok(d) => {
+                                        let title = d.recording.title().to_owned();
+                                        this.receive_detail(d, cx);
+                                        title
+                                    }
+                                    Err(_) => "The meeting".into(),
+                                };
+                                this.reload(cx);
+                                this.load_meeting_plans(cx);
+                                this.status = format!("“{title}” is transcribed");
+                                if let Some(warning) = warning {
+                                    this.status = format!("“{title}”: {warning}");
+                                    this.last_error = Some(this.status.clone());
+                                }
+                                cx.notify();
+                                return;
+                            }
                             Update::CopyText(text) => {cx.write_to_clipboard(ClipboardItem::new_string(text));this.status="Transcript copied".into();cx.notify();return;},
                             Update::LibrarySearch(generation,r) => {if generation==this.search_generation {this.records=r;}},
                             Update::TitleSaved(d) => {if let Some(row)=this.records.iter_mut().find(|r|r.id==d.recording.id){*row=d.recording.clone();}
-                                if this.requested_recording.as_deref()==Some(d.recording.id.as_str()){this.editing_title=false;this.receive_detail(d);}},
+                                if this.requested_recording.as_deref()==Some(d.recording.id.as_str()){this.editing_title=false;this.receive_detail(d, cx);}},
                             Update::Imported(report) => {this.reload(cx);this.status=format!("{} imported · {} already in library{}",report.imported,report.existing,if report.warnings.is_empty(){String::new()}else{format!(" · Warnings: {}",report.warnings.join("; "))});cx.notify();return;},
-                            Update::Detail(d) => this.receive_detail(d),
+                            Update::Detail(d) => this.receive_detail(d, cx),
                             Update::Profiles(p) => {
                                 if this
                                     .selected_profile
@@ -408,16 +572,18 @@ impl Workbench {
                             }
                             Update::Models(m) => this.model_list = m,
                             Update::Dictations(receipts) => this.dictations = receipts,
-                            Update::DictationStopped(message) => {
+                            Update::DictationStopped(result) => {
                                 this.dictation_stop = None;
-                                if let Ok(mut state) = this.dictation_state.lock() {
-                                    *state = serde_json::json!({"state":"disabled"});
-                                }
                                 if let Some(overlay) = this.dictation_overlay.take() {
-                                    let _ =
-                                        overlay.update(cx, |_, window, _| window.remove_window());
+                                    let _ = overlay.update(cx, |_, window, _| window.remove_window());
                                 }
-                                this.status = message;
+                                match result {
+                                    Ok(()) => {
+                                        if let Ok(mut state) = this.dictation_state.lock() { state["state"] = serde_json::json!("disabled"); state.as_object_mut().map(|o| o.remove("message")); }
+                                        this.status = "Dictation is off".into();
+                                    }
+                                    Err(error) => this.dictation_feedback(error),
+                                }
                                 cx.notify();
                                 return;
                             }
@@ -425,13 +591,17 @@ impl Workbench {
                                 this.shortcuts = s;
                                 this.prompts = p;
                             }
+                            Update::Quiet => {}
                             Update::Message(m) => {
                                 this.status = m;
                                 cx.notify();
                                 return;
                             }
                         }
-                        this.status = "Ready".into();
+                        // A message an update just set, or another task's, stays visible.
+                        if this.status == label {
+                            this.status = "Ready".into();
+                        }
                     }
                     Ok(Err(e)) => {if e.chain().any(|cause|matches!(cause.downcast_ref::<ProcessingError>(),Some(ProcessingError::Cancelled(_)))){this.status="Processing cancelled. Source audio and saved chunks are retained.".into();}else{this.status=format!("Failed: {e:#}");this.last_error=Some(this.status.clone());}},
                     Err(e) => {this.status=format!("Background task failed: {e}");this.last_error=Some(this.status.clone());},
@@ -472,10 +642,13 @@ impl Workbench {
         self.suggestions.clear();
         self.suggestion_review = None;
         self.candidates.clear();
+        self.voices_key = None;
+        self.analysis_active = false;
+        self.train_done.clear();
+        self.train_person = None;
         self.selected_track = None;
-        self.segment_page = 0;
         self.editing_title = false;
-        self.editing_segment = None;
+        self.close_editor(cx);
         self.recording_tab = library::RecordingTab::Transcript;
         self.transcript_query.clear();
         self.transcript_find
@@ -568,7 +741,7 @@ impl Workbench {
             duration_ms: None,
             word_timestamps,
         };
-        self.task(
+        self.heavy_task(
             "Processing locally; navigation remains available",
             async move {
                 service.run(request).await?;
@@ -600,6 +773,7 @@ impl Workbench {
 impl Render for Workbench {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let began = Instant::now();
+        self.columns = ui::column_count(f32::from(window.viewport_size().width) - 236.);
         let sidebar = self.sidebar(cx);
         let mut content = div()
             .id("area-content")
@@ -613,13 +787,13 @@ impl Render for Workbench {
                 content = self.library_view(window, cx).id("library-area");
             }
             Area::Speakers => {
-                content = content.child(section("Speakers", "Review anonymous voices, make corrections, and manage the examples you explicitly verified."));
+                content = content.child(section("People", "Everyone you have named, and how well their voices are recognized. To name the voices in a recording, open it in the Library and choose Name voices."));
                 content = content.child(
                     div().flex().flex_wrap().gap_2().children(
                         [
-                            (SpeakerMode::Profiles, "People and examples"),
-                            (SpeakerMode::Clusters, "Anonymous clusters"),
-                            (SpeakerMode::Comparisons, "Identity comparisons"),
+                            (SpeakerMode::Profiles, "People"),
+                            (SpeakerMode::Clusters, "Voice groups"),
+                            (SpeakerMode::Comparisons, "Match checks"),
                         ]
                         .into_iter()
                         .enumerate()
@@ -633,187 +807,128 @@ impl Render for Workbench {
                     ),
                 );
                 if self.speaker_mode == SpeakerMode::Profiles {
-                    content=content.child(div().flex().flex_col().gap_2().child(caption("PEOPLE & VERIFIED EXAMPLES")).child(caption("A name is confirmed only when you identify the voice. Predictions never become training examples automatically.")))
-     .child(div().flex().gap_2().child(field(&self.person_name).w(px(260.))).child(button("add-person","Create person").on_click(cx.listener(|this,_,_,cx|{let name=this.person_name.read(cx).value().to_string();let service=this.speakers.clone();this.task("Creating speaker profile",async move{service.create(&name).await?;Ok(Update::Profiles(service.profiles().await?))},cx);}))));
-                    content = content.child(
-                        button("refresh-people", "Refresh people and examples")
-                            .self_start()
-                            .on_click(cx.listener(|this, _, _, cx| this.refresh_profiles(cx))),
-                    );
-                    let mut people = div().flex().flex_wrap().gap_2();
-                    for p in &self.profiles {
-                        let id = p.id.clone();
-                        let name = p.name.clone();
-                        people = people.child(
-                            choice(
+                    content = content.child(group(
+                        "People",
+                        "A person is created when you name a voice in a recording, or here. Computer guesses are never saved as names on their own.",
+                    ));
+                    let tiles = self
+                        .profiles
+                        .iter()
+                        .map(|p| {
+                            let id = p.id.clone();
+                            let name = p.name.clone();
+                            tile(
                                 p.id.clone(),
                                 p.name.clone(),
+                                None,
                                 self.selected_profile.as_ref() == Some(&p.id),
                             )
-                            .on_click(cx.listener(
-                                move |this, _, window, cx| {
-                                    this.selected_profile = Some(id.clone());
-                                    this.examples.clear();
-                                    this.person_name.update(cx, |input, cx| {
-                                        input.set_value(name.clone(), window, cx)
-                                    });
-                                    this.load_examples(id.clone(), cx);
-                                    cx.notify();
-                                },
-                            )),
-                        );
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.selected_profile = Some(id.clone());
+                                this.examples.clear();
+                                this.person_name.update(cx, |input, cx| {
+                                    input.set_value(name.clone(), window, cx)
+                                });
+                                this.load_examples(id.clone(), cx);
+                                cx.notify();
+                            }))
+                            .into_any_element()
+                        })
+                        .collect();
+                    content = content.child(grid(self.columns * 2, tiles));
+                    if self.profiles.is_empty() {
+                        content = content.child(caption("Nobody named yet."));
                     }
-                    content = content.child(people);
+                    let typed = self.person_name.read(cx).value().trim().to_owned();
+                    let typed_exists = self
+                        .profiles
+                        .iter()
+                        .any(|p| p.name.trim().eq_ignore_ascii_case(&typed));
                     content = content.child(
-                        div()
-                            .flex()
-                            .gap_2()
-                            .child(
-                                button("rename-person", "Rename selected person")
-                                    .disabled(self.selected_profile.is_none())
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        if let Some(id) = this.selected_profile.clone() {
-                                            let name =
-                                                this.person_name.read(cx).value().to_string();
-                                            let service = this.speakers.clone();
-                                            this.task(
-                                                "Renaming person",
-                                                async move {
-                                                    service
-                                                        .rename(RenameSpeakerInput {
-                                                            id: id.clone(),
-                                                            name: name.clone(),
-                                                        })
-                                                        .await?;
-                                                    Ok(Update::Profiles(service.profiles().await?))
-                                                },
-                                                cx,
-                                            );
-                                        }
-                                    })),
-                            )
-                            .child(
-                                danger("delete-person", "Delete person…")
-                                    .disabled(self.selected_profile.is_none())
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        if let Some(id) = this.selected_profile.clone() {
-                                            this.confirm_action =
-                                                Some(shell::ConfirmAction::DeleteProfile(id));
-                                            cx.notify();
-                                        }
-                                    })),
-                            ),
-                    );
-                    for (index, candidate) in self.candidates.iter().enumerate() {
-                        let c = candidate.clone();
-                        content = content.child(
-                            button(
-                                ("candidate", index),
-                                format!(
-                                    "Prepare {} · {:.1}–{:.1}s",
-                                    anonymous_label(&candidate.anonymous_speaker),
-                                    candidate.local_start_ms as f64 / 1000.,
-                                    candidate.local_end_ms as f64 / 1000.
-                                ),
-                            )
-                            .on_click(cx.listener(
-                                move |this, _, window, cx| {
-                                    this.selected_track = Some(c.track_id.clone());
-                                    this.start.update(cx, |s, cx| {
-                                        s.set_value(c.local_start_ms.to_string(), window, cx)
-                                    });
-                                    this.end.update(cx, |s, cx| {
-                                        s.set_value(c.local_end_ms.to_string(), window, cx)
-                                    });
-                                    cx.notify();
-                                },
-                            )),
-                        );
-                    }
-                    if let Some(detail) = &self.detail {
-                        let source = self
-                            .selected_track
-                            .as_ref()
-                            .and_then(|id| detail.tracks.iter().find(|t| &t.id == id))
-                            .map(|t| format!("{:?}", t.kind))
-                            .unwrap_or_else(|| "No source selected".into());
-                        content = content
-                            .child(caption(format!(
-                                "Prepared audio: {} · {} · track-local milliseconds",
-                                detail.recording.title(),
-                                source
-                            )))
+                        panel()
+                            .child(caption(if self.selected_profile.is_some() {
+                                "Change the selected person's name, or add someone new."
+                            } else {
+                                "Add someone new."
+                            }))
+                            .child(field(&self.person_name).w(px(280.)))
+                            .when(typed_exists && self.selected_profile.is_none(), |panel| {
+                                panel.child(caption(format!(
+                                    "{typed} is already one of your people."
+                                )))
+                            })
                             .child(
                                 div()
                                     .flex()
                                     .flex_wrap()
-                                    .items_center()
                                     .gap_2()
-                                    .child(caption("Start ms"))
-                                    .child(field(&self.start).w(px(120.)))
-                                    .child(caption("End ms"))
-                                    .child(field(&self.end).w(px(120.))),
-                            );
-                    } else {
-                        content = content.child(caption(
-                            "Open a recording in the Library to prepare voice examples.",
-                        ));
-                    }
-                    content = content.child(
-                        button("play-enrollment", "Play prepared interval")
-                            .self_start()
-                            .disabled(self.detail.is_none() || self.selected_track.is_none())
-                            .on_click(cx.listener(|this, _, _, cx| this.play(cx))),
+                                    .child(
+                                        primary("add-person", "Add as new person")
+                                            .disabled(typed.is_empty() || typed_exists)
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                let name =
+                                                    this.person_name.read(cx).value().to_string();
+                                                let service = this.speakers.clone();
+                                                this.task(
+                                                    "Creating speaker profile",
+                                                    async move {
+                                                        service.create(&name).await?;
+                                                        Ok(Update::Profiles(
+                                                            service.profiles().await?,
+                                                        ))
+                                                    },
+                                                    cx,
+                                                );
+                                            })),
+                                    )
+                                    .child(
+                                        button("rename-person", "Rename selected")
+                                            .disabled(self.selected_profile.is_none())
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                if let Some(id) = this.selected_profile.clone() {
+                                                    let name = this
+                                                        .person_name
+                                                        .read(cx)
+                                                        .value()
+                                                        .to_string();
+                                                    let service = this.speakers.clone();
+                                                    this.task(
+                                                        "Renaming person",
+                                                        async move {
+                                                            service
+                                                                .rename(RenameSpeakerInput {
+                                                                    id: id.clone(),
+                                                                    name: name.clone(),
+                                                                })
+                                                                .await?;
+                                                            Ok(Update::Profiles(
+                                                                service.profiles().await?,
+                                                            ))
+                                                        },
+                                                        cx,
+                                                    );
+                                                }
+                                            })),
+                                    )
+                                    .child(
+                                        danger("delete-person", "Delete selected…")
+                                            .disabled(self.selected_profile.is_none())
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                if let Some(id) = this.selected_profile.clone() {
+                                                    this.confirm_action = Some(
+                                                        shell::ConfirmAction::DeleteProfile(id),
+                                                    );
+                                                    cx.notify();
+                                                }
+                                            })),
+                                    ),
+                            ),
                     );
-                    content = content.child(
-                        primary("enroll", "I verified this voice — enroll selected interval")
-                            .self_start()
-                            .disabled(
-                                self.detail.is_none()
-                                    || self.selected_track.is_none()
-                                    || self.selected_profile.is_none()
-                                    || self.pending > 0,
-                            )
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                let (Some(d), Some(track), Some(profile)) = (
-                                    &this.detail,
-                                    this.selected_track.clone(),
-                                    this.selected_profile.clone(),
-                                ) else {
-                                    this.status =
-                                        "Select a recording, source, and person first".into();
-                                    cx.notify();
-                                    return;
-                                };
-                                let (a, b) = match this.range(cx) {
-                                    Ok(r) => r,
-                                    Err(e) => {
-                                        this.status = e;
-                                        cx.notify();
-                                        return;
-                                    }
-                                };
-                                let service = this.speakers.clone();
-                                let profile_id = profile.clone();
-                                let input = EnrollSpeakerInput {
-                                    profile_id: profile,
-                                    recording_id: d.recording.id.clone(),
-                                    track_id: track,
-                                    start_ms: a,
-                                    end_ms: b,
-                                    confirmed: true,
-                                };
-                                this.task(
-                                    "Extracting local verified embedding",
-                                    async move {
-                                        service.enroll(input).await?;
-                                        let examples = service.examples(Some(&profile_id)).await?;
-                                        Ok(Update::Examples(profile_id, examples))
-                                    },
-                                    cx,
-                                );
-                            })),
-                    );
+                    content = content.child(group(
+                        "Recognition check",
+                        "Tests whether the app can tell your named people apart, using voices you have confirmed.",
+                    ));
+                    content = content.child(self.calibration_view(cx));
                     if self.selected_profile.is_some() {
                         content = content.child(caption(format!(
                             "{} verified voice {}",
@@ -887,19 +1002,56 @@ impl Render for Workbench {
                 content = content.child(self.storage_view(cx));
             }
             Area::Jobs => {
-                content=content.child(section("Background jobs","Review unfinished processing. Recovery preserves active work and original audio."))
-                    .child(button("refresh-jobs","Refresh pending jobs").self_start().on_click(cx.listener(|this,_,_,cx|{let service=this.recovery.clone();this.task("Reading pending jobs",async move{Ok(Update::Jobs(service.pending().await?))},cx); })))
-                    .child(button("recover-jobs","Recover abandoned processing jobs").self_start().on_click(cx.listener(|this,_,_,cx|{let service=this.recovery.clone();this.task("Recovering abandoned jobs",async move{let report=service.recover().await?;Ok(Update::Recovered(report,service.pending().await?))},cx); })))
-                    .child(caption(if self.pending_jobs.is_empty(){"No unfinished processing jobs. Failed or interrupted runs can be retried from their recording’s Processing tab.".into()}else{format!("{} unfinished jobs. Open a recording’s Processing tab to retry a settled failure.",self.pending_jobs.len())}));
-                content=content.child(section("Meeting transcripts", "Resume pending or failed final passes. Recover abandoned source jobs above before resuming an interrupted pass."));
+                content = content.child(section(
+                    "Background jobs",
+                    "Transcription and speaker work that has not finished. Your original audio is never touched.",
+                ));
+                content = content.child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .items_center()
+                        .gap_2()
+                        .child(button("refresh-jobs", "Refresh").on_click(cx.listener(
+                            |this, _, _, cx| {
+                                let service = this.recovery.clone();
+                                this.task(
+                                    "Reading pending jobs",
+                                    async move { Ok(Update::Jobs(service.pending().await?)) },
+                                    cx,
+                                );
+                            },
+                        )))
+                        .child(button("recover-jobs", "Recover abandoned jobs").on_click(
+                            cx.listener(|this, _, _, cx| {
+                                let service = this.recovery.clone();
+                                this.task(
+                                    "Recovering abandoned jobs",
+                                    async move {
+                                        let report = service.recover().await?;
+                                        Ok(Update::Recovered(report, service.pending().await?))
+                                    },
+                                    cx,
+                                );
+                            }),
+                        )),
+                );
+                content = content.child(caption(if self.pending_jobs.is_empty() {
+                    "Nothing is running or waiting. A failed or interrupted run can be retried from its recording's Processing tab.".into()
+                } else {
+                    format!("{} unfinished jobs. Open a recording's Processing tab to retry a settled failure.", self.pending_jobs.len())
+                }));
+                if !self.meeting_plans.is_empty() {
+                    content = content.child(group(
+                        "Meeting transcripts",
+                        "Resume pending or failed final passes. Recover abandoned jobs first if one was interrupted.",
+                    ));
+                }
                 for plan in &self.meeting_plans {
                     let id = plan.recording_id.clone();
                     content = content.child(
-                        div()
+                        panel()
                             .p_3()
-                            .bg(rgb(PANEL))
-                            .flex()
-                            .flex_col()
                             .gap_2()
                             .child(format!(
                                 "{} · {} · {}/{} sources",
@@ -930,569 +1082,115 @@ impl Render for Workbench {
                         .find(|r| r.id == run.recording_id)
                         .map(|r| r.title())
                         .unwrap_or(run.recording_id.as_str());
-                    content = content.child(div().p_3().bg(rgb(PANEL)).child(format!(
-                        "{} · {} · {} · started {} · {} · run {}",
-                        recording,
-                        run.kind,
-                        run.model,
-                        run.started_at,
-                        if run.configuration["ownership_protocol"]
-                            == parakeet_application::jobs::OWNERSHIP_PROTOCOL
-                        {
-                            "ownership-aware"
-                        } else {
-                            "older run: ownership unknown"
-                        },
-                        run.id
-                    )));
-                }
-            }
-            Area::Models => {
-                content = content.child(section("Local models","Choose separate models for transcription, speaker detection, and verified voice examples. Downloads are always explicit."));
-                if let Some(progress) = self.models.download_progress() {
-                    content = content.child(format!(
-                        "Downloading {} · file {}/{} · {:.1} / {} MB",
-                        progress.model,
-                        progress.file_index,
-                        progress.total_files,
-                        progress.downloaded_bytes as f64 / 1_000_000.,
-                        progress
-                            .total_bytes
-                            .map(|n| format!("{:.1}", n as f64 / 1_000_000.))
-                            .unwrap_or_else(|| "unknown".into())
-                    ));
-                }
-                for m in &self.model_list {
-                    let id = m.id.clone();
-                    let verify_id = m.id.clone();
-                    let select_id = m.id.clone();
-                    let embedding_id = m.id.clone();
-                    let remove_id = m.id.clone();
                     content = content.child(
                         div()
                             .p_3()
+                            .rounded_lg()
                             .bg(rgb(PANEL))
                             .flex()
                             .flex_col()
-                            .gap_2()
-                            .rounded_lg()
-                            .border_1()
-                            .border_color(rgb(BORDER))
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_wrap()
-                                    .items_center()
-                                    .gap_2()
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .text_size(px(15.))
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .child(ui::model_name(&m.id).to_owned()),
-                                    )
-                                    .child(pill(
-                                        if m.verified {
-                                            "Ready offline"
-                                        } else if m.installed {
-                                            "Needs verification"
-                                        } else {
-                                            "Not downloaded"
-                                        },
-                                        if m.verified { SUCCESS } else { MUTED },
-                                    )),
-                            )
-                            .child(caption(format!(
-                                "{} · {} · {}",
-                                m.id,
-                                m.category,
-                                m.bytes
-                                    .map(|b| format!("{:.0} MB", b as f64 / 1_000_000.))
-                                    .unwrap_or("Size not specified".into())
-                            )))
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_wrap()
-                                    .gap_2()
-                                    .when(m.detail["selected"] == true, |row| {
-                                        row.child(pill("Selected for processing", ACCENT))
-                                    })
-                                    .when(m.detail["selected_for_embeddings"] == true, |row| {
-                                        row.child(pill("Selected for voice examples", SUCCESS))
-                                    }),
-                            )
-                            .when(self.show_status_details, |row| {
-                                row.child(caption(format!(
-                                    "Revision {} · {}",
-                                    m.revision, m.license
+                            .gap_1()
+                            .child(format!(
+                                "{} · {} · started {}",
+                                recording, run.kind, run.started_at
+                            ))
+                            .when(self.show_status_details, |card| {
+                                card.child(caption(format!(
+                                    "{} · {} · run {}",
+                                    run.model,
+                                    if run.configuration["ownership_protocol"]
+                                        == parakeet_application::jobs::OWNERSHIP_PROTOCOL
+                                    {
+                                        "ownership-aware"
+                                    } else {
+                                        "older run: ownership unknown"
+                                    },
+                                    run.id
                                 )))
-                            })
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_wrap()
-                                    .gap_2()
-                                    .child(
-                                        primary(format!("select-{}", m.id), "Use model")
-                                            .disabled(
-                                                !m.verified
-                                                    || m.detail["selected"] == true
-                                                    || self.pending > 0,
-                                            )
-                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                let service = this.models.clone();
-                                                let id = select_id.clone();
-                                                this.task(
-                                                    "Selecting model",
-                                                    async move {
-                                                        service.select(&id).await?;
-                                                        Ok(Update::Models(service.list().await?))
-                                                    },
-                                                    cx,
-                                                );
-                                            })),
-                                    )
-                                    .when(m.detail["provides_voice_embeddings"] == true, |row| {
-                                        row.child(
-                                            button(
-                                                format!("embedding-{}", m.id),
-                                                "Use for voice examples",
-                                            )
-                                            .disabled(
-                                                !m.verified
-                                                    || m.detail["selected_for_embeddings"] == true
-                                                    || self.pending > 0,
-                                            )
-                                            .on_click(
-                                                cx.listener(move |this, _, _, cx| {
-                                                    let service = this.models.clone();
-                                                    let id = embedding_id.clone();
-                                                    this.task(
-                                                        "Selecting embedding model",
-                                                        async move {
-                                                            service.select_embedding(&id).await?;
-                                                            Ok(Update::Models(
-                                                                service.list().await?,
-                                                            ))
-                                                        },
-                                                        cx,
-                                                    );
-                                                }),
-                                            ),
-                                        )
-                                    })
-                                    .child(
-                                        danger(format!("remove-model-{}", m.id), "Remove…")
-                                            .disabled(!m.installed || self.pending > 0)
-                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                this.confirm_action =
-                                                    Some(shell::ConfirmAction::RemoveModel(
-                                                        remove_id.clone(),
-                                                    ));
-                                                cx.notify();
-                                            })),
-                                    )
-                                    .child(
-                                        button(format!("install-{}", m.id), "Download")
-                                            .disabled(m.installed || self.pending > 0)
-                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                let service = this.models.clone();
-                                                let id = id.clone();
-                                                this.task(
-                                                    "Downloading local model",
-                                                    async move {
-                                                        service.install(&id).await?;
-                                                        Ok(Update::Models(service.list().await?))
-                                                    },
-                                                    cx,
-                                                );
-                                            })),
-                                    )
-                                    .child(
-                                        button(format!("verify-{}", m.id), "Verify files")
-                                            .disabled(!m.installed || self.pending > 0)
-                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                let service = this.models.clone();
-                                                let id = verify_id.clone();
-                                                this.task(
-                                                    "Verifying model files",
-                                                    async move {
-                                                        service.verify(&id).await?;
-                                                        Ok(Update::Models(service.list().await?))
-                                                    },
-                                                    cx,
-                                                );
-                                            })),
-                                    ),
-                            ),
+                            }),
                     );
                 }
+            }
+            Area::Models => {
+                content = content.child(self.models_view(cx));
             }
             Area::Capture => {
-                content=content.child(section("Record a meeting","Choose your microphone and audio sources. Separate source recordings are saved for accurate review."));
-                let health = self.capture.status();
-                content = content.child(
-                    button("refresh-audio-devices", "Refresh inputs")
-                        .self_start()
-                        .on_click(cx.listener(|this, _, _, cx| this.navigate(Area::Capture, cx))),
-                );
-                content = content.child(choice("auto-final-transcription", if self.audio_preferences.transcribe_meetings_after_stop {"After Stop: transcribe locally (on)"} else {"After Stop: save audio only"},self.audio_preferences.transcribe_meetings_after_stop)
-                    .disabled(self.capture_stop.is_some()).on_click(cx.listener(|this,_,_,cx|{
-                        this.audio_preferences.transcribe_meetings_after_stop = !this.audio_preferences.transcribe_meetings_after_stop;
-                        if !this.audio_preferences.transcribe_meetings_after_stop { this.audio_preferences.analyze_meetings_after_stop=false; }
-                        let preferences=this.audio_preferences.clone();let service=this.audio_settings.clone();
-                        this.task("Saving meeting transcription preference",async move{service.save(&preferences).await?;Ok(Update::Message("Meeting transcription preference saved".into()))},cx);
-                    }))).child(caption("Uses the selected installed local ASR model. Audio is saved first; failed final transcription can be resumed."));
-                content=content.child(choice("auto-speaker-analysis",if self.audio_preferences.analyze_meetings_after_stop {"After Stop: prepare anonymous speakers (on)"}else{"After Stop: speaker analysis off"},self.audio_preferences.analyze_meetings_after_stop)
-                    .disabled(self.capture_stop.is_some()).on_click(cx.listener(|this,_,_,cx|{
-                        this.audio_preferences.analyze_meetings_after_stop = !this.audio_preferences.analyze_meetings_after_stop;
-                        if this.audio_preferences.analyze_meetings_after_stop {this.audio_preferences.transcribe_meetings_after_stop=true;}
-                        let preferences=this.audio_preferences.clone();let service=this.audio_settings.clone();
-                        this.task("Saving speaker analysis preference",async move{service.save(&preferences).await?;Ok(Update::Message("Speaker analysis preference saved".into()))},cx);
-                    }))).child(caption("Pins installed ASR and diarization models before capture. Prepares playable unknown voices; no identity comparison or enrollment."));
-                if self.devices["devices"]
-                    .as_array()
-                    .is_none_or(|devices| devices.is_empty())
-                {
-                    content = content.child(caption(if self.pending > 0 { "Checking available audio inputs…" } else { "No microphone inputs are available. Connect an input and refresh. System audio can be recorded separately." }));
-                }
-                if let Some(devices) = self.devices["devices"].as_array() {
-                    for (index, device) in devices.iter().enumerate() {
-                        let uid = device["uid"].as_str().unwrap_or_default().to_owned();
-                        let label = format!(
-                            "{}{}{}",
-                            if self.audio_preferences.microphone_uid.as_ref() == Some(&uid) {
-                                "● "
-                            } else {
-                                ""
-                            },
-                            device["name"].as_str().unwrap_or("Unknown input"),
-                            if device["is_default"] == true {
-                                " (macOS default)"
-                            } else {
-                                ""
-                            }
-                        );
-                        content = content.child(button(("device", index), label).on_click(
-                            cx.listener(move |this, _, _, cx| {
-                                this.audio_preferences.microphone_uid = Some(uid.clone());
-                                let preferences = this.audio_preferences.clone();
-                                let service = this.audio_settings.clone();
-                                this.task(
-                                    "Saving explicit microphone",
-                                    async move {
-                                        service.save(&preferences).await?;
-                                        Ok(Update::Message("Selected microphone saved".into()))
-                                    },
-                                    cx,
-                                );
-                            }),
-                        ));
-                    }
-                }
-                content = content
-                    .child(caption(format!("Selected microphone: {}",self.audio_preferences.microphone_uid.as_ref().and_then(|uid|self.devices["devices"].as_array().and_then(|devices|devices.iter().find(|d|d["uid"].as_str()==Some(uid.as_str())))).and_then(|d|d["name"].as_str()).unwrap_or("Choose an input above; a saved unavailable device will not be substituted silently"))))
-                    .when(self.show_status_details,|view|view.child(caption(format!("Selected input UID: {}",self.audio_preferences.microphone_uid.as_deref().unwrap_or("None")))))
-                    .child(
-                        div()
-                            .flex()
-                            .gap_2()
-                            .flex_wrap()
-                            .child(primary("record-both", "Microphone + system").disabled(self.capture_stop.is_some() || self.audio_preferences.microphone_uid.is_none()).on_click(
-                                cx.listener(|this, _, _, cx| this.start_capture(true, true, cx)),
-                            ))
-                            .child(button("record-system", "System audio only").disabled(self.capture_stop.is_some()).on_click(
-                                cx.listener(|this, _, _, cx| this.start_capture(false, true, cx)),
-                            ))
-                            .child(button("record-mic", "Microphone only").disabled(self.capture_stop.is_some() || self.audio_preferences.microphone_uid.is_none()).on_click(
-                                cx.listener(|this, _, _, cx| this.start_capture(true, false, cx)),
-                            ))
-                            .child(
-                                danger("stop-recording", "Stop & save").disabled(self.capture_stop.is_none() || health["state"] == "completed").on_click(cx.listener(
-                                    |this, _, _, cx| {
-                                        if let Some(stop) = &this.capture_stop {
-                                            stop.store(true, Ordering::SeqCst);
-                                            this.status = "Stopping and finalizing sources".into();
-                                            cx.notify();
-                                        }
-                                    },
-                                )),
-                            ),
-                    )
-                    .child(format!(
-                        "Capture state: {}",
-                        self.capture.status()["state"].as_str().unwrap_or("unknown")
-                    ));
-                if self.capture_stop.is_some() && health["state"] == "completed" {
-                    content = content.child(pill("Audio saved · finishing transcription", ACCENT));
-                }
-                if let Some(message) = health["message"].as_str() {
-                    content = content.child(format!("Capture warning: {message}"));
-                }
-                if let Some(uid) = health["effective_microphone_uid"].as_str() {
-                    content = content.child(format!("Actual effective microphone UID: {uid}"));
-                }
-                for source in ["microphone", "system"] {
-                    let h = &health[source];
-                    if !h.is_null() {
-                        content = content.child(format!(
-                            "{source}: {} · {} frames · {} Hz · peak {:.3}",
-                            if !matches!(
-                                health["state"].as_str(),
-                                Some(
-                                    "starting"
-                                        | "recording"
-                                        | "waiting_or_stalled"
-                                        | "source_failed"
-                                )
-                            ) {
-                                "not capturing"
-                            } else if (source == "microphone"
-                                && health["requested_microphone_uid"].is_null())
-                                || (source == "system" && health["requested_system_audio"] != true)
-                            {
-                                "not requested"
-                            } else if h["is_receiving"] == true {
-                                "receiving audio"
-                            } else if h["first_buffer_ready"] == true {
-                                "stalled — inspect source"
-                            } else {
-                                "waiting for first buffer"
-                            },
-                            h["written_frames"],
-                            h["sample_rate"],
-                            h["peak_amplitude"].as_f64().unwrap_or(0.)
-                        ));
-                    }
-                }
+                content = content.child(self.capture_view(cx));
             }
             Area::Dictation => {
-                content=content.child(section("Dictation","Hold any active shortcut to speak. Releasing it transcribes locally for the application where you started."))
-                    .child(quiet("recover-clipboard","Recover interrupted clipboard paste").self_start().on_click(cx.listener(|this,_,_,cx|{
-                    let service=this.insertion_recovery.clone();this.task("Recovering only Parakeet-owned clipboard transactions",async move{let report=service.recover().await?;Ok(Update::Message(format!("Restored {} interrupted paste(s); {} older snapshots discarded after clipboard changed",report.restored,report.discarded)))},cx);
-                })));
-                let live = self
-                    .dictation_state
-                    .lock()
-                    .ok()
-                    .map(|v| v.clone())
-                    .unwrap_or_default();
-                if let Some(message) = live["message"].as_str() {
-                    content = content.child(format!("Dictation error: {message}"));
-                }
-                if let Some(raw) = live["receipt"]["raw"].as_str().filter(|s| !s.is_empty()) {
-                    let text = raw.to_owned();
-                    content = content.child(format!("Latest raw speech: {raw}")).child(
-                        button("copy-live-dictation", "Copy latest raw text").on_click(
-                            cx.listener(move |_, _, _, cx| {
-                                cx.write_to_clipboard(ClipboardItem::new_string(text.clone()))
-                            }),
-                        ),
-                    );
-                }
-                content = content.child(
-                    button("refresh-dictations", "Refresh retained dictations")
-                        .self_start()
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            let service = this.dictation_history.clone();
-                            this.task(
-                                "Reading retained dictations",
-                                async move { Ok(Update::Dictations(service.list().await?)) },
-                                cx,
-                            );
-                        })),
-                );
-                for (index, receipt) in self.dictations.iter().take(10).enumerate() {
-                    let raw = receipt.raw.clone();
-                    content = content.child(
-                        div()
-                            .p_2()
-                            .bg(rgb(SIDEBAR))
-                            .child(format!(
-                                "{} · {} · {}",
-                                receipt.created_at, receipt.target.bundle_id, receipt.status
-                            ))
-                            .child(receipt.raw.clone())
-                            .when_some(receipt.insertion.clone(), |row, report| {
-                                row.child(format!(
-                                    "Insertion: {} · {} · clipboard {}",
-                                    report.method,
-                                    report.verification,
-                                    report.clipboard_status.as_deref().unwrap_or("untouched")
-                                ))
-                            })
-                            .when_some(receipt.failure.clone(), |row, error| row.child(error))
-                            .child(button(("copy-retained", index), "Copy raw text").on_click(
-                                cx.listener(move |_, _, _, cx| {
-                                    cx.write_to_clipboard(ClipboardItem::new_string(raw.clone()))
-                                }),
-                            )),
-                    );
-                }
-                content=content.child(div().text_xl().child("Simultaneous hold shortcuts")).child("Bindings persist across keyboards. Native event delivery requires Input Monitoring permission.");
-                content = content
-                    .child(format!(
-                        "Dictation state: {}",
-                        self.dictation_state
-                            .lock()
-                            .ok()
-                            .and_then(|v| v["state"].as_str().map(str::to_owned))
-                            .unwrap_or_else(|| "idle".into())
-                    ))
-                    .child(
-                        div()
-                            .flex()
-                            .gap_2()
-                            .child(
-                                primary("start-listening", "Enable dictation")
-                                    .disabled(self.dictation_stop.is_some())
-                                    .on_click(
-                                        cx.listener(|this, _, _, cx| this.start_dictation(cx)),
-                                    ),
-                            )
-                            .child(
-                                button("stop-listening", "Disable dictation")
-                                    .disabled(self.dictation_stop.is_none())
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        if let Some(stop) = this.dictation_stop.take() {
-                                            stop.store(true, Ordering::SeqCst);
-                                        }
-                                        cx.notify();
-                                    })),
-                            ),
-                    );
-                content = content.child(button("record-shortcut", "Record a shortcut").on_click(
-                    cx.listener(|this, _, _, cx| {
-                        this.recording_shortcut = true;
-                        this.status = "Press the shortcut; Escape cancels".into();
-                        cx.notify();
-                    }),
-                ));
-                for (index, binding) in self.shortcuts.iter().enumerate() {
-                    let toggle = binding.id.clone();
-                    let remove = binding.id.clone();
-                    content = content.child(
-                        div()
-                            .flex()
-                            .gap_2()
-                            .child(format!(
-                                "{} {:?} · {}",
-                                binding.key,
-                                binding.modifiers,
-                                if binding.enabled {
-                                    "active"
-                                } else {
-                                    "disabled"
-                                }
-                            ))
-                            .child(
-                                button(("toggle-binding", index), "Enable / disable").on_click(
-                                    cx.listener(move |this, _, _, cx| {
-                                        let mut bindings = this.shortcuts.clone();
-                                        if let Some(b) =
-                                            bindings.iter_mut().find(|b| b.id == toggle)
-                                        {
-                                            b.enabled = !b.enabled;
-                                        }
-                                        this.persist_shortcuts(bindings, cx);
-                                    }),
-                                ),
-                            )
-                            .child(button(("remove-binding", index), "Remove").on_click(
-                                cx.listener(move |this, _, _, cx| {
-                                    let bindings = this
-                                        .shortcuts
-                                        .iter()
-                                        .filter(|b| b.id != remove)
-                                        .cloned()
-                                        .collect();
-                                    this.persist_shortcuts(bindings, cx);
-                                }),
-                            )),
-                    );
-                }
-                content =
-                    content.child(div().flex().gap_2().child(field(&self.shortcut_key)).child(
-                        button("add-shortcut", "Add shortcut").on_click(cx.listener(
-                            |this, _, _, cx| {
-                                let key = this.shortcut_key.read(cx).value().to_string();
-                                let mut bindings = this.shortcuts.clone();
-                                bindings.push(gestures::Shortcut {
-                                    id: new_id(),
-                                    key,
-                                    modifiers: vec![],
-                                    enabled: true,
-                                });
-                                this.persist_shortcuts(bindings, cx);
-                            },
-                        )),
-                    ));
+                content = content.child(self.dictation_view(cx));
             }
             Area::Privacy => {
-                content=content.child(section("Privacy & application prompts","Transcription and speaker processing run locally. AI enhancement stays disabled until you authorize an exact route."))
-                    .child(div().p_4().rounded_lg().border_1().border_color(rgb(BORDER)).bg(rgb(PANEL)).child("Raw speech is always retained. A CLI may use a remote provider: authorize it only after reviewing the route and prompt."));
-                for (index, p) in self.prompts.iter().enumerate() {
-                    let profile = p.clone();
-                    let revoke = p.clone();
-                    content = content.child(
-                        div()
-                            .flex()
-                            .gap_2()
-                            .child(
-                                button(
-                                    ("edit-prompt", index),
-                                    format!(
-                                        "Edit {} · {} · authorized {}",
-                                        p.application_name, p.route, p.authorized
-                                    ),
-                                )
-                                .on_click(cx.listener(
-                                    move |this, _, window, cx| {
-                                        this.profile_prompt.update(cx, |state, cx| {
-                                            state.set_value(profile.prompt.clone(), window, cx)
-                                        });
-                                        this.prompt_id = Some(profile.id.clone());
-                                        this.prompt_route = profile.route.clone();
-                                        for (entity, value) in [
-                                            (&this.profile_bundle, profile.bundle_id.clone()),
-                                            (&this.profile_name, profile.application_name.clone()),
-                                            (&this.profile_executable, profile.executable.clone()),
-                                            (
-                                                &this.profile_arguments,
-                                                serde_json::to_string(&profile.arguments)
-                                                    .unwrap_or_default(),
-                                            ),
-                                        ] {
-                                            entity
-                                                .update(cx, |s, cx| s.set_value(value, window, cx));
-                                        }
-                                        cx.notify();
-                                    },
-                                )),
-                            )
-                            .child(button(("revoke-prompt", index), "Revoke").on_click(
-                                cx.listener(move |this, _, _, cx| {
-                                    let mut p = revoke.clone();
-                                    p.authorized = false;
-                                    p.enabled = false;
-                                    let service = this.settings.clone();
-                                    this.task(
-                                        "Revoking AI route",
-                                        async move {
-                                            service.save_prompt(&p).await?;
-                                            Ok(Update::Settings(
-                                                service.shortcuts().await?,
-                                                service.prompts().await?,
-                                            ))
+                content = content.child(self.privacy_view(cx));
+                if self.show_ai_routes {
+                    for (index, p) in self.prompts.iter().enumerate() {
+                        let profile = p.clone();
+                        let revoke = p.clone();
+                        content = content.child(
+                            div()
+                                .flex()
+                                .gap_2()
+                                .child(
+                                    button(
+                                        ("edit-prompt", index),
+                                        format!(
+                                            "Edit {} · {} · authorized {}",
+                                            p.application_name, p.route, p.authorized
+                                        ),
+                                    )
+                                    .on_click(cx.listener(
+                                        move |this, _, window, cx| {
+                                            this.profile_prompt.update(cx, |state, cx| {
+                                                state.set_value(profile.prompt.clone(), window, cx)
+                                            });
+                                            this.prompt_id = Some(profile.id.clone());
+                                            this.prompt_route = profile.route.clone();
+                                            for (entity, value) in [
+                                                (&this.profile_bundle, profile.bundle_id.clone()),
+                                                (
+                                                    &this.profile_name,
+                                                    profile.application_name.clone(),
+                                                ),
+                                                (
+                                                    &this.profile_executable,
+                                                    profile.executable.clone(),
+                                                ),
+                                                (
+                                                    &this.profile_arguments,
+                                                    serde_json::to_string(&profile.arguments)
+                                                        .unwrap_or_default(),
+                                                ),
+                                            ] {
+                                                entity.update(cx, |s, cx| {
+                                                    s.set_value(value, window, cx)
+                                                });
+                                            }
+                                            cx.notify();
                                         },
-                                        cx,
-                                    );
-                                }),
-                            )),
-                    );
-                }
-                content=content.child(button("new-prompt","New application profile").on_click(cx.listener(|this,_,window,cx|{
+                                    )),
+                                )
+                                .child(button(("revoke-prompt", index), "Revoke").on_click(
+                                    cx.listener(move |this, _, _, cx| {
+                                        let mut p = revoke.clone();
+                                        p.authorized = false;
+                                        p.enabled = false;
+                                        let service = this.settings.clone();
+                                        this.task(
+                                            "Revoking AI route",
+                                            async move {
+                                                service.save_prompt(&p).await?;
+                                                Ok(Update::Settings(
+                                                    service.shortcuts().await?,
+                                                    service.prompts().await?,
+                                                ))
+                                            },
+                                            cx,
+                                        );
+                                    }),
+                                )),
+                        );
+                    }
+                    content=content.child(button("new-prompt","New application profile").on_click(cx.listener(|this,_,window,cx|{
                     this.profile_prompt.update(cx,|state,cx|state.set_value("",window,cx));
                     this.prompt_id=None;this.prompt_route="remote".into();
                     for entity in [&this.profile_bundle,&this.profile_name,&this.profile_executable] { entity.update(cx,|s,cx|s.set_value("",window,cx)); }
@@ -1508,6 +1206,7 @@ impl Render for Workbench {
                 .child(div().flex().gap_2()
                     .child(button("save-prompt-draft","Save disabled draft").on_click(cx.listener(|this,_,_,cx|this.save_prompt(false,cx))))
                     .child(button("authorize-prompt","Authorize this route & save").on_click(cx.listener(|this,_,_,cx|this.save_prompt(true,cx)))));
+                }
             }
         }
         if self.area != Area::Library {
@@ -1565,8 +1264,10 @@ impl Render for Workbench {
                         .update(cx, |input, cx| input.set_value("", window, cx));
                 }
                 this.editing_title = false;
-                this.editing_segment = None;
-                this.reset_reader_rows(false);
+                if this.editing_segment.is_some() {
+                    this.close_editor(cx);
+                    this.reset_reader_rows(false);
+                }
                 this.show_media_import = false;
                 this.show_import_path = false;
                 cx.notify();
@@ -1594,14 +1295,7 @@ impl Render for Workbench {
                         modifiers.push(name.into());
                     }
                 }
-                let mut bindings = this.shortcuts.clone();
-                bindings.push(gestures::Shortcut {
-                    id: new_id(),
-                    key: event.keystroke.key.clone(),
-                    modifiers,
-                    enabled: true,
-                });
-                this.persist_shortcuts(bindings, cx);
+                this.add_shortcut(event.keystroke.key.clone(), modifiers, cx);
             }))
             .size_full()
             .tab_group()
@@ -1659,13 +1353,22 @@ struct DictationOverlay {
     state: Arc<Mutex<serde_json::Value>>,
 }
 impl DictationOverlay {
+    /// Polls the shared dictation state, redrawing only when it changed.
     fn watch(&self, cx: &mut Context<Self>) {
         cx.spawn(async move |view, cx| {
+            let mut shown = serde_json::Value::Null;
             loop {
                 cx.background_executor()
                     .timer(std::time::Duration::from_millis(100))
                     .await;
-                if view.update(cx, |_, cx| cx.notify()).is_err() {
+                let result = view.update(cx, |view, cx| {
+                    let current = view.state.lock().map(|s| s.clone()).unwrap_or_default();
+                    if current != shown {
+                        shown = current;
+                        cx.notify();
+                    }
+                });
+                if result.is_err() {
                     break;
                 }
             }
@@ -1752,6 +1455,30 @@ impl Workbench {
             cx,
         );
     }
+    /// Adds a dictation shortcut after checking it here, so a key that would take over typing or
+    /// clash with another shortcut is explained instead of failing the save.
+    fn add_shortcut(&mut self, key: String, modifiers: Vec<String>, cx: &mut Context<Self>) {
+        let binding = gestures::Shortcut {
+            id: new_id(),
+            key: key.trim().to_lowercase(),
+            modifiers,
+            enabled: true,
+        };
+        self.shortcut_hint = if let Err(error) = binding.validate() {
+            Some(error.0)
+        } else if self.shortcuts.iter().any(|b| b.conflicts(&binding)) {
+            Some("You already have this shortcut.".into())
+        } else {
+            None
+        };
+        if self.shortcut_hint.is_some() {
+            cx.notify();
+            return;
+        }
+        let mut bindings = self.shortcuts.clone();
+        bindings.push(binding);
+        self.persist_shortcuts(bindings, cx);
+    }
     fn persist_shortcuts(&mut self, bindings: Vec<gestures::Shortcut>, cx: &mut Context<Self>) {
         let service = self.settings.clone();
         if let Some(stop) = self.dictation_stop.take() {
@@ -1788,36 +1515,54 @@ impl Workbench {
             None
         };
         let request = CaptureRecordingInput {
+            dictation: false,
             microphone_uid,
             system_audio,
-            title: format!("Meeting {}", now()),
+            title: chrono::Local::now()
+                .format("Meeting %b %-d, %Y at %-I:%M %p")
+                .to_string(),
             maximum_seconds: 7200,
             final_transcription: None,
         };
+        self.last_error = None;
         let transcribe = self.audio_preferences.transcribe_meetings_after_stop;
         let analyze_speakers = self.audio_preferences.analyze_meetings_after_stop;
+        let matching_policy = self.audio_preferences.after_stop_policy();
         let stop = Arc::new(AtomicBool::new(false));
         self.capture_stop = Some(stop.clone());
+        self.capture_started = Some(Instant::now());
         let meeting = self.meeting.clone();
         let lib = self.library.clone();
-        self.task(
-            "Recording — waiting for first buffers",
+        self.background_task(
+            "Meeting capture",
             async move {
-                let (id, warning) = match meeting
-                    .record(
+                let (id, warning, finalize) = match meeting
+                    .record_audio(
                         parakeet_application::meeting::RecordMeetingInput {
                             capture: request,
                             transcribe_after_stop: transcribe,
+                            skip_unavailable_model: true,
                             analyze_speakers,
+                            matching_policy,
                         },
                         stop,
                     )
                     .await
                 {
-                    Ok(report) => (Some(report.recording_id), None),
+                    Ok(report) => (
+                        Some(report.recording_id),
+                        report
+                            .transcription_skipped
+                            .map(|why| format!("Audio saved without a transcript: {why}"))
+                            .or(report.analysis_skipped.map(|why| {
+                                format!("Audio saved; speakers won't be detected: {why}")
+                            })),
+                        report.transcription_planned,
+                    ),
                     Err(error) => (
                         error.retained_recording_id().map(str::to_owned),
                         Some(error.to_string()),
+                        false,
                     ),
                 };
                 let result = match id {
@@ -1828,12 +1573,65 @@ impl Workbench {
                         .map_err(|e| e.to_string()),
                     None => Err(warning.clone().unwrap_or_else(|| "Recording failed".into())),
                 };
-                Ok(Update::Captured(result, warning))
+                Ok(Update::Captured(result, warning, finalize))
             },
             cx,
         );
     }
+    /// Applies a preference change on screen now and saves it against the stored preferences,
+    /// so a change made elsewhere meanwhile is not overwritten by this screen's copy.
+    fn change_preferences(
+        &mut self,
+        label: &str,
+        saved: &str,
+        change: impl Fn(&mut AudioPreferences) + Clone + Send + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        change(&mut self.audio_preferences);
+        let service = self.audio_settings.clone();
+        let message = saved.to_owned();
+        self.task(
+            label,
+            async move { Ok(Update::Preferences(service.update(change).await?, message)) },
+            cx,
+        );
+    }
+    fn dictation_feedback(&mut self, message: String) {
+        self.status = message.clone();
+        if let Ok(mut state) = self.dictation_state.lock() {
+            state["state"] = serde_json::json!("disabled");
+            state["message"] = serde_json::json!(message);
+        }
+    }
     fn start_dictation(&mut self, cx: &mut Context<Self>) {
+        if self.dictation_stop.is_some() || self.dictation_starting {
+            return;
+        }
+        if !self.shortcuts.iter().any(|s| s.enabled) {
+            self.dictation_feedback(
+                "Add and enable a shortcut below before turning on dictation.".into(),
+            );
+            cx.notify();
+            return;
+        }
+        self.dictation_starting = true;
+        let service = self.audio_inspection.clone();
+        self.task(
+            "Checking dictation permissions and microphone",
+            async move {
+                let result = async {
+                    let permissions = service.permissions().await?;
+                    let devices = service.devices().await?;
+                    Ok::<_, anyhow::Error>((permissions, devices))
+                }
+                .await
+                .map_err(|e| e.to_string());
+                Ok(Update::DictationReady(result))
+            },
+            cx,
+        );
+    }
+    fn begin_dictation(&mut self, cx: &mut Context<Self>) {
         if self.dictation_stop.is_some() {
             return;
         }
@@ -1877,50 +1675,119 @@ impl Workbench {
                 cx.notify();
             }
         }
-        self.task(
+        self.background_task(
             "Listening for configured hold shortcuts",
             async move {
                 let result = listener.run(uid, stop).await;
-                Ok(Update::DictationStopped(match result {
-                    Ok(()) => "Hold dictation disabled".into(),
-                    Err(e) => format!("Hold dictation stopped: {e}"),
-                }))
+                Ok(Update::DictationStopped(
+                    result.map_err(|e| format!("Dictation could not continue: {e}")),
+                ))
             },
             cx,
         );
     }
 }
 
-fn model_runtime_executable() -> PathBuf {
-    std::env::var_os("PARAKEET_MODEL_RUNTIME")
+/// A helper program shipped beside the app: `variable` overrides it, then the bundle sibling,
+/// then the development `native/` folder.
+fn bundled_executable(variable: &str, name: &str) -> PathBuf {
+    std::env::var_os(variable)
         .map(PathBuf::from)
         .unwrap_or_else(|| {
             let exe = std::env::current_exe().expect("current executable");
-            let sibling = exe.parent().unwrap().join("parakeet-model-runtime");
+            let dir = exe.parent().expect("executable directory");
+            let sibling = dir.join(name);
             if sibling.exists() {
                 sibling
             } else {
-                exe.parent()
-                    .unwrap()
-                    .parent()
-                    .unwrap()
-                    .join("native/parakeet-model-runtime")
+                dir.parent()
+                    .expect("target directory")
+                    .join("native")
+                    .join(name)
             }
         })
 }
-fn main() -> anyhow::Result<()> {
+/// Apps opened from Finder or the Dock get a minimal PATH without Homebrew, so FFmpeg, FFprobe
+/// and yt-dlp would not be found. Adds the standard tool folders that exist.
+fn extend_tool_path() {
+    let mut paths: Vec<PathBuf> = std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).collect())
+        .unwrap_or_default();
+    for dir in ["/opt/homebrew/bin", "/usr/local/bin"] {
+        let dir = PathBuf::from(dir);
+        if dir.is_dir() && !paths.contains(&dir) {
+            paths.push(dir);
+        }
+    }
+    if let Ok(joined) = std::env::join_paths(paths) {
+        // SAFETY: called first in `main`, before any other thread exists.
+        unsafe { std::env::set_var("PATH", joined) };
+    }
+}
+fn support_directory() -> PathBuf {
+    PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
+        .join("Library/Application Support/ParakeetLocal")
+}
+/// The library the app was last explicitly started with, so opening the app from Finder finds
+/// the same library. `PARAKEET_DATA_ROOT` always wins; nothing is created or migrated here.
+fn library_root() -> (PathBuf, bool) {
+    if let Some(root) = std::env::var_os("PARAKEET_DATA_ROOT") {
+        return (PathBuf::from(root), true);
+    }
+    let remembered = std::fs::read_to_string(support_directory().join("library-location"))
+        .ok()
+        .map(|text| PathBuf::from(text.trim()))
+        .filter(|path| path.is_absolute());
+    (remembered.unwrap_or_else(support_directory), false)
+}
+fn remember_library(root: &std::path::Path) {
+    let Ok(root) = root.canonicalize() else {
+        return;
+    };
+    let support = support_directory();
+    if std::fs::create_dir_all(&support).is_ok() {
+        let _ = std::fs::write(
+            support.join("library-location"),
+            root.to_string_lossy().as_bytes(),
+        );
+    }
+}
+/// A Finder launch has no terminal, so a startup failure must be shown, not only printed.
+fn show_startup_failure(error: &anyhow::Error) {
+    let message = format!("{error:#}")
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"");
+    let _ = std::process::Command::new("osascript")
+        .args([
+            "-e",
+            &format!(
+                "display alert \"Parakeet Local could not start\" message \"{message}\" as critical"
+            ),
+        ])
+        .status();
+}
+fn main() {
+    extend_tool_path();
+    if let Err(error) = run() {
+        eprintln!("{error:#}");
+        show_startup_failure(&error);
+        std::process::exit(1);
+    }
+}
+fn run() -> anyhow::Result<()> {
     #[cfg(feature = "performance")]
     let performance = performance::Recorder::from_env()?;
     #[cfg(not(feature = "performance"))]
     if std::env::var_os("PARAKEET_PERFORMANCE_DIR").is_some() {
         anyhow::bail!("Performance recording requires a build with --features performance");
     }
-    let root = std::env::var_os("PARAKEET_DATA_ROOT")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
-                .join("Library/Application Support/ParakeetLocal")
-        });
+    let (root, explicit) = library_root();
+    if !root.join("parakeet.db").exists() {
+        anyhow::bail!(
+            "No library at {}. Create it with `parakeet --data-root <folder> db create` and `db migrate`, then start the app once with `just run` so it remembers the folder.",
+            root.display()
+        );
+    }
     let runtime = Arc::new(
         tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
@@ -1928,9 +1795,11 @@ fn main() -> anyhow::Result<()> {
             .build()?,
     );
     let pool = runtime.block_on(parakeet_database::open_existing(&root.join("parakeet.db")))?;
+    if explicit {
+        remember_library(&root);
+    }
     let store = Arc::new(SqliteStore::new(pool));
     let storage = Arc::new(parakeet_application::storage::StorageService::new(
-        store.clone(),
         store.clone(),
         Arc::new(parakeet_infrastructure::storage::LocalStorageInspection {
             root: root.clone(),
@@ -1939,32 +1808,41 @@ fn main() -> anyhow::Result<()> {
     ));
     let source = Arc::new(MacParakeetArtifacts);
     let models = Arc::new(ModelFiles::new(root.join("models")));
-    let engine = Arc::new(LocalSpeech::new(models.clone(), model_runtime_executable()));
-    let guarded_audio = Arc::new(parakeet_infrastructure::cleanup::GuardedAudioWrites {
-        gate: parakeet_infrastructure::cleanup::StorageGate::for_database(
+    let engine = Arc::new(LocalSpeech::new(
+        models.clone(),
+        bundled_executable("PARAKEET_MODEL_RUNTIME", "parakeet-model-runtime"),
+    ));
+    let validated_audio = Arc::new(
+        parakeet_infrastructure::audio_writes::ValidatedAudioWrites {
+            library: store.clone(),
+            locations: store.clone(),
+        },
+    );
+    let ownership = Arc::new(
+        parakeet_infrastructure::jobs::FileProcessingOwnership::for_database(
             &root.join("parakeet.db"),
         )?,
-        library: store.clone(),
-        locations: store.clone(),
-    });
-    let cleanup = Arc::new(parakeet_application::cleanup::CleanupService::new(
-        store.clone(),
-        store.clone(),
-        Arc::new(parakeet_infrastructure::cleanup::LocalCleanupFiles::new(
-            root.clone(),
-            root.join("parakeet.db"),
-            models.clone(),
-        )?),
-    ));
+    );
+    let archive = Arc::new(
+        parakeet_application::audio_archive::AudioArchiveService::new(
+            store.clone(),
+            store.clone(),
+            store.clone(),
+            validated_audio.clone(),
+            Arc::new(parakeet_infrastructure::audio::LocalAudioIdentity),
+            Arc::new(parakeet_infrastructure::archive::FfmpegArchiver),
+            ownership.clone(),
+        ),
+    );
     let library = Arc::new(LibraryService::new(
         store.clone(),
-        guarded_audio.clone(),
+        validated_audio.clone(),
         source,
     ));
     let locations = Arc::new(
         parakeet_application::audio_locations::AudioLocationService::new(
             store.clone(),
-            guarded_audio.clone(),
+            validated_audio.clone(),
             Arc::new(parakeet_infrastructure::audio::LocalAudioIdentity),
         ),
     );
@@ -1981,11 +1859,6 @@ fn main() -> anyhow::Result<()> {
         engine.clone(),
         models.clone(),
     ));
-    let ownership = Arc::new(
-        parakeet_infrastructure::jobs::FileProcessingOwnership::for_database(
-            &root.join("parakeet.db"),
-        )?,
-    );
     let processing = Arc::new(ProcessingService::new(
         store.clone(),
         store.clone(),
@@ -2018,21 +1891,7 @@ fn main() -> anyhow::Result<()> {
             root: root.join("playback"),
         }),
     ));
-    let bridge_executable = std::env::var_os("PARAKEET_NATIVE_BRIDGE")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            let exe = std::env::current_exe().unwrap();
-            let sibling = exe.parent().unwrap().join("parakeet-bridge");
-            if sibling.exists() {
-                sibling
-            } else {
-                exe.parent()
-                    .unwrap()
-                    .parent()
-                    .unwrap()
-                    .join("native/parakeet-bridge")
-            }
-        });
+    let bridge_executable = bundled_executable("PARAKEET_NATIVE_BRIDGE", "parakeet-bridge");
     let native = Arc::new(parakeet_infrastructure::native::NativeBridge::new(
         bridge_executable,
         root.clone(),
@@ -2047,16 +1906,21 @@ fn main() -> anyhow::Result<()> {
         Err(e) => format!("Clipboard recovery needs attention: {e}"),
     };
     let audio_inspection = Arc::new(AudioInspectionService::new(native.clone()));
-    let capture = Arc::new(CaptureService::new(native.clone(), guarded_audio.clone()));
-    let analysis = Arc::new(parakeet_application::analysis::MeetingAnalysisService::new(
-        store.clone(),
-        store.clone(),
-        processing.clone(),
-        speakers.clone(),
-        models.clone(),
-        Arc::new(parakeet_infrastructure::audio::LocalAudioIdentity),
-        ownership.clone(),
-    ));
+    let capture = Arc::new(CaptureService::new(native.clone(), validated_audio.clone()));
+    let analysis = Arc::new(
+        parakeet_application::analysis::MeetingAnalysisService::new(
+            store.clone(),
+            store.clone(),
+            processing.clone(),
+            speakers.clone(),
+            models.clone(),
+            Arc::new(parakeet_infrastructure::audio::LocalAudioIdentity),
+            ownership.clone(),
+        )
+        .with_bleed_detection(Arc::new(
+            parakeet_infrastructure::bleed::LocalBleedDetection,
+        )),
+    );
     let meeting = Arc::new(
         parakeet_application::meeting::MeetingService::new(
             capture.clone(),
@@ -2101,7 +1965,7 @@ fn main() -> anyhow::Result<()> {
                     }),
                 root: root.join("media"),
             }),
-            guarded_audio.clone(),
+            validated_audio.clone(),
             store.clone(),
         )),
         processing.clone(),
@@ -2156,7 +2020,6 @@ fn main() -> anyhow::Result<()> {
                             state
                         });
                         let reader_editor_focus = edit_text.focus_handle(cx);
-                        let storage_days = input(window, cx, "30", "Days, 1–3650");
                         let shortcut_key = input(window, cx, "", "Home, F6, etc.");
                         let import_path =
                             input(window, cx, "", "Local audio file or meeting folder");
@@ -2196,12 +2059,8 @@ fn main() -> anyhow::Result<()> {
                             recovery,
                             pending_jobs: vec![],
                             storage,
-                            cleanup,
-                            cleanup_reviews: Vec::new(),
-                            cleanup_selected: None,
-                            storage_preview: None,
-                            storage_policy: None,
-                            storage_days,
+                            archive,
+                            storage_usage: None,
                             storage_busy: false,
                             storage_show_warnings: false,
                             job_control,
@@ -2227,6 +2086,9 @@ fn main() -> anyhow::Result<()> {
                             dictation_overlay: None,
                             dictation_state,
                             devices: serde_json::Value::Null,
+                            permissions: None,
+                            permissions_error: None,
+                            dictation_starting: false,
                             audio_preferences,
                             focus,
                             main_window: window.window_handle(),
@@ -2245,14 +2107,15 @@ fn main() -> anyhow::Result<()> {
                             transcript_find,
                             transcript_query: String::new(),
                             show_transcript_find: false,
-                            reader_list: ListState::new(0, ListAlignment::Top, px(300.))
-                                .measure_all(),
+                            reader_list: ListState::new(0, ListAlignment::Top, px(300.)),
                             reader_editor_focus,
                             reader_matches: Default::default(),
                             search_generation: 0,
                             show_media_import: false,
                             show_import_path: false,
                             show_status_details: false,
+                            show_ai_routes: false,
+                            columns: 1,
                             last_error: None,
                             confirm_action: None,
                             show_location_tools: false,
@@ -2263,7 +2126,22 @@ fn main() -> anyhow::Result<()> {
                             profiles,
                             examples: vec![],
                             candidates: vec![],
+                            voices_generation: 0,
+                            media_importing: false,
+                            capture_started: None,
+                            drafts: Default::default(),
+                            finishing_meetings: Default::default(),
+                            voices_key: None,
+                            voices_loading: false,
+                            analysis_active: false,
+                            voices_error: None,
+                            calibration: None,
+                            train_person: None,
+                            train_hint: None,
+                            train_heard: None,
+                            train_done: vec![],
                             recording_shortcut: false,
+                            shortcut_hint: None,
                             model_list: vec![],
                             shortcuts: vec![],
                             prompts: vec![],
@@ -2287,16 +2165,17 @@ fn main() -> anyhow::Result<()> {
                             prompt_route: "remote".into(),
                             status: startup_status,
                             pending: 0,
+                            heavy: 0,
                             playback_abort: None,
                             playback_generation: 0,
                             playback_label: String::new(),
                             render_peak_ms: 0.,
                             render_count: 0,
-                            segment_page: 0,
                             requested_recording: None,
                         });
                         view.update(cx, |this, cx| {
                             this.start_heartbeat(cx);
+                            this.keep_archiving(cx);
                             #[cfg(feature = "performance")]
                             this.start_performance_observer(window, cx);
                             this.subscribe_search(cx);
@@ -2414,6 +2293,7 @@ impl Workbench {
                         track_id,
                         start_ms,
                         end_ms,
+                        more_ranges: vec![],
                         policy,
                     })
                     .await?;
@@ -2707,7 +2587,7 @@ impl Workbench {
     fn cluster_panel(&self, cx: &mut Context<Self>) -> Div {
         use parakeet_application::cluster_edits::ClusterEdit;
         let mut panel=div().flex().flex_col().gap_2().mt_4().child(div().text_xl().child("Anonymous speaker clusters"))
-            .child("Split or merge voices within one source. This creates a derived result and does not enroll or name a person.")
+            .child("Split or merge voices within one source. This creates a derived result; it does not name a person or save voice examples.")
             .child(button("inspect-clusters","Inspect latest clusters for selected source").on_click(cx.listener(|this,_,_,cx|this.inspect_clusters(cx))));
         let Some(review) = self
             .cluster_review

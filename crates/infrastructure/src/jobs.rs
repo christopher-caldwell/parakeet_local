@@ -24,10 +24,13 @@ impl FileProcessingOwnership {
         })
     }
 }
-struct FileLease(File);
+struct FileLease(File, PathBuf);
 impl ProcessingLease for FileLease {}
 impl Drop for FileLease {
     fn drop(&mut self) {
+        // Unlink while still holding the lock; acquirers re-check the path's identity after
+        // locking, so a racing opener of the old inode retries instead of sharing ownership.
+        let _ = std::fs::remove_file(&self.1);
         let _ = fs2::FileExt::unlock(&self.0);
     }
 }
@@ -42,18 +45,34 @@ impl ProcessingOwnership for FileProcessingOwnership {
             .to_string();
         let directory = self.directory.clone();
         tokio::task::spawn_blocking(move || {
+            use std::os::unix::fs::MetadataExt;
             std::fs::create_dir_all(&directory).map_err(CapabilityError::new)?;
-            let file = std::fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create(true)
-                .truncate(false)
-                .open(directory.join(format!("{id}.lock")))
-                .map_err(CapabilityError::new)?;
-            match fs2::FileExt::try_lock_exclusive(&file) {
-                Ok(()) => Ok(Some(Box::new(FileLease(file)) as Box<dyn ProcessingLease>)),
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
-                Err(e) => Err(CapabilityError::new(e)),
+            let path = directory.join(format!("{id}.lock"));
+            loop {
+                let file = std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .create(true)
+                    .truncate(false)
+                    .open(&path)
+                    .map_err(CapabilityError::new)?;
+                match fs2::FileExt::try_lock_exclusive(&file) {
+                    Ok(()) => {
+                        let same = match (file.metadata(), std::fs::metadata(&path)) {
+                            (Ok(held), Ok(current)) => {
+                                held.ino() == current.ino() && held.dev() == current.dev()
+                            }
+                            _ => false,
+                        };
+                        if same {
+                            return Ok(Some(
+                                Box::new(FileLease(file, path)) as Box<dyn ProcessingLease>
+                            ));
+                        }
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => return Ok(None),
+                    Err(e) => return Err(CapabilityError::new(e)),
+                }
             }
         })
         .await
@@ -64,6 +83,22 @@ impl ProcessingOwnership for FileProcessingOwnership {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn released_leases_leave_no_lock_files_and_live_owner_still_blocks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let database = tmp.path().join("test.db");
+        std::fs::write(&database, b"fixture").unwrap();
+        let ownership = FileProcessingOwnership::for_database(&database).unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        let held = ownership.try_acquire(&id).await.unwrap().unwrap();
+        assert!(ownership.try_acquire(&id).await.unwrap().is_none());
+        drop(held);
+        for _ in 0..5 {
+            let lease = ownership.try_acquire(&id).await.unwrap().unwrap();
+            drop(lease);
+        }
+        assert_eq!(std::fs::read_dir(&ownership.directory).unwrap().count(), 0);
+    }
     #[tokio::test]
     async fn lease_holder_child() {
         let Some(database) = std::env::var_os("PARAKEET_TEST_LEASE_DATABASE") else {

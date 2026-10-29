@@ -69,21 +69,18 @@ impl ClusterEditingService {
             .iter()
             .find(|t| t.id == input.track_id)
             .ok_or_else(|| InspectClustersError::NotFound(input.track_id.clone()))?;
-        let run = detail
-            .runs
-            .iter()
-            .rev()
-            .find(|r| {
+        let run = match &input.run_id {
+            Some(id) => detail.runs.iter().find(|r| {
                 r.status == "completed"
                     && r.kind == "diarization"
                     && r.configuration["track"]["id"] == input.track_id
-                    && input.run_id.as_ref().is_none_or(|id| *id == r.id)
-            })
-            .ok_or_else(|| {
-                InspectClustersError::NotFound(
-                    "no completed diarization for this source/run".into(),
-                )
-            })?;
+                    && r.id == *id
+            }),
+            None => current_diarization_runs(&detail.runs).remove(input.track_id.as_str()),
+        }
+        .ok_or_else(|| {
+            InspectClustersError::NotFound("no completed diarization for this source/run".into())
+        })?;
         let intervals: Vec<SpeakerInterval> =
             serde_json::from_value(run.result["intervals"].clone())
                 .map_err(|e| ValidationError(e.to_string()))?;

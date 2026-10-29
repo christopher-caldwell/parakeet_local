@@ -1,10 +1,41 @@
 use super::*;
 use async_trait::async_trait;
 use parakeet_application::speakers::{
-    SpeakerQueries, SpeakerSuggestion, SpeakerWrites, SuggestionResolution,
+    ClusterIdentification, SpeakerQueries, SpeakerSuggestion, SpeakerWrites, SuggestionResolution,
 };
 #[async_trait]
 impl SpeakerQueries for SqliteStore {
+    async fn notes(&self, profile_id: &str) -> Result<String, PersistenceError> {
+        Ok(sqlx::query_file!("src/speakers/notes.sql", profile_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(PersistenceError::new)?
+            .map(|r| r.notes)
+            .unwrap_or_default())
+    }
+    async fn identification(
+        &self,
+        id: &str,
+    ) -> Result<Option<ClusterIdentification>, PersistenceError> {
+        sqlx::query_file!("src/speakers/identification.sql", id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(PersistenceError::new)?
+            .map(|r| decode(&r.data))
+            .transpose()
+    }
+    async fn identifications(
+        &self,
+        recording: Option<&str>,
+    ) -> Result<Vec<ClusterIdentification>, PersistenceError> {
+        sqlx::query_file!("src/speakers/identifications.sql", recording)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(PersistenceError::new)?
+            .iter()
+            .map(|r| decode(&r.data))
+            .collect()
+    }
     async fn suggestion(&self, id: &str) -> Result<Option<SpeakerSuggestion>, PersistenceError> {
         let row = sqlx::query_file!("src/speakers/suggestion.sql", id)
             .fetch_optional(&self.pool)
@@ -56,6 +87,18 @@ impl SpeakerQueries for SqliteStore {
             .map(|r| decode(&r.data))
             .collect()
     }
+    async fn recording_examples(
+        &self,
+        recording_id: &str,
+    ) -> Result<Vec<VoiceExample>, PersistenceError> {
+        sqlx::query_file!("src/speakers/recording_examples.sql", recording_id)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(PersistenceError::new)?
+            .iter()
+            .map(|r| decode(&r.data))
+            .collect()
+    }
     async fn segment(&self, id: &str) -> Result<Option<TranscriptSegment>, PersistenceError> {
         sqlx::query_file!("src/speakers/segment.sql", id)
             .fetch_optional(&self.pool)
@@ -99,6 +142,8 @@ impl SpeakerWrites for SqliteStore {
         expected_revision: usize,
         correction: Option<&Correction>,
         expected_correction_revision: usize,
+        admit: &[VoiceExample],
+        remove: &[String],
     ) -> Result<bool, PersistenceError> {
         let mut tx = self.pool.begin().await.map_err(PersistenceError::new)?;
         let data = encode(r)?;
@@ -135,8 +180,85 @@ impl SpeakerWrites for SqliteStore {
                 return Ok(false);
             }
         }
+        apply_learning(&mut tx, admit, remove).await?;
         tx.commit().await.map_err(PersistenceError::new)?;
         Ok(true)
+    }
+    async fn save_identification(
+        &self,
+        identification: &ClusterIdentification,
+        corrections: &[(Correction, usize)],
+        examples: &[VoiceExample],
+    ) -> Result<bool, PersistenceError> {
+        let mut tx = self.pool.begin().await.map_err(PersistenceError::new)?;
+        let data = encode(identification)?;
+        sqlx::query_file!(
+            "src/speakers/save_identification.sql",
+            identification.id,
+            identification.recording_id,
+            identification.profile_id,
+            data
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(PersistenceError::new)?;
+        for (c, expected) in corrections {
+            if !append_correction(&mut tx, c, *expected).await? {
+                return Ok(false);
+            }
+        }
+        for e in examples {
+            let data = encode(e)?;
+            sqlx::query_file!("src/speakers/enroll.sql", e.id, e.profile_id, data)
+                .execute(&mut *tx)
+                .await
+                .map_err(PersistenceError::new)?;
+        }
+        tx.commit().await.map_err(PersistenceError::new)?;
+        Ok(true)
+    }
+    async fn undo_identification(
+        &self,
+        identification: &ClusterIdentification,
+        corrections: &[(Correction, usize)],
+        example_ids: &[String],
+    ) -> Result<bool, PersistenceError> {
+        let mut tx = self.pool.begin().await.map_err(PersistenceError::new)?;
+        let data = encode(identification)?;
+        let updated = sqlx::query_file!(
+            "src/speakers/undo_identification.sql",
+            identification.id,
+            data
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(PersistenceError::new)?;
+        if updated.rows_affected() != 1 {
+            return Ok(false);
+        }
+        for (c, expected) in corrections {
+            if !append_correction(&mut tx, c, *expected).await? {
+                return Ok(false);
+            }
+        }
+        for id in example_ids {
+            sqlx::query_file!("src/speakers/remove_example.sql", id)
+                .execute(&mut *tx)
+                .await
+                .map_err(PersistenceError::new)?;
+        }
+        tx.commit().await.map_err(PersistenceError::new)?;
+        Ok(true)
+    }
+    async fn save_notes(&self, profile_id: &str, notes: &str) -> Result<bool, PersistenceError> {
+        Ok(
+            sqlx::query_file!("src/speakers/save_notes.sql", profile_id, notes)
+                .execute(&self.pool)
+                .await
+                .map_err(PersistenceError::new)?
+                .rows_affected()
+                > 0,
+        )
     }
     async fn create_profile(&self, p: &SpeakerProfile) -> Result<(), PersistenceError> {
         sqlx::query_file!("src/speakers/create.sql", p.id, p.name, p.created_at)
@@ -181,21 +303,16 @@ impl SpeakerWrites for SqliteStore {
         &self,
         c: &Correction,
         expected_revision: usize,
+        admit: &[VoiceExample],
+        remove: &[String],
     ) -> Result<bool, PersistenceError> {
-        let expected_revision = expected_revision as i64;
-        let data = encode(c)?;
-        let result = sqlx::query_file!(
-            "src/speakers/correct.sql",
-            c.id,
-            c.segment_id,
-            c.profile_id,
-            data,
-            expected_revision
-        )
-        .execute(&self.pool)
-        .await
-        .map_err(PersistenceError::new)?;
-        Ok(result.rows_affected() > 0)
+        let mut tx = self.pool.begin().await.map_err(PersistenceError::new)?;
+        if !append_correction(&mut tx, c, expected_revision).await? {
+            return Ok(false);
+        }
+        apply_learning(&mut tx, admit, remove).await?;
+        tx.commit().await.map_err(PersistenceError::new)?;
+        Ok(true)
     }
 }
 
@@ -216,4 +333,47 @@ impl SqliteStore {
             })
             .collect()
     }
+}
+
+async fn append_correction(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    c: &Correction,
+    expected: usize,
+) -> Result<bool, PersistenceError> {
+    let data = encode(c)?;
+    let expected = expected as i64;
+    let result = sqlx::query_file!(
+        "src/speakers/correct.sql",
+        c.id,
+        c.segment_id,
+        c.profile_id,
+        data,
+        expected
+    )
+    .execute(&mut **tx)
+    .await
+    .map_err(PersistenceError::new)?;
+    Ok(result.rows_affected() == 1)
+}
+
+/// Removes the examples a speaker decision contradicts, then inserts the ones it admits.
+async fn apply_learning(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    admit: &[VoiceExample],
+    remove: &[String],
+) -> Result<(), PersistenceError> {
+    for id in remove {
+        sqlx::query_file!("src/speakers/remove_example.sql", id)
+            .execute(&mut **tx)
+            .await
+            .map_err(PersistenceError::new)?;
+    }
+    for e in admit {
+        let data = encode(e)?;
+        sqlx::query_file!("src/speakers/enroll.sql", e.id, e.profile_id, data)
+            .execute(&mut **tx)
+            .await
+            .map_err(PersistenceError::new)?;
+    }
+    Ok(())
 }

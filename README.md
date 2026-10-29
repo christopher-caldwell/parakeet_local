@@ -2,7 +2,7 @@
 
 A personal Apple Silicon macOS transcription workbench: one Rust application core, a JSON CLI, and a native GPUI desktop. This is an initial working implementation, not a completed or human-validated MacParakeet replacement.
 
-The development library already contains ten imported MacParakeet records (six meetings and four media items), plus public evaluation fixtures. Original recordings remain referenced in place. No source files or source database are modified. Model weights, private transcripts, audio, embeddings, caches and test databases are excluded from Git.
+Imported recordings stay where they are and are referenced in place; their files are never modified. Importing from MacParakeet is not a goal. Model weights, private transcripts, audio, embeddings, caches and test databases are excluded from Git.
 
 ## Try the existing development library
 
@@ -14,16 +14,19 @@ target/debug/parakeet --data-root .local/app meetings list
 target/debug/parakeet --data-root .local/app models selected
 ```
 
-The app bundle is `target/Parakeet Local.app`. Use the launcher above to select the existing development library explicitly. Opening the bundle directly selects `~/Library/Application Support/ParakeetLocal`; desktop startup never creates or migrates a library silently.
+The app bundle is `target/Parakeet Local.app`. Use the launcher above to select the existing development library explicitly; the app remembers it, so opening the bundle from Finder or the Dock afterwards uses the same library (otherwise `~/Library/Application Support/ParakeetLocal`). It finds FFmpeg in the Homebrew folders even without a terminal, and shows startup problems in an alert. Desktop startup never creates or migrates a library silently.
 
 ## Build and initialize a separate library
+
+`just` lists every task (format, lint, test, build, release, native, run, dev, cli, sql, clean); each one calls the scripts in `scripts/`.
 
 Requirements: Apple Silicon, macOS 14+, Rust 1.99.1, macOS command-line developer tools, CMake, FFmpeg/FFprobe, and yt-dlp for requested YouTube operations. The current build works with Swift 5.8.1 and the macOS 13.3 SDK. `scripts/cargo` avoids an older Homebrew compiler taking precedence over the pinned rustup compiler.
 
 ```sh
-scripts/build-app
-scripts/cargo test --workspace
-scripts/cargo clippy --workspace --all-targets -- -D warnings
+just build     # app bundle (just release for the optimized one)
+just verify    # format check, clippy and tests
+just run       # launch the built bundle on .local/app
+just dev       # fast loop: rebuild and restart on Rust changes (bare binary; helpers cached)
 
 # Explicit provisioning, using an independent storage directory:
 target/debug/parakeet --data-root /path/to/new-library db create
@@ -43,7 +46,6 @@ All normal results are JSON envelopes (`schema_version: 1`, `ok`, `data` or `err
 target/debug/parakeet --data-root .local/app meetings discover
 target/debug/parakeet meetings import /path/to/audio-or-artifacts --dry-run
 target/debug/parakeet --data-root .local/app meetings import /path/to/artifacts
-target/debug/parakeet --data-root .local/app meetings import-source-db /path/to/macparakeet.db
 target/debug/parakeet --data-root .local/app meetings show RECORDING_ID
 target/debug/parakeet --data-root .local/app meetings tracks RECORDING_ID
 target/debug/parakeet --data-root .local/app meetings fingerprint RECORDING_ID --track TRACK_ID
@@ -61,17 +63,19 @@ target/debug/parakeet benchmark score-speakers reference.json prediction.json
 
 `meetings import --dry-run` inspects candidates without opening or creating a destination database. Mutating imports are additive and idempotent. Re-import does not refresh or overwrite local overrides. Processing creates new runs and retains old output/corrections. `transcribe-all` attempts every available authoritative source, preserves partial results, and reports failure if any source fails. Relinking is explicit and requires a matching saved content hash (or a still-readable unchanged original to establish one). Dry-run leaves saved locators untouched. Fingerprint legacy references before moving them; a missing source without an identity hash is refused. Native Library controls use the same operations. Playback and exports are deliberate side effects; exports are returned in JSON rather than silently writing arbitrary files.
 
-`meetings analyze RECORDING_ID` runs/resumes local ASR, diarization and clean voice preparation; `meetings analysis RECORDING_ID` inspects its saved receipt. The native Processing tab invokes the same workflow. Identity comparison requires all three explicit thresholds; guesses never enroll themselves. `capture record --analyze-speakers` and the default-off after-Stop preference request automatic anonymous analysis. See [integrated workflow and evidence](docs/meeting-analysis.md).
+`meetings analyze RECORDING_ID` runs/resumes local ASR, diarization and clean voice preparation; `meetings analysis RECORDING_ID` inspects its saved receipt. The native Processing tab invokes the same workflow. Identity comparison requires all three explicit thresholds; guesses never enroll themselves. `capture record --analyze-speakers` and the after-Stop preference (on by default; it also runs the echo check behind "Me") request automatic anonymous analysis. See [integrated workflow and evidence](docs/meeting-analysis.md).
 
 Models expose `list`, `install`, `verify`, `remove`, `selected`, `select`, and `select-embedding`. Explicit verification hashes against the pinned checksum catalog and updates a verification receipt. Ordinary readiness checks validate that receipt against file size/mtime; failed verification invalidates old receipts. Installation, inference and removal share a process/file lease and fail explicitly when busy.
 
 Speakers expose profile creation/rename/deletion, verified `enroll`, `examples`, `remove-example`, `candidates`, `suggest`, `suggestions`, `resolve-suggestion`, individual `assign`/`unknown`/`text`/`undo`, and `split-cluster`/`merge-clusters`/`undo-cluster-edit`. Run `speakers COMMAND --help` for inputs. Suggestions require explicit score, margin and sample-count policies, write inspectable receipts, and never enroll themselves. `resolve-suggestion --action accept --segment SEGMENT_ID` requires an explicit segment; undo is recorded separately. `speakers clusters RECORDING_ID --track TRACK_ID [--run RUN_ID]` inspects anonymous activity and safe previews. GPUI supports source-scoped split/merge and undo. Cluster edits derive new diarization results without changing raw predictions.
 
-`speakers review-suggestion ID` returns a saved comparison and its fully covered current transcript segments. GPUI also supports comparison creation, evidence playback, explicit confirmation/replacement, rejection and undo. No comparison decision becomes verified enrollment data.
+`speakers review-suggestion ID` returns a saved comparison and its fully covered current transcript segments. GPUI also supports comparison creation, evidence playback, explicit confirmation/replacement, rejection and undo.
 
-`jobs pending` and `jobs show RUN_ID` are read-only. `jobs cancel RUN_ID` durably requests cancellation; ownership remains active until the worker exits. CLI and native controls expose observed progress and preserve source audio/completed chunk evidence. See [control semantics and verification](docs/processing-control.md). `jobs recover` explicitly marks abandoned ownership-aware runs interrupted while preserving active/older unmanaged runs and original evidence. `jobs retry RUN_ID` creates a linked new speech run from a failed/interrupted request with the same pinned model revision. Compatible Whisper chunks are validated and reused; older/incompatible evidence and other engines restart the interval. See [chunk continuation](docs/chunk-resume.md). GPUI has a Processing jobs screen and retry controls in recent recording history. See [recovery semantics and evidence](docs/processing-recovery.md).
+Learning from your identifications: `speakers identify-cluster RECORDING --track T --run RUN --cluster C (--profile ID | --new-name NAME) --confirmed` names every line a cluster speaks alone and admits up to three clean turns you listened to (`--heard START-END`, repeatable) as removable voice examples; `speakers undo-identification ID` reverts it as one unit, and `speakers identifications` lists them. Confirming a suggestion or assigning a person to a clean segment admits an example the same way; model predictions and imported labels never do. `speakers imported-candidates MEETING` proposes clips for imported labels (claims only). `speakers calibrate [--adopt]` proposes matching criteria from verified examples (tuning versus held-out recordings), `capture settings --suggest-after-stop true` turns on after-Stop name suggestions with the adopted criteria, `speakers reembed` recomputes examples after an embedding model change, and `speakers history ID` / `speakers notes ID TEXT` show and set a person's notes, enrollment and recognition history. `capture request-permission KIND` is the only command that prompts for a macOS permission.
 
-`storage usage`, `storage policy` and `storage preview` inspect local file usage and conservative retention candidates. `storage preview --completed-scratch-days 30` is hypothetical; `storage set-policy --completed-scratch-days 30 --expected-revision N` saves only the preview threshold. Keep all is the default. No cleanup executor or automatic removal is enabled. Schema 4 requires explicit `db migrate`. See [scope, commands and protection rules](docs/storage.md).
+`jobs pending` and `jobs show RUN_ID` are read-only. `jobs cancel RUN_ID` durably requests cancellation; ownership remains active until the worker exits. CLI and native controls expose observed progress and preserve source audio. See [control semantics and verification](docs/processing-control.md). `jobs recover` explicitly marks abandoned ownership-aware runs interrupted while preserving active/older unmanaged runs and original evidence. `jobs retry RUN_ID` creates a linked new speech run from a failed/interrupted request with the same pinned model revision. A retried interval restarts from the beginning. GPUI has a Processing jobs screen and retry controls in recent recording history. See [recovery semantics and evidence](docs/processing-recovery.md).
+
+Raw captures older than seven days become verified lossless copies automatically at app start, or with `storage archive-audio` ([details](docs/storage.md)). `storage usage` reports local file usage without changing anything. See [scope and commands](docs/storage.md).
 
 `capture devices`, `permissions` and `recoverable` are inspections. `capture record` needs an explicit microphone UID and/or `--system`; `capture recover` is restricted to this application's own capture directories. `dictation listen` starts the configured native hold bindings. `dictation history` and `dictation show ID` expose retained results. `dictation audio-settings` without flags is read-only; `--microphone-uid UID`, `--clear-microphone` and `--system true|false` change only the requested preferences. Shortcut settings accept editable JSON through `shortcuts set FILE` and are also editable in GPUI. `meetings play-segment RECORDING_ID SEGMENT_ID` resolves playback from the shared timeline service.
 
@@ -93,4 +97,3 @@ The [native performance guide](docs/ui-performance.md) follows Smaller Talk's lo
 
 The [meeting workflow](docs/meeting-workflow.md) adds explicit automatic local transcription after Stop, durable per-source progress and resume. `meetings finalize ID` resumes saved work without repeating completed sources; `meetings pending-transcriptions` lists unfinished plans. CLI recording opts in with `capture record --transcribe`; `capture settings --transcribe-after-stop true` changes the desktop preference only.
 
-The [reviewed cleanup guide](docs/cleanup.md) covers concrete file reviews, reversible staging and no-overwrite restore through Storage or `storage cleanup`. Staging retains all bytes and frees no space; no automatic or permanent removal is enabled.

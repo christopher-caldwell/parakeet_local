@@ -1,4 +1,5 @@
-//! Durable, source-aware meeting analysis. This workflow never enrolls a voice.
+//! Durable, source-aware meeting analysis. Analysis only predicts; it never names a person or
+//! enrolls a voice. Examples come from the user's explicit identifications (`speakers`).
 use super::*;
 use crate::{
     audio_locations::AudioFileIdentityReader,
@@ -18,6 +19,9 @@ pub struct AnalysisRecipe {
     pub asr: AnalysisModel,
     pub diarization: AnalysisModel,
     pub embedding: Option<AnalysisModel>,
+    /// Calibrated criteria for after-Stop name suggestions; suggestions are never confirmations.
+    #[serde(default)]
+    pub matching_policy: Option<MatchPolicy>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AnalysisSource {
@@ -42,6 +46,9 @@ pub struct MeetingAnalysis {
     pub candidates: Vec<EnrollmentCandidate>,
     pub suggestions: BTreeMap<String, String>,
     pub failures: Vec<String>,
+    /// Where the microphone only carried far-end speech; used to withhold "Me".
+    #[serde(default)]
+    pub bleed: Option<BleedSummary>,
     pub updated_at: String,
 }
 impl MeetingAnalysis {
@@ -121,7 +128,26 @@ impl AnalyzeMeetingError {
         }
     }
 }
+/// Stretches of the microphone mostly explained by the system source (far-end speech heard
+/// through speakers). Recorded as evidence; the audio and transcripts are never altered.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BleedSummary {
+    pub method: String,
+    pub delay_ms: i64,
+    pub analyzed_seconds: f64,
+    pub flagged_seconds: f64,
+    pub spans: Vec<parakeet_domain::reconciliation::BleedSpan>,
+}
+#[async_trait]
+pub trait BleedDetection: Send + Sync {
+    async fn detect(
+        &self,
+        microphone: &AudioTrack,
+        system: &AudioTrack,
+    ) -> Result<BleedSummary, CapabilityError>;
+}
 pub struct MeetingAnalysisService {
+    bleed: Option<Arc<dyn BleedDetection>>,
     queries: Arc<dyn LibraryQueries>,
     writes: Arc<dyn MeetingAnalysisWrites>,
     processing: Arc<ProcessingService>,
@@ -141,6 +167,7 @@ impl MeetingAnalysisService {
         ownership: Arc<dyn ProcessingOwnership>,
     ) -> Self {
         Self {
+            bleed: None,
             queries,
             writes,
             processing,
@@ -149,6 +176,17 @@ impl MeetingAnalysisService {
             identity,
             ownership,
         }
+    }
+    /// A saved running plan can outlive its process. Probe the controller lease,
+    /// including between source jobs, without changing the plan or its results.
+    pub async fn is_active(&self, recording_id: &str) -> Result<bool, CapabilityError> {
+        let key = stable_id("meeting-analysis-controller", recording_id);
+        Ok(self.ownership.try_acquire(&key).await?.is_none())
+    }
+    /// Optional: lets analysis record where the microphone only carries the system source.
+    pub fn with_bleed_detection(mut self, detector: Arc<dyn BleedDetection>) -> Self {
+        self.bleed = Some(detector);
+        self
     }
     pub async fn show(
         &self,
@@ -167,12 +205,23 @@ impl MeetingAnalysisService {
     ) -> Result<MeetingAnalysis, AnalyzeMeetingError> {
         self.analyze_pinned(input, None).await
     }
-    pub(crate) async fn prepare_recipe(&self) -> Result<AnalysisRecipe, AnalyzeMeetingError> {
+    pub(crate) async fn prepare_recipe(
+        &self,
+        matching_policy: Option<MatchPolicy>,
+    ) -> Result<AnalysisRecipe, AnalyzeMeetingError> {
+        if let Some(policy) = &matching_policy {
+            policy.validate()?;
+        }
         let selected = self.models.selection().await?;
         Ok(AnalysisRecipe {
             asr: self.pin(&selected.asr, "asr").await?,
             diarization: self.pin(&selected.diarization, "diarization").await?,
-            embedding: None,
+            embedding: if matching_policy.is_some() {
+                Some(self.pin(&selected.embedding, "embedding").await?)
+            } else {
+                None
+            },
+            matching_policy,
         })
     }
     pub(crate) async fn analyze_pinned(
@@ -180,7 +229,7 @@ impl MeetingAnalysisService {
         input: AnalyzeMeetingInput,
         recipe: Option<AnalysisRecipe>,
     ) -> Result<MeetingAnalysis, AnalyzeMeetingError> {
-        let driver = Self::new(
+        let mut driver = Self::new(
             self.queries.clone(),
             self.writes.clone(),
             self.processing.clone(),
@@ -189,6 +238,7 @@ impl MeetingAnalysisService {
             self.identity.clone(),
             self.ownership.clone(),
         );
+        driver.bleed = self.bleed.clone();
         tokio::spawn(async move { driver.drive(input, recipe).await })
             .await
             .map_err(CapabilityError::new)?
@@ -234,8 +284,22 @@ impl MeetingAnalysisService {
             p.validate()?;
         }
         let key = stable_id("meeting-analysis-controller", &input.recording_id);
-        let _owner = self.ownership.try_acquire(&key).await?.ok_or_else(|| {
-            AnalyzeMeetingError::Conflict("another process is analyzing this recording".into())
+        // `is_active` probes by briefly taking this lease, so retry a few times before
+        // concluding that another controller owns the recording.
+        let mut owner = None;
+        for attempt in 0..5 {
+            owner = self.ownership.try_acquire(&key).await?;
+            if owner.is_some() {
+                break;
+            }
+            if attempt < 4 {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        }
+        let _owner = owner.ok_or_else(|| {
+            AnalyzeMeetingError::Conflict(
+                "this recording is busy: another analysis or the audio archive is using it".into(),
+            )
         })?;
         let d = self
             .queries
@@ -275,12 +339,14 @@ impl MeetingAnalysisService {
                     } else {
                         None
                     },
+                    matching_policy: input.matching_policy.clone(),
                 }
             };
             let AnalysisRecipe {
                 asr,
                 diarization,
                 embedding,
+                matching_policy,
             } = recipe;
             let mut sources = vec![];
             for track in d.tracks.iter().filter(|t| t.kind != TrackKind::Playback) {
@@ -301,7 +367,7 @@ impl MeetingAnalysisService {
                             && r.kind == "transcription"
                             && r.model == asr.id
                             && r.model_revision == asr.revision
-                            && r.configuration["track"] == json!(track)
+                            && same_source(&r.configuration["track"], &json!(track))
                             && r.result["metrics"]["source_sha256"] == hash
                             && d.segments.iter().any(|s| s.run_id == r.id)
                     })
@@ -336,29 +402,36 @@ impl MeetingAnalysisService {
                 asr,
                 diarization,
                 embedding,
-                matching_policy: input.matching_policy,
+                matching_policy,
                 sources,
                 publication_group,
                 candidates: vec![],
                 suggestions: BTreeMap::new(),
                 failures: vec![],
+                bleed: None,
                 updated_at: now(),
             }
         };
         // Recheck the exact sources even for a completed/idempotent request.
-        for source in &plan.sources {
+        for source in &mut plan.sources {
             let current = d
                 .tracks
                 .iter()
                 .find(|t| t.id == source.track.id)
                 .ok_or_else(|| AnalyzeMeetingError::Conflict("saved source was removed".into()))?;
-            if json!(current) != json!(source.track)
-                || self.check_source(current).await? != source.sha256
-            {
+            let hash = self.check_source(current).await?;
+            let unchanged = json!(current) == json!(source.track);
+            if unchanged && hash == source.sha256 {
+                continue;
+            }
+            if unchanged || !same_source(&json!(source.track), &json!(current)) {
                 return Err(AnalyzeMeetingError::Conflict(
                     "source identity changed; start a new analysis after inspection".into(),
                 ));
             }
+            // The file was relinked or archived with verified identical audio: continue on it.
+            source.track = current.clone();
+            source.sha256 = hash;
         }
         // Validate historical receipts even when no new inference is required.
         for source in &plan.sources {
@@ -373,7 +446,7 @@ impl MeetingAnalysisService {
                             && r.kind == kind
                             && r.model == model.id
                             && r.model_revision == model.revision
-                            && r.configuration["track"] == json!(source.track)
+                            && same_source(&r.configuration["track"], &json!(source.track))
                     }) {
                         return Err(AnalyzeMeetingError::Conflict(
                             "saved analysis result no longer matches its evidence".into(),
@@ -482,7 +555,7 @@ impl MeetingAnalysisService {
                         && r.model == model.id
                         && r.model_revision == model.revision
                         && r.configuration["meeting_analysis_id"] == plan.id
-                        && r.configuration["track"] == json!(source.track)
+                        && same_source(&r.configuration["track"], &json!(source.track))
                 });
                 if let Some(id) = saved {
                     if !detail.runs.iter().any(|r| {
@@ -496,7 +569,7 @@ impl MeetingAnalysisService {
                                 }
                             && r.model == model.id
                             && r.model_revision == model.revision
-                            && r.configuration["track"] == json!(source.track)
+                            && same_source(&r.configuration["track"], &json!(source.track))
                     }) {
                         return Err(AnalyzeMeetingError::Conflict(
                             "saved source result no longer matches its evidence".into(),
@@ -541,6 +614,8 @@ impl MeetingAnalysisService {
                 self.save(Some(&prior), plan).await?;
             }
         }
+        self.check_bleed(plan).await?;
+        self.check_speaker_saturation(plan).await?;
         let prior = plan.clone();
         plan.stage = "preparing_speakers".into();
         self.save(Some(&prior), plan).await?;
@@ -574,6 +649,7 @@ impl MeetingAnalysisService {
                             track_id: candidate.track_id.clone(),
                             start_ms: candidate.local_start_ms,
                             end_ms: candidate.local_end_ms,
+                            more_ranges: candidate.more_ranges.clone(),
                             policy: policy.clone(),
                         },
                         &model,
@@ -587,6 +663,74 @@ impl MeetingAnalysisService {
             }
         }
         Ok(())
+    }
+}
+impl MeetingAnalysisService {
+    /// A diarizer that used every speaker slot may have merged different people on that source.
+    async fn check_speaker_saturation(
+        &self,
+        plan: &mut MeetingAnalysis,
+    ) -> Result<(), AnalyzeMeetingError> {
+        let Some(detail) = self.queries.detail(&plan.recording_id).await? else {
+            return Ok(());
+        };
+        let mut warnings = vec![];
+        for source in &plan.sources {
+            let run = source
+                .diarization
+                .as_ref()
+                .and_then(|id| detail.runs.iter().find(|r| &r.id == id));
+            if run.is_some_and(|r| r.result["metrics"]["speaker_slots_saturated"] == true) {
+                warnings.push(format!(
+                    "all speaker slots were used on source {}: different people may have been merged; verify its voices or diarize it with speakrs Community-1",
+                    source.track.id
+                ));
+            }
+        }
+        if warnings.is_empty() {
+            return Ok(());
+        }
+        let prior = plan.clone();
+        for warning in warnings {
+            if !plan.failures.contains(&warning) {
+                plan.failures.push(warning);
+            }
+        }
+        self.save(Some(&prior), plan).await
+    }
+    /// Best effort: a missing detector, a single source or a failing check never fails analysis;
+    /// without the evidence, "Me" simply relies on the other safeguards.
+    async fn check_bleed(&self, plan: &mut MeetingAnalysis) -> Result<(), AnalyzeMeetingError> {
+        let Some(detector) = &self.bleed else {
+            return Ok(());
+        };
+        if plan.bleed.is_some() {
+            return Ok(());
+        }
+        let mic = plan
+            .sources
+            .iter()
+            .map(|s| &s.track)
+            .find(|t| t.kind == TrackKind::Microphone);
+        let system = plan
+            .sources
+            .iter()
+            .map(|s| &s.track)
+            .find(|t| t.kind == TrackKind::System);
+        let (Some(mic), Some(system)) = (mic.cloned(), system.cloned()) else {
+            return Ok(());
+        };
+        let prior = plan.clone();
+        plan.stage = "checking_bleed".into();
+        self.save(Some(&prior), plan).await?;
+        let prior = plan.clone();
+        match detector.detect(&mic, &system).await {
+            Ok(summary) => plan.bleed = Some(summary),
+            Err(error) => plan
+                .failures
+                .push(format!("bleed check unavailable: {error}")),
+        }
+        self.save(Some(&prior), plan).await
     }
 }
 fn read_plan(recording: &Recording) -> Result<Option<MeetingAnalysis>, ValidationError> {
@@ -606,4 +750,44 @@ fn read_plan(recording: &Recording) -> Result<Option<MeetingAnalysis>, Validatio
         ));
     }
     Ok(Some(plan))
+}
+
+/// Whether a track snapshot saved with a result (`recorded`) still names the same audio as
+/// `current`: identical, or moved by a relink or lossless archive whose samples were verified
+/// against the recorded content.
+pub(crate) fn same_source(recorded: &Value, current: &Value) -> bool {
+    if recorded == current {
+        return true;
+    }
+    let content = &recorded["provenance"]["content_sha256"];
+    recorded["id"] == current["id"]
+        && content.is_string()
+        && current["provenance"]["locator_history"]
+            .as_array()
+            .is_some_and(|history| history.iter().any(|h| h["path"] == recorded["path"]))
+        && (current["provenance"]["content_sha256"] == *content
+            || current["provenance"]["archived"]["original_content_sha256"] == *content)
+}
+
+#[cfg(test)]
+mod source_tests {
+    use super::*;
+    #[test]
+    fn a_verified_archive_or_relink_is_the_same_source_but_other_audio_is_not() {
+        let recorded = json!({"id":"t","path":"/a/mic.caf","provenance":{"content_sha256":"old"}});
+        let archived = json!({"id":"t","path":"/a/mic.x.wv","provenance":{"content_sha256":"new",
+            "archived":{"original_content_sha256":"old"},"locator_history":[{"path":"/a/mic.caf"}]}});
+        let relinked = json!({"id":"t","path":"/b/mic.caf","provenance":{"content_sha256":"old",
+            "locator_history":[{"path":"/a/mic.caf"}]}});
+        let replaced = json!({"id":"t","path":"/b/mic.caf","provenance":{"content_sha256":"other",
+            "locator_history":[{"path":"/a/mic.caf"}]}});
+        assert!(same_source(&recorded, &recorded));
+        assert!(same_source(&recorded, &archived));
+        assert!(same_source(&recorded, &relinked));
+        assert!(!same_source(&recorded, &replaced));
+        assert!(!same_source(
+            &recorded,
+            &json!({"id":"t","path":"/b/x.caf","provenance":{"content_sha256":"old"}})
+        ));
+    }
 }

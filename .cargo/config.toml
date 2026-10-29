@@ -1,2 +1,6 @@
 [env]
 SQLX_OFFLINE = "true"
+
+# block 0.1.6 (a gpui dependency) triggers a future-incompatibility notice on every build.
+[future-incompat-report]
+frequency = "never"

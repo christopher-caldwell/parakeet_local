@@ -2,13 +2,84 @@
 
 This is a working initial implementation with real local processing, not a completed or human-accepted replacement. No private audio, transcripts, embeddings or model weights are committed. Complete private receipts remain in ignored `.local/`; the portable public numeric report is [here](../benchmarks/results/2026-10-27-public-summary.json).
 
-## Delivered surfaces
+## Current status (October 28, after review pass 3)
+
+This table is the authority; the dated records below keep the evidence behind each step, and where an older record disagrees, this table and the code win. Evidence categories follow B§22.
+
+| Area | State | Evidence |
+|---|---|---|
+| Usable gate | Open | Needs the owner: a real AirPods meeting, a physically muted stretch, physical hold-to-dictate into another app, and naming voices in more meetings |
+| Launch without a terminal | Desktop adds the Homebrew tool folders to its search path, remembers the library it was last started with, and shows startup failures in an alert | CLI `doctor` reproduced the missing-ffmpeg failure with a Finder-style PATH; the Finder launch itself is not yet observed |
+| Editing while dictation, capture or archiving run | Long-lived work no longer holds the busy counter that disabled Save text, Undo, Save name and Detect speakers | Compiled; not yet exercised in the app with dictation on |
+| Redraw cost | Job monitor redraws only when jobs or analysis activity change; the heartbeat redraws only the screen showing live levels | Code-traced; no new performance run |
+| Learning from identifications | Every speaker decision removes the voice examples it contradicts and admits at most one for a confirmed clean segment, in one transaction; naming a voice learns only from played clips and never from speech assigned to someone else | SQLite-adapter tests (reassign, undo, Unknown, pre-corrected segment, heard clips) |
+| Recognition criteria | Calibration on the owner's library (throwaway copy, counts only): 24 examples, 5 people; held-out 7 of 10 known voices recognized, 0 false accepts in 11 trials but only 1 unfamiliar-voice trial | Real data; too thin to turn suggestions on by default |
+| Me / Them / Unknown | Microphone speech is "Me" only after the echo check covers it; otherwise "Microphone, not yet checked for echo". Speaker detection and the echo check run after Stop by default and are skipped with a stated reason when their models are missing | Unit (domain) and CLI contract |
+| Modifier-only dictation shortcuts | Start after a 250 ms hold with no other key; another key cancels | Native self-test; physical keyboards untested |
+| Dictations | Own kind, own Library filter, readable title | Unit (artifact parsing); no dictation has been recorded yet |
+| Capture format | Microphone keeps its own channel count at 48 kHz or more; stable through format renegotiation | Native format, stall and route self-tests |
+| Raw audio retention | 7 days, then WavPack with exact decoded-sample comparison | Synthetic audio plus SQLite tests; no real capture has aged seven days |
+| Storage | Usage accounting and the archive only; the retention preview and storage lock were removed | CLI contract and SQLite tests |
+| Usability pass (code review) | Shortcut recorder refuses Escape, bare Space and Command-letter keys and offers one-click modifier holds; Stop frees the recorder and dictation while the transcript finishes in the background; closed editors keep unsaved text; duplicate person names are refused; the transcript is one list; status messages are no longer erased by finished tasks | Unit (shortcut rules) and SQLite (duplicate names, record without a model); the app itself was not clicked through, and transcript scrolling is not re-measured |
+| Automated gates | `just verify`: formatting, Clippy with warnings denied, all Rust tests, native route, hold, format and stall self-tests | Passing at the commit that added this table |
+
+## Dated records
+
+### Review follow-up — October 28
+
+Two subsequent review findings are fixed:
+
+- Finalizing converted audio no longer updates the last input-callback timestamp. The new native stall regression feeds 100 ms of synthetic audio at both 24 kHz and 48 kHz, then stops callbacks for 3.5 seconds. Both stalled cases retain the warning and all 4,800 stored frames; both normally finalized controls remain healthy. `just verify` includes this check.
+- Name voices checks the analysis controller's ownership lease instead of treating a saved `running` label as proof of activity. An abandoned analysis offers **Resume detection**, which recovers only that recording's abandoned source jobs before resuming. The job monitor refreshes the recording when the controller finishes, including completion between source jobs. Real SQLite/filesystem-lease integration tests cover held versus released ownership, stale running metadata, recovery scoped to one recording, and successful resumption using deterministic inference.
+
+Validation: `just verify` passed (155 Rust tests, four opt-in tests ignored, formatting, Clippy with warnings denied, seven routing cases, five format transitions and four stall/healthy cases). `just build` passed. The rebuilt app's interrupted-analysis state and enabled resume action were visually checked at 1,240- and 920-point window widths using an isolated private library copy; its tracks were marked externally owned to prevent archival writes to source files. Resumption itself was verified by integration tests, not by running models in that UI fixture. The app was then returned to the normal library on Record. No hardware stall or AirPods retest was performed in this follow-up. Private logs are under `.local/scratchpad/code-review/`.
+
+### Fixes and app verification — October 28
+
+The Usable gate remains open pending the human checks below. This section supersedes the earlier D2–D6 status. Changes were built into the macOS app bundle and inspected through computer use, including a 920-point-wide window.
+
+- Microphone startup still requires actual buffers from the selected input before a meeting starts. The writer now converts changing input formats into one stable recording format and drains delayed samples at format changes, gaps and finalization. Five synthetic format transitions (24 kHz mono, 48 kHz stereo and 44.1 kHz stereo) retained exactly 24,000 frames, including the final buffer, with zero gaps or writer errors. This is native-buffer evidence, not an AirPods retest.
+- A fresh app-driven 33.291-second webcam plus system-audio recording had zero interruptions, gaps or writer errors. Both tracks were 48 kHz. Public speech supplied the signal; transcription and speaker analysis completed automatically and two nameable voices appeared without manually refreshing. The earlier output-switch gap remains a known hardware limitation.
+- Dictation now explains and disables startup without an enabled shortcut, checks microphone availability and permissions before starting, and retains errors inline. In the bundle, a temporary shortcut was recorded, the listener stayed enabled, and it was then stopped and the shortcut removed. Computer-generated held keys did not trigger a dictation; physical key delivery and the complete dictate/paste workflow remain unverified.
+- Permission rows query the bundled helper and show their actual status. All four were visibly Granted in this run; no permissions were granted or revoked. Missing-permission navigation is implemented but was not exercised by revoking existing grants.
+- Voice candidates reload after background completion with stale-response protection. The app distinguishes loading, running, failed and completed-with-no-candidates states. Real queue refresh, clip playback controls, skipping, persisted skips after restart, and restoring skipped voices were exercised. No identity was confirmed during this pass.
+- Transcript correction and undo were exercised on the public-speech test recording. New meetings use readable local date/time titles. Record, Dictation, Permissions, Transcript and Name voices were visually inspected; narrower layouts use bounded controls and wrapping tabs. The Name voices form now scrolls so Save and Skip remain reachable. Advanced recording choices and troubleshooting sit under Details.
+- Simultaneous microphone and system speech no longer causes microphone enrollment candidates to be discarded solely because their timestamps overlap. A regression test covers both sources speaking at once. This does not establish acoustic echo classification or personal speaker accuracy.
+- Automatic archival now uses WavPack and requires exact decoded float sample bytes before replacing a raw recording. The former 24-bit FLAC conversion could change float samples. Per-attempt output names prevent concurrent cleanup from removing another attempt's copy. Synthetic audio and database tests cover exact decoding, changed-audio rejection, age and active-job exclusions, and preservation of an existing copy. A real capture aging through seven days has not been observed.
+
+Validation: `just verify` passes formatting, Clippy with warnings denied, 155 Rust tests (four opt-in tests ignored), seven native route cases and the five-format native writer test. The signed app bundle builds successfully. Private receipts and logs are under `.local/scratchpad/takeover/`, including `fixes-summary.json`, `ux-final-verify.log` and `ux-build.log`.
+
+Still required for the Usable gate: a real AirPods meeting with the owner's speech, a physically muted interval checked for invented words, source attribution during overlapping speech, and physical shortcut-to-paste dictation. This pass does not establish subjective stereo playback quality, M3 behavior, or complete visual coverage of People, import forms and every confirmation/error state.
+
+### Current capture reliability checkpoint — October 28
+
+The Usable gate remains open. This checkpoint supersedes older claims below that microphone capture has never been exercised; it does not establish reliable AirPods capture or personal transcription accuracy.
+
+A read-only check of the reported failed recording found 27 microphone interruptions and 25 microphone gaps totaling about 46.1 seconds. The earlier handoff understated these counts. Two fresh AirPods probes differed: one delivered no microphone frames in 11.2 seconds, while another delivered continuous 24 kHz audio for 16.8 seconds. A USB webcam input initially failed at startup with native error -10868 while another input was the system default, but worked when it became the default. These observations do not prove a Bluetooth-profile cause.
+
+The capture path now verifies buffers and effective microphone selection before starting system capture or emitting `capture_started`. Failure blocks the requested meeting; the successful check retains the same engine for recording. A native missing-device probe and a real app-driven webcam startup failure produced no start event, no audio files, and no new Library row. A subsequent AirPods startup check captured 9.5 seconds without gaps. Listed-device presence alone is never treated as successful initialization.
+
+The native tap now explicitly uses the selected input's hardware rate and channel count, rather than the client format inherited from the previous default input. A real webcam comparison exposed two hardware channels but one inherited client channel; the revised tap records two. The health loop also recognizes an engine that has stopped without changing device UID and attempts reconnection to the same selected microphone. Apple's [input-node format contract](https://developer.apple.com/documentation/avfaudio/avaudioinputnode) and [configuration-change behavior](https://developer.apple.com/documentation/foundation/nsnotification/name-swift.struct/avaudioengineconfigurationchange) explain these implementation requirements. The earlier AirPods 24 kHz versus webcam 48 kHz transition has not yet been repeated with the corrected tap.
+
+A separate root cause was reproduced with the webcam: changing the output device can make Core Audio expose an aggregate device containing the selected microphone and an output-only member. The former raw UID comparison treated that valid route as a disconnect and stopped a still-running engine. The corrected check accepts the aggregate only when its sole input is the selected microphone and that member is active. Seven deterministic native cases cover accepted and rejected compositions; `just verify` now runs them alongside the Rust checks.
+
+The 256.1-second app-driven retest accepted 20 valid aggregate health checks without false disconnects. Switching the output back nevertheless caused one genuine engine stop, followed by recovery and a 2.576-second microphone gap; system audio had no gaps. Both saved tracks were 48 kHz. The app visibly reported audio saved with problems, the Library record remained `partial_needs_inspection`, and automatic transcription and speaker analysis completed. This is evidence that false disconnects were repaired and real interruptions are exposed, **not** evidence of gap-free output switching. The original AirPods failure still requires a headset retest.
+
+A fresh 66.0-second recording with the webcam selected as both the app input and macOS default, and no device changes, had zero interruptions, zero gaps and zero writer errors on both tracks. Both files independently decoded as 48 kHz stereo. Public speech playback supplied the test signal; this was not a human speech or muted-microphone accuracy test. The rebuilt app's healthy Saved state was visually inspected after artifact verification.
+
+Capture health now checks every requested source, retains interruption warnings across later healthy events, and waits for artifact inspection before reporting successful capture. Partial and recovered recordings carry a visible Library warning; empty captures and failed startup do not show green Saved. Native startup diagnostics remain local. The app's live warning, saved warning, Library warning, blocked start, and disabled microphone recording controls for a disconnected selected input were inspected through computer use. The owner clarified that warning alone was insufficient: unusable microphones must block startup.
+
+Private receipts and build/test logs are in `.local/scratchpad/takeover/`. Human speech accuracy, a physically muted microphone, long AirPods meetings, M3 behavior, dictation keys, and the rest of the Usable workflow remain unverified by this checkpoint. D2–D6 had not been addressed at this earlier checkpoint; see the newer fixes and app verification section above.
+
+Current validation: `just verify` passes 155 Rust tests (four opt-in tests ignored), formatting, Clippy with warnings denied, and seven native routing cases. The signed app bundle builds successfully. These automated results are separate from the hardware observations above.
+
+### Delivered surfaces
 
 Six Rust packages implement Domain, Application, SQLx Database, Infrastructure, JSON CLI and GPUI Desktop boundaries. CLI and desktop compose the same application services. The working surfaces cover import/library/search/title overrides/export/playback, versioned local ASR and diarization, model installation and verification, speaker profiles and confirmed examples, conservative suggestions and correction history, derived cluster edits, capture and recovery, multi-binding dictation, retained insertion failures, disabled-by-default prompt routes and YouTube metadata/download/transcription.
 
 The desktop provides library/transcript navigation, direct title editing, per-segment playback and corrections, speaker enrollment/example management, model controls with download progress, source/device/capture health, editable simultaneous bindings, retained dictation text and explicit profile authorization. Identity-comparison review and decisions, pending-job inspection/recovery and recent-run retry are also available. Anonymous cluster inspection, representative playback, split/merge and undo are also available in GPUI. See [README commands](../README.md#useful-commands).
 
-## Source inventory and real processing
+### Source inventory and real processing
 
 Read-only inspection found six meeting artifact folders and six meeting database rows, plus four media database rows. Five meetings retain both original tracks; one retains neither. All six contain diarization claims and alignment metadata, with usable retained-source alignment for five. Retained sources are M4A; legacy names and malformed fixtures also have automated coverage. Recording durations range from 12m45s to 92m51s, median approximately 38m28s. One system track has a severe metadata/decoded-duration discrepancy; its new output preserves track-local evidence without inventing meeting timing.
 
@@ -18,7 +89,7 @@ Summed engine wall time for these full-track runs was 321.71 seconds for Whisper
 
 The final source audit found **no changes in 48 original artifact size/mtime fingerprints or recorded JSON hashes**. Source database access was read-only and WAL-aware. This is a scoped integrity check, not a byte-for-byte hash of every original audio file. Receipts: `.local/source-integrity-final.json`, `library-processing-report.json`, `final-personal-summary.json` and `all-enrollment-candidates.json`.
 
-## Public model measurements
+### Public model measurements
 
 All six registry models were installed and explicitly checksum-verified. Versions, formats and licenses are documented in [audio models](audio-models.md). There was no cloud transcription or external AI enhancement.
 
@@ -36,7 +107,7 @@ A strict earlier recognition smoke remains a known failed quality gate: after fi
 
 Eight-second synthetic silence, tone and seeded noise also exposed real ASR hallucinations. Base produced 1/0/2 false words; small produced 2/1/2. Every nonempty output was flagged uncertain and retained; empty reference WER is undefined. Dictation tests verify that flagged output is withheld from automatic enhancement/insertion. This safeguard reduces one failure path; it does not prove all hallucinations are detected. Receipt: `.local/non-speech-benchmark.json`.
 
-## Automated and integration gates
+### Automated and integration gates
 
 The initial `cargo test --workspace` gate passed **41 tests**: Application 2, CLI integration 4, Database 11, Domain 16, Infrastructure 8. Coverage includes timeline/overlap/unknown invariants, gesture ownership and cancellation, matching compatibility and duplicate-reference suppression, SQL migrations/mapping, foreign-database protection, idempotency, corrections and undo, import variations, authorization, bounded subprocess timeouts and model leases. A concurrent-process descriptor inheritance failure was repaired with explicit lease unlock; the final suite passes. These are behavioral tests, not evidence of physical key delivery.
 
@@ -44,7 +115,7 @@ The initial `cargo test --workspace` gate passed **41 tests**: Application 2, CL
 
 Real YouTube metadata, download and local transcription succeeded for public Big Buck Bunny media; its explicit title override survived refresh/reprocessing. A separate missing-model test returned failure plus the retained imported recording, without downloading an ASR model implicitly. No personal recordings were sent to media services.
 
-## Hardware and interface evidence
+### Hardware and interface evidence
 
 Test machine: Apple Silicon Mac mini Mac14,12, 16 GB RAM, macOS 26.3.1. M3 MacBook Air has not been exercised.
 
@@ -61,7 +132,7 @@ Test machine: Apple Silicon Mac mini Mac14,12, 16 GB RAM, macOS 26.3.1. M3 MacBo
 
 The synthetic prompt draft was disabled and unauthorized in an isolated UI test library. No actual remote route was invoked. The native dictation listener is stopped. Private hardware/UI receipts are under `.local/hardware*`, `crash-probe/`, `orphan-probe/`, `ui-probe/` and `textedit-insertion-result.json`.
 
-## Remaining work and risk
+### Remaining work and risk
 
 The [first voice-identification checkpoint](human-checkpoints.md) is now complete: three user-confirmed exact clips produced three profiles with one verified example each. Twelve separate candidate intervals were compared using an explicit conservative diagnostic policy; all remained Unknown. No predictions were enrolled. Those comparison intervals lack verified identity labels, so the run does not measure recognition accuracy. More independent verified examples and held-out meeting labels are needed for useful calibration.
 
@@ -73,7 +144,7 @@ Latest continuation verification: **46 workspace test cases pass** (Application 
 
 A real public-media ASR process was protected while active, killed with SIGKILL, recovered as interrupted, and successfully retried into a new linked run with **46 transcript segments**. The source SHA-256 and old run were preserved. Separately, GPUI recovered an intentionally abandoned public-media job and successfully retried it while navigation remained available. Speaker comparison review was exercised through native controls: accept → undo → reject → undo → replace → undo; all decisions persisted and no example was enrolled. The comparison fixture reused its public enrollment utterance and is UI evidence, not recognition accuracy. Private receipts: `.local/processing-recovery/report.json`, `.local/suggestion-ui/review-ui-report.json`, `.local/suggestion-ui/recovery-ui-report.json`, `.local/jobs-tests.log`, `.local/jobs-clippy.log`, `.local/jobs-sqlx.log` and `.local/jobs-bundle-build.log`. See [recovery behavior](processing-recovery.md). Personal enrollment still contains exactly three confirmed examples.
 
-## Latest autonomous continuation
+### Latest autonomous continuation
 
 **50 workspace tests pass** (Application 2, CLI 6, Database 15, Domain 16, Infrastructure 11), plus the separately executed opt-in real-model cache test. Clippy with warnings denied, checked SQLx metadata, and the native bundle build pass. The cache integration test is intentionally ignored during ordinary tests because it requires explicitly selected model copies, public audio and a 75-second idle period; its explicit execution passed. Native clipboard self-tests are separate from the Rust count.
 
@@ -94,7 +165,7 @@ Independent follow-up remains: verified word/speaker alignment and meeting speak
 
 The source/enrollment audit is repeated after this continuation. Original artifact size/mtime and JSON hashes, confirmed example IDs, pending jobs, model selections and SQLite integrity are recorded in `.local/independent-final-state.json`. Personal identity still has exactly three user-confirmed examples; no new permissions or external AI routes were enabled.
 
-## Speaker-word continuation
+### Speaker-word continuation
 
 The subsequent continuation adds read-only cpWER scoring through an application-owned capability/service and an opt-in Whisper token-timing mode shared by CLI and GPUI. The [speaker-word report](speaker-word-evaluation.md) documents the input contract, bounded scoring, explicit label provenance and substantial remaining quality errors. The Rust scorer matched MeetEval 0.4.3 on all 250 deterministic cases. A six-turn/three-voice synthetic public conversation and an overlap variant each contain 232 reference words. Same-ASR comparisons reduced cpWER from 50.00%/46.55% to 35.34%/40.95% (sequential base/small) and from 72.41%/65.52% to 30.17%/31.03% (overlap). This is diagnostic improvement, not an accuracy acceptance pass. Token times are unverified model estimates, no equal-duration word interpolation is used, and normal dictation/transcription remains on segment timing.
 
@@ -102,7 +173,7 @@ Latest Rust gate: **57 workspace tests pass** (Application 2, CLI 7, Database 15
 
 Native verification of this continuation invoked the explicit experimental action on public audio, saved a completed new run with the flag enabled, preserved all prior runs and displayed **231 original model words** with timed/Unknown anonymous evidence. Expanding controls exposed a reader-clipping issue; the reader now scrolls as one region and segment action buttons wrap, keeping corrections and Undo reachable. Both behaviors were checked in the rebuilt native app. The final source/enrollment audit again found 48 unchanged original fingerprints/JSON hashes, exactly the same three confirmed examples, unchanged model selections, no pending personal jobs and SQLite integrity `ok` at schema 3. Receipts: `.local/word-timing/ui-report.json` and `final-state.json`. The desktop was restored to the personal library.
 
-## Native UI / UX pass
+### Native UI / UX pass
 
 The [UI guide](ui-ux.md) records the Slack/MacParakeet design inspection, implemented interactions, keyboard behavior and remaining limits. The library now keeps its list beside the reader, with separate transcript, source and processing views. Native checks exercised title saving/reopening, debounced search, transcript find, multiline corrections, explicit Unknown through later text edits, Undo, keyboard save/navigation, file import, failed import feedback, playback/Stop and cancellation of model/person/example removal. The isolated library grew from 18 to 19 recordings through a public WAV import; reimport reported zero new and one existing item. Personal application data was not used as the mutation target.
 
@@ -110,7 +181,7 @@ The [UI guide](ui-ux.md) records the Slack/MacParakeet design inspection, implem
 
 Real native processing produced a completed 11-second public-file transcription and a second 634.578-second public-media run with 46 segments in 21.360832 seconds. Navigation was exercised while the longer job ran. The measured render-construction peak was 2.31025 ms and the maximum nominal 100 ms heartbeat interval was 267.758958 ms for that probe. These do not prove frame-rate targets, sustained memory bounds or superiority to either reference product. Full VoiceOver, physical keyboard delivery, microphone capture approval, M3 behavior and subjective acceptance remain separate checks.
 
-## Focused native performance pass
+### Focused native performance pass
 
 The [performance guide](ui-performance.md) and [numeric report](../benchmarks/results/2026-10-27-native-ui.json) document actual release-binary observations following Smaller Talk's benchmark patterns. Full GPUI frame work and input latency, macOS process CPU/RSS/footprint and background-job context replace the earlier construction/heartbeat-only probe. Instrumentation is explicitly opt-in, writes only local evidence, and does not initiate UI actions or download models.
 
@@ -120,7 +191,7 @@ The reader prepares corrected/searchable display data off the UI thread, reuses 
 
 Native checks verified paging, multiline edits, offscreen editor focus, corrected search, Undo, both Find-dismissal paths, and narrow-width wrapping/scrolling. Selection spanning recycled rows and full VoiceOver traversal remain unverified. All source evidence is unchanged: 48 original fingerprints/JSON hashes, exactly the same three confirmed example IDs, unchanged models, no pending personal jobs, SQLite integrity `ok`, schema 3. Private receipts are in `.local/performance/`; no personal text, identities, audio, embeddings or raw process paths were added to the public numeric report. Physical input, microphone permissions and M3 limitations still apply.
 
-## Idle activity and evidence indexing follow-up
+### Idle activity and evidence indexing follow-up
 
 **61 workspace tests pass** (Desktop now 2), with default/performance-feature Clippy, formatting and signed normal/instrumented release builds. Six Python report tests are repeated. The new reader test covers foreign segment IDs, repeated attribution claims, source order, unknown/untimed words and the existing 100-word display bound while retaining complete raw evidence.
 
@@ -128,7 +199,7 @@ The application activity loop no longer polls when settled idle. A real native p
 
 Source/enrollment verification remains read-only and unchanged: 48 source artifacts, exactly three confirmed example IDs, selected models, no pending personal work and SQLite integrity/schema 3. Private activity traces, isolated public reprocessing output, idle samples and tests are in `.local/refinement/`. No microphone, physical input, M3, identity calibration or remote AI permission was exercised by this follow-up.
 
-## Durable meeting workflow and streamed normalization
+### Durable meeting workflow and streamed normalization
 
 **70 workspace tests pass** (Application 2, CLI 8, Database 20, Desktop 2, Domain 22, Infrastructure 16). Default and performance-feature Clippy with warnings denied, SQLx offline metadata check, formatting and signed release builds pass. The explicit decoder resource probe was additionally run in two separate processes; the unrelated opt-in model cache test remains skipped in ordinary tests.
 
@@ -142,7 +213,7 @@ Final private receipts are under `.local/meeting-workflow/`. Original MacParakee
 
 The final audit confirms 48 unchanged original source fingerprints/JSON hashes, the same exact three confirmed example IDs, unchanged selected models, no pending personal jobs, SQLite integrity `ok`/schema 3 and 18 personal-library records. Automatic transcription was enabled only in the isolated test library; the personal preference remains off. All isolated finalization plans are completed. The ordinary signed release is restored to the personal library; source/audio/model data remain outside Git.
 
-## Durable inference progress and cancellation
+### Durable inference progress and cancellation
 
 **78 workspace tests pass** (Application 2, CLI 9, Database 25, Desktop 2, Domain 22, Infrastructure 18), with two unrelated opt-in probes skipped. Default/performance-feature Clippy with warnings denied, formatting, regenerated SQLx metadata/offline check, and the signed normal release build pass. SQLx check also reports potentially unused cached queries; all committed query texts match current external SQL. The [control guide](processing-control.md) documents application-owned contracts, atomic cancellation/publication, worker ownership, adapter stop boundaries and chunk evidence.
 
@@ -154,61 +225,20 @@ The read-only audit again confirms 48 original artifact fingerprints/JSON hashes
 
 **Next:** validated continuation from retained Whisper chunks, including source/model/settings verification, contiguous-prefix checks and resumed-versus-uninterrupted comparisons. Existing local models and public fixtures are sufficient; no user input is needed. Current retry still restarts its requested interval. Priorities, live preview, retention policy and the separate human hardware checks remain outstanding.
 
-## Validated within-source continuation
-
-**83 workspace tests pass** (Infrastructure now 23), plus the explicit real-model cache/word-mode/verification/75-second expiry probe. The decoder resource probe was skipped. Default/performance-feature Clippy with warnings denied, formatting, SQLx offline check and the signed normal release build pass; existing SQLx potentially-unused-cache/upstream warnings remain. No schema/query change was needed. See [checkpoint contracts and limits](chunk-resume.md) and the [public numeric report](../benchmarks/results/2026-10-27-chunk-resume.json).
-
-On the 634.578-second public AAC file, a two-chunk interruption, four-chunk interruption and final retry reused 239,976 ms of actual audio at a 240,000 ms requested timeline position, inferred seven remaining chunks, and matched all 46 uninterrupted transcript texts/times from the same binary. Engine wall time was 12.100 seconds uninterrupted and 9.486 seconds for final continuation, including checkpoint validation and source hashing. These are individual observations, not a general performance guarantee. The first conservative probe refused reuse because codec padding yielded 59.988-second windows; the fix preserves requested origins and actual lengths independently, with a regression test.
-
-The 89.285-second public speech fixture also resumed with experimental word timing, preserving recognized words and their timing/Unknown states. Corrupted-checksum fault injection reused zero chunks, completed a fresh pass and matched uninterrupted output. Native retry reused four chunks/seven new inference chunks, displayed that distinction and preserved prior runs/title. Real meeting finalization retained an interrupted source, reused two chunks, completed both sources and preserved 0/1250 ms offsets and title with three total runs. A separate deliberately incomplete isolated fixture retained its failed plan when microphone audio was absent; it did not claim a complete meeting or silently replace missing source identity.
-
-Private receipts are in `.local/chunk-resume/`. The final audit retains 48 unchanged original artifact fingerprints/JSON hashes, exactly three confirmed examples, unchanged model selection, no pending personal jobs and SQLite integrity/schema 3. The personal library remains 18 records with automatic-after-Stop off, and the ordinary release is restored there. This pass adds no microphone, physical keyboard, Bluetooth, M3 or personal speaker-accuracy acceptance evidence.
-
-Next independent step: storage accounting and an explicit retention preview/policy that protects original sources, confirmed voice examples and active/recoverable work. It can be implemented with current knowledge; enabling a personal cleanup policy and executing it should remain deliberate user actions. Queued priorities, live preview and the hardware/human checks remain separate outstanding work.
-
-## Storage accounting and retention previews
+### Storage accounting and retention previews
 
 **91 workspace tests pass** (Application 2, CLI 10, Database 28, Desktop 2, Domain 24, Infrastructure 25). Default/performance-feature Clippy with warnings denied, formatting, regenerated SQLx metadata/offline check and the signed normal release build pass. The explicit model-cache/decoder probes were skipped for this metadata feature; real local Whisper was run and cancelled to exercise active/recoverable file protection. Existing upstream/compiler/cache warnings remain separate from those gates.
 
-[Storage](storage.md) now shares metadata accounting, default-Keep-all preview policy, revision-checked saves and conservative potential-candidate selection across CLI/GPUI. The four new checked SQL files and explicit schema-4 migration stay in the persistence adapter; Domain owns age/ownership/evidence decisions and infrastructure owns bounded filesystem observation. No cleanup executor or automatic removal is exposed.
+[Storage](storage.md) now shares metadata accounting, default-Keep-all preview policy, revision-checked saves and conservative potential-candidate selection across CLI/GPUI. The four new checked SQL files and explicit schema-4 migration stay in the persistence adapter; Domain owns age/ownership/evidence decisions and infrastructure owns bounded filesystem observation.
 
-A real isolated library copy preserved 18 recording IDs/titles, three confirmed examples, model choices, source content and existing files across hypothetical previews and policy saves. A live public-media Whisper chunk was protected while active and after cancellation. Five final CLI metadata probes took 11.6–12.5 ms each, observing approximately 1.38 GB of root files and 425 MB of external referenced audio; this is a bounded observation, not a large-library guarantee. The two known missing source references kept inventory completeness false. Allocated blocks are reported separately; shared APFS extents/actual space freed are not measured. The [numeric report](../benchmarks/results/2026-10-27-storage-preview.json) contains no private paths, transcript, name or embedding content.
+A real isolated library copy preserved 18 recording IDs/titles, three confirmed examples, model choices, source content and existing files across hypothetical previews and policy saves. A live public-media Whisper chunk was protected while active and after cancellation. Five final CLI metadata probes took 11.6–12.5 ms each, observing approximately 1.38 GB of root files and 425 MB of external referenced audio; this is a bounded observation, not a large-library guarantee. The two known missing source references kept inventory completeness false. Allocated blocks are reported separately; shared APFS extents/actual space freed are not measured. (The retention preview this measured was removed on October 28.)
 
 Native checks exercised hypothetical preview, a conflicting CLI policy change/stale save refusal, refresh, successful save, Keep-all restoration, invalid-age recovery, warning expansion/collapse and protected-work display. Positive old-job candidates are tested with deterministic actual SQLite/filesystem fixtures; personal job ages were not fabricated. The Copy JSON button and full VoiceOver traversal were not exercised. Storage prepares aggregates outside rendering, bounds displayed rows and has a separate busy state so inference does not disable ordinary inspection.
 
 Explicit schema-3-to-4 migration was tested on a snapshot and then applied to the personal Parakeet Local library after a SQLite backup. All 13 pre-existing table content hashes remain unchanged. The final read-only audit retains 48 unchanged original artifact fingerprints/JSON hashes, the exact same three confirmed example IDs, selected models, no pending personal work and SQLite integrity `ok`/schema 4. The personal library has 18 recordings, automatic-after-Stop remains off, and Keep all/revision 0 remains saved. The ordinary release is restored there on the new Storage screen. Private receipts and backup are in `.local/storage-pass/`.
 
-Next independent step: reviewed, recoverable cleanup of eligible completed processing scratch, with fresh validation, exclusive ownership and restore support. Current knowledge/fixtures are sufficient to build it. A saved preview threshold does not authorize execution, and personal cleanup remains an explicit action. Raw source deletion and the separate hardware/identity checks remain outside this pass.
 
-## Reviewed processing-file staging and restore
-
-**100 workspace tests pass** (Application 2, CLI 11, Database 36, Desktop 2, Domain 24, Infrastructure 25). The ordinary suite skips the two pre-existing opt-in model/decoder probes and the new explicit native-fixture preparer; that preparer was run separately. Default and performance-feature Clippy with warnings denied, formatting, SQLx offline metadata check and the signed ordinary release build pass. Existing upstream GPUI deprecation/future-compatibility and native compiler warnings remain; no new workspace warning is accepted by Clippy.
-
-The [cleanup guide](cleanup.md) describes shared application behavior, reviewed identities/digest, transaction resources, coordinated reference publication and no-overwrite recovery. Eight actual SQLite/filesystem integration tests add fresh policy/source/finalization/correction/enrollment protection, same-size edits, symlinks, hard links, live model/run refusal, cross-root refusal, retained conflicts, durable partial intent and a one-connection rollback probe. Caller-cancellation testing pauses after a real payload move, aborts its caller and confirms the owned driver still holds filesystem/model access and excludes a concurrent SQLite write until settlement. This is simulated interruption/control testing, not a power-loss or new process-kill test.
-
-Native synthetic-library checks exercised concrete review, cancel with exact bytes unchanged, confirmation, staging, app restart, persisted review reopening and exact restore. A stale policy changed independently through CLI refused staging, displayed its reason and recovered through Dismiss/Refresh. The native check caught a long-confirmation banner that placed its button offscreen; bounded wrapping and nonshrinking buttons fixed it, and the complete workflow then passed. Full VoiceOver and narrow-window acceptance of the new controls remain unverified. The final CLI binary additionally staged/restored the synthetic file and preserved its hash; these 25-byte fixtures are functional evidence, not throughput benchmarks.
-
-A separate six-second public-speech run completed **real local Whisper inference**, persisted one transcript segment and refused concurrent cleanup while its actual model lease was held. The new run used a fresh model context and one inference chunk. This smoke check verifies runtime ownership compatibility; it does not establish transcription or speaker quality. No new diarization/embedding accuracy evaluation, microphone capture, physical input, M3 test or remote AI route occurred in this pass.
-
-Schema 4→5 migration passed on an isolated SQLite snapshot and then on the personal library after a SQLite backup. **All 14 pre-existing table content hashes are unchanged.** The personal library still contains 18 recordings and the exact three confirmed example IDs, with unchanged selected models, automatic-after-Stop off, no pending jobs and SQLite integrity `ok`. All 48 original source artifact fingerprints/JSON hashes remain unchanged. Keep all/revision 0 remains saved. **No personal review, staging or deletion was performed.** Private backups, tests and receipts are in `.local/cleanup-pass/`; the ordinary signed app is restored to the personal Storage screen.
-
-Staging retains bytes on the same volume and reclaims **zero space**. Permanent reclamation, expiry and batches above 128 files/512 MiB are not implemented. Advisory coordination covers current cooperating processes for the selected database/root; direct database edits, old binaries and arbitrary external filesystem writers remain outside it. Moving/replacing the root or database invalidates automatic review restoration. Source audio and uncertain/recoverable work remain protected.
-
-Next independent step: background job scheduling with explicit dictation priority and durable queue state, building on the current model ownership and cancellation controls. Current knowledge and simulated/public fixtures are sufficient; the separate physical microphone/keyboard, M3 and personal-identity acceptance checks still require their respective evidence.
-
-## Whole-project review at 64a6278
-
-Fresh baseline: **100 workspace tests pass**, with the same three intentional ordinary skips; default/performance Clippy and SQLx offline checks pass. The [top-to-bottom review](project-review.md) found six functional defects and Playbook contract drift. Four temporary desired-behavior probes fail for dictation stream-error cancellation, excerpt/full transcript selection, missing-source completeness and corrected-text library search. Actual release CLI probes reproduce foreign source-database rejection and benchmark import despite an exclusive storage gate. The gate-bypass probe does not exercise a complete file-move race; its stale-reference consequence is identified as an inference from production wiring. Private source/logs remain in `.local/zoom-out-review/`; no failing temporary test or product fix was shipped as part of this review.
-
-All 48 original fingerprints/JSON hashes and 14 personal-table hashes remain unchanged; 18 recordings, the exact three confirmed examples, zero personal cleanup reviews and SQLite integrity `ok`/schema 5 remain preserved. No new model, hardware, personal-quality or remote-AI acceptance is claimed. Architecture remains aligned, but full compliance and daily-replacement readiness are not established. **Next:** repair these correctness/contract defects before further queue/storage expansion; current knowledge and fixtures are sufficient. Then close the integrated post-meeting diarization/suggestion workflow and prepare a focused physical/identity checkpoint.
-
-## Correctness and contract repairs
-
-[R1–R7 are repaired](correctness-repairs.md). **107 workspace tests pass**; default Clippy, checked SQLx metadata, formatting and the signed native release pass. The four red reviewer probes are now permanent passing regressions. Added actual source/WAL/schema, coherent-result publication, corrected-search/Undo and CLI storage-gate coverage. Synthetic dictation verifies error/EOF/stop/caller-abort cancellation, without claiming real keyboard/editor delivery.
-
-The release CLI inspected ten actual source records without changing the original DB hash and ran local public-audio ASR plus an excerpt while retaining the full current transcript. Native display matched. Schema 6 is explicit; isolated snapshots were migrated, while personal migration is deferred until the integrated pass's backup/verification. No remote AI, personal enrollment or model selection changed. Next: integrated meeting analysis; current knowledge is sufficient.
-
-## Integrated meeting and speaker workflow
+### Integrated meeting and speaker workflow
 
 **120 workspace tests pass**, including 12 real-adapter/deterministic-inference analysis tests and a new CLI contract test. Default/performance Clippy, formatting, SQLx metadata/offline checks and the signed release pass. Existing upstream/native warnings remain; the opt-in cache/decoder/cleanup fixture preparations were not repeated for this orchestration pass.
 
@@ -217,3 +247,47 @@ The release CLI inspected ten actual source records without changing the origina
 Backed-up personal schema 5→6 migration passed an isolated rehearsal, preserved all 15 existing table hashes, 18 recordings, exact three confirmed samples, selected models and 48 original artifact fingerprints/JSON hashes. Keep all/revision 0 and both automatic after-Stop options remain off. No personal cleanup or remote AI occurred. Private receipts are in `.local/integrated-pass/`; portable numeric results omit content/identities.
 
 Next: job scheduling and explicit dictation priority; current knowledge and fixtures suffice. Physical capture/keyboard/editor, Bluetooth/M3 and additional personal-quality validation remain separate user/hardware checkpoints.
+
+### Design-alignment pass (branch `feat/design-alignment`)
+
+Earlier entries above are historical. Where they describe behavior this pass changed (a correction not creating examples, record-only meetings by default, Whisper chunk resume, fixed 60 s Whisper windows, drop-on-drift capture), the code and the current docs win.
+
+Evidence is stated by category; "unit" means no real model or hardware.
+
+| Change | Evidence |
+|---|---|
+| Stale library schema refused at open (BUG-2) | SQLite-adapter test |
+| Full-source diarization is current; bounded runs never replace it (BUG-1) | unit + SQLite-adapter |
+| Centroid scoring, scoring method recorded (SPK-4) | unit |
+| Meetings transcribe after Stop by default; record-only fallback without a verified model (MTG-1) | SQLite-adapter + CLI contract |
+| Imported labels shown as unverified claims; imported source tracks (BUG-6, SEP-3) | unit; not seen in the GUI |
+| Silent source warning (CAP-1) | unit on artifact metadata; no hardware |
+| Lease files removed on release (BUG-3) | unit |
+| Pooled cluster speech, no candidate truncation (SPK-5) | unit |
+| Name a whole cluster; confirmed actions admit reversible examples (SPK-1, SPK-2) | SQLite-adapter; GUI compiled, not exercised |
+| Imported-label clip proposals (SPK-3) | SQLite-adapter, synthetic labels |
+| Calibration, adoptable policy, opt-in suggestions inline (SPK-6) | unit on synthetic embeddings; no personal calibration run |
+| Re-embed, notes, history (SPK-7, SPK-10) | SQLite-adapter; no GUI for notes/history |
+| Speech-aligned Whisper chunks, no chunk resume (SIMP-2, ASR-2, ASR-3) | unit VAD; real-model-tested on public silence, noise, tone (no text published) and 38 s of public meeting speech (118 words, RTF 0.08 in a debug build); WER against the old 60 s windows on 7 long public clips is in [the chunking comparison](../benchmarks/results/2026-10-28-long-clip-chunking.json): parity (3.7% vs 3.8%), no accuracy gain; a sparse-chunk re-decode recovers a sentence Whisper skipped in one 25 s chunk |
+| Me/Them/Unknown (SEP-6), fuzzy duplicates, bleed detection (SEP-1 detection) | unit; synthetic two-track bleed incl. double-talk and offsets; decoded-WAV integration test; not run on a real meeting |
+| Drift never drops audio (BUG-5) | compiled-helper self-test at ±200 ppm over one simulated hour |
+| Mic reconnect (CAP-2) | compiled; logic not hardware-tested |
+| Permission requests (CAP-4), modifier-only and letter shortcuts (DIC-3) | unit for validation; hardware not tested |
+
+Limits of this pass: SEP-1's cancelled-microphone transcription (ASR on echo-cancelled audio) is not built; only bleed detection withholds "Me". The energy VAD removes silence and stationary noise, not speech-like noise. Clock-drift correction is recorded, not applied: a device clock 200 ppm fast leaves about 0.7 s of mic-to-system skew per hour. No UI performance harness was re-run after the UI changes.
+
+### Accuracy pass (October 28)
+
+All numbers are on public audio only; none were measured on the owner's recordings. Scripts and results are in `benchmarks/`.
+
+| Question | Result |
+|---|---|
+| New speech-aligned chunks versus the old 60 s windows | Parity on long read speech (3.7% vs 3.8% error); better on sparse meeting tracks (AMI, same small model: 24.3% to 20.8%). [Result](../benchmarks/results/2026-10-28-long-clip-chunking.json) |
+| Skipped sentences | One 25 s chunk silently dropped 23 words; chunks with implausibly few words are now re-decoded in halves, which recovered it |
+| Larger Whisper models | large-v3 best on read speech (2.0%), ties medium.en on AMI (19.5%); [result](../benchmarks/results/2026-10-28-whisper-models.json) |
+| Parakeet TDT v2 in the app | Best everywhere: 1.66% read speech, 16.42% AMI, versus 2.03% and 19.52% for large-v3, and about 100 times faster than real time; made the default. [Result](../benchmarks/results/2026-10-28-parakeet-tdt.json) |
+| Words invented on muted or idle microphones | Seven synthetic non-speech tracks: Parakeet TDT and Whisper small.en print nothing; large-v3 still printed 11 words on breathing-like noise. Sound annotations and caption sign-offs are suppressed. [Result](../benchmarks/results/2026-10-28-muted-mic.json) |
+| Raw capture retention | 7 days then a verified lossless copy (now WavPack with exact sample comparison; the FLAC version described here was replaced the same day) |
+
+Test count: 149 workspace tests pass; clippy with warnings denied and fmt are clean. Build note: after the Command Line Tools 26.6 update, C++ headers are missing from the compiler's default search path; set `CPLUS_INCLUDE_PATH="$(xcrun --show-sdk-path)/usr/include/c++/v1"` when building (or reinstall the Command Line Tools).
+

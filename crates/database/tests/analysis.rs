@@ -111,9 +111,16 @@ impl SpeechProcessing for Engine {
                 vec![]
             },
             intervals: if request.model == "diari" {
+                // The microphone voice speaks after the system audio finishes; one that coincided
+                // with system speech would be treated as echo and not offered for naming.
+                let lead = if track.kind == TrackKind::Microphone {
+                    7000
+                } else {
+                    0
+                };
                 vec![SpeakerInterval {
-                    start_ms: offset,
-                    end_ms: offset + 8000,
+                    start_ms: offset + lead,
+                    end_ms: offset + lead + 8000,
                     speaker: "anonymous-0".into(),
                     track_id: Some(track.id.clone()),
                 }]
@@ -415,6 +422,8 @@ async fn new_analysis_archives_receipt_and_keeps_corrections_and_original_runs()
                 created_at: now(),
             },
             0,
+            &[],
+            &[],
         )
         .await
         .unwrap();
@@ -459,6 +468,7 @@ async fn workflow_lease_survives_caller_abort_and_excludes_other_controller() {
     while f.engine.calls.lock().unwrap().is_empty() {
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     }
+    assert!(f.analysis.is_active("r").await.unwrap());
     caller.abort();
     assert!(matches!(
         f.analysis.analyze(f.input()).await,
@@ -521,6 +531,7 @@ async fn after_stop_intent_preflights_and_completes_shared_workflow() {
         .record(
             RecordMeetingInput {
                 capture: CaptureRecordingInput {
+                    dictation: false,
                     microphone_uid: None,
                     system_audio: true,
                     title: "Synthetic meeting".into(),
@@ -528,7 +539,9 @@ async fn after_stop_intent_preflights_and_completes_shared_workflow() {
                     final_transcription: None,
                 },
                 transcribe_after_stop: true,
+                skip_unavailable_model: false,
                 analyze_speakers: true,
+                matching_policy: None,
             },
             Arc::new(AtomicBool::new(false)),
         )
@@ -564,6 +577,7 @@ async fn after_stop_analysis_failure_can_resume_through_finalization() {
         .record(
             RecordMeetingInput {
                 capture: CaptureRecordingInput {
+                    dictation: false,
                     microphone_uid: None,
                     system_audio: true,
                     title: "Synthetic meeting".into(),
@@ -571,7 +585,9 @@ async fn after_stop_analysis_failure_can_resume_through_finalization() {
                     final_transcription: None,
                 },
                 transcribe_after_stop: true,
+                skip_unavailable_model: false,
                 analyze_speakers: true,
+                matching_policy: None,
             },
             Arc::new(AtomicBool::new(false)),
         )
@@ -624,6 +640,7 @@ async fn explicit_matching_can_suggest_fixture_identity_without_creating_more_ex
                 capture_domain: "system".into(),
                 vector: vec![1., 0.],
                 verified_at: now(),
+                origin: None,
             })
             .await
             .unwrap();
@@ -647,7 +664,6 @@ async fn explicit_matching_can_suggest_fixture_identity_without_creating_more_ex
 }
 #[tokio::test]
 async fn wrong_model_role_refuses_capture_and_pending_analysis_protects_processing_files() {
-    use parakeet_application::storage::StorageQueries;
     let f = Fixture::new(false, false).await;
     f.models.wrong.store(true, Ordering::SeqCst);
     assert!(
@@ -655,6 +671,7 @@ async fn wrong_model_role_refuses_capture_and_pending_analysis_protects_processi
             .record(
                 RecordMeetingInput {
                     capture: CaptureRecordingInput {
+                        dictation: false,
                         microphone_uid: None,
                         system_audio: true,
                         title: "Synthetic meeting".into(),
@@ -662,7 +679,9 @@ async fn wrong_model_role_refuses_capture_and_pending_analysis_protects_processi
                         final_transcription: None
                     },
                     transcribe_after_stop: true,
-                    analyze_speakers: true
+                    skip_unavailable_model: false,
+                    analyze_speakers: true,
+                    matching_policy: None
                 },
                 Arc::new(AtomicBool::new(false))
             )
@@ -678,6 +697,7 @@ async fn wrong_model_role_refuses_capture_and_pending_analysis_protects_processi
             .record(
                 RecordMeetingInput {
                     capture: CaptureRecordingInput {
+                        dictation: false,
                         microphone_uid: None,
                         system_audio: true,
                         title: "Synthetic meeting".into(),
@@ -685,21 +705,16 @@ async fn wrong_model_role_refuses_capture_and_pending_analysis_protects_processi
                         final_transcription: None
                     },
                     transcribe_after_stop: true,
-                    analyze_speakers: true
+                    skip_unavailable_model: false,
+                    analyze_speakers: true,
+                    matching_policy: None
                 },
                 Arc::new(AtomicBool::new(false))
             )
             .await
             .is_err()
     );
-    assert!(
-        f.store
-            .storage_runs()
-            .await
-            .unwrap()
-            .iter()
-            .all(|r| r.pending_meeting)
-    );
+    assert!(!f.meeting().pending().await.unwrap().is_empty());
     *f.engine.fail.lock().unwrap() = None;
     f.meeting()
         .finalize(FinalizeMeetingInput {
@@ -708,14 +723,7 @@ async fn wrong_model_role_refuses_capture_and_pending_analysis_protects_processi
         })
         .await
         .unwrap();
-    assert!(
-        f.store
-            .storage_runs()
-            .await
-            .unwrap()
-            .iter()
-            .all(|r| !r.pending_meeting)
-    );
+    assert!(f.meeting().pending().await.unwrap().is_empty());
 }
 #[tokio::test]
 async fn cancellation_settles_analysis_as_interrupted_and_resume_reuses_prior_work() {
@@ -768,9 +776,45 @@ async fn abandoned_source_requires_owned_recovery_before_analysis_resume() {
     assert_eq!(f.engine.calls.lock().unwrap().len(), calls);
     let recovery =
         ProcessingRecoveryService::new(f.store.clone(), f.store.clone(), f.ownership.clone());
+    // Simulate the durable state left by a terminated controller. The saved
+    // running label must not imply that a worker still owns the recording.
+    let saved = f.analysis.show("r").await.unwrap().unwrap();
+    let mut stale = saved.clone();
+    stale.status = "running".into();
+    assert!(
+        f.store
+            .replace_analysis(Some(&saved), &stale)
+            .await
+            .unwrap()
+    );
+    assert!(!f.analysis.is_active("r").await.unwrap());
+    use parakeet_application::jobs::ProcessingOwnership;
+    let key = stable_id("meeting-analysis-controller", "r");
+    let owner = f.ownership.try_acquire(&key).await.unwrap().unwrap();
+    assert!(f.analysis.is_active("r").await.unwrap());
+    drop(owner);
+    assert!(!f.analysis.is_active("r").await.unwrap());
+    assert!(
+        recovery
+            .recover_recording("other-recording")
+            .await
+            .unwrap()
+            .interrupted
+            .is_empty()
+    );
     assert_eq!(
-        recovery.recover().await.unwrap().interrupted,
+        recovery.recover_recording("r").await.unwrap().interrupted,
         vec![abandoned.id]
     );
-    assert_eq!(f.analysis.analyze(f.input()).await.unwrap().id, plan.id);
+    // Recovery changes abandoned source jobs, while the old plan remains
+    // resumable even though its saved status still says running.
+    assert_eq!(
+        f.analysis.show("r").await.unwrap().unwrap().status,
+        "running"
+    );
+    assert!(!f.analysis.is_active("r").await.unwrap());
+    let resumed = f.analysis.analyze(f.input()).await.unwrap();
+    assert_eq!(resumed.id, plan.id);
+    assert_eq!(resumed.status, "completed");
+    assert!(!resumed.candidates.is_empty());
 }

@@ -1,0 +1,26 @@
+{
+ "id": "muted-mic-probe",
+ "date": "2026-10-28",
+ "data": "Seven generated 3-minute non-speech tracks (benchmarks/prepare_muted.py): digital silence, self-noise, room noise, keyboard clicks, mains hum, modulated breathing noise, fan noise. All synthetic; not a real muted microphone.",
+ "false_words_before": {
+  "whisper-small.en": {
+   "breathing-minus35": 30,
+   "others": 0
+  },
+  "whisper-large-v3": {
+   "breathing-minus35": 53,
+   "others": 0
+  }
+ },
+ "false_words_after": {
+  "whisper-small.en": {
+   "all tracks": 0
+  },
+  "whisper-large-v3": {
+   "breathing-minus35": 11,
+   "others": 0
+  }
+ },
+ "change": "Bracketed sound annotations and caption sign-offs (for example '(air whooshing)', 'Thank you for watching') are kept as evidence but not published. Energy gating was rejected: genuine quiet backchannels have lower RMS (0.0016) than the hallucinating chunks (0.0036). large-v3 reports no_speech_probability of 0, so that signal cannot be used with it.",
+ "remaining": "large-v3 still prints 'Satsang with Mooji' and 'Thank you.' on the breathing track; AMI WER is unchanged by the filter (small.en 20.28%, large-v3 19.52%)."
+}

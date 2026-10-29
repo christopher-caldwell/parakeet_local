@@ -87,6 +87,13 @@ fn parse_folder(folder: &Path) -> Result<ImportBundle, CapabilityError> {
         .or_else(|| folder.file_name().and_then(|s| s.to_str()))
         .ok_or_else(|| CapabilityError::message("missing source identity"))?;
     let native = manifest["schema"].as_str() == Some("com.parakeet.local.capture");
+    if native
+        && metadata["errors"]
+            .as_array()
+            .is_some_and(|errors| !errors.is_empty())
+    {
+        warnings.push("Capture reported a source failure; inspect the saved source audio".into());
+    }
     let source_key = format!(
         "{}:{}",
         if native {
@@ -105,7 +112,12 @@ fn parse_folder(folder: &Path) -> Result<ImportBundle, CapabilityError> {
     let recording = Recording {
         id: id.clone(),
         source_key,
-        source_kind: "meeting".into(),
+        source_kind: if native && meeting["kind"] == "dictation" {
+            "dictation"
+        } else {
+            "meeting"
+        }
+        .into(),
         source_title: title,
         title_override: None,
         created_at: meeting["createdAt"]
@@ -137,6 +149,14 @@ fn parse_folder(folder: &Path) -> Result<ImportBundle, CapabilityError> {
         }
         if native {
             let report = &metadata["sourceAlignment"][key];
+            if report["clockDrift"]
+                .as_array()
+                .is_some_and(|d| !d.is_empty())
+            {
+                warnings.push(format!(
+                    "{source_id}: {key} device clock ran ahead of the host clock; no audio was dropped, drift is recorded in the source report"
+                ));
+            }
             if report["errors"].as_array().is_some_and(|e| !e.is_empty())
                 || report["droppedBuffers"].as_u64().unwrap_or(0) > 0
                 || report["gaps"].as_array().is_some_and(|g| !g.is_empty())
@@ -145,6 +165,16 @@ fn parse_folder(folder: &Path) -> Result<ImportBundle, CapabilityError> {
                     "{source_id}: {key} capture gaps, drops or errors; inspect source report"
                 ));
             }
+        }
+        if native
+            && key == "microphone"
+            && metadata["microphoneInterruptions"]
+                .as_array()
+                .is_some_and(|gaps| !gaps.is_empty())
+        {
+            warnings.push(format!(
+                "{source_id}: the selected microphone disconnected during the meeting; the gap is recorded and nothing else was substituted"
+            ));
         }
         let caf = current.replace(".m4a", ".caf");
         let p = if folder.join(&caf).exists() {
@@ -170,6 +200,17 @@ fn parse_folder(folder: &Path) -> Result<ImportBundle, CapabilityError> {
         );
         if native {
             track.provenance["ownership"] = json!("application_owned");
+            let report = &metadata["sourceAlignment"][key];
+            if report["writtenFrameCount"].as_i64().unwrap_or(0) > 0
+                && report["peakAmplitude"]
+                    .as_f64()
+                    .is_some_and(|peak| peak < SILENT_SOURCE_PEAK)
+            {
+                track.provenance["silent_source"] = json!(true);
+                warnings.push(format!(
+                    "{source_id}: {key} source delivered audio but never reached a speech level; check the input device"
+                ));
+            }
         }
         if !track.available {
             warnings.push(format!("{source_id}: missing {key} source audio"));
@@ -210,7 +251,25 @@ fn parse_folder(folder: &Path) -> Result<ImportBundle, CapabilityError> {
                 .as_str()
                 .map(str::to_owned)
                 .unwrap_or_else(|| ordinal.to_string());
-            segments.push(TranscriptSegment{id:stable_id("segment",&format!("{id}:{external}:{ordinal}")),recording_id:id.clone(),run_id:run_id.clone(),track_id:None,ordinal,start_ms:start,end_ms:end,text:text.into(),speaker_claim:s["speakerLabel"].as_str().or_else(||s["speakerId"].as_str()).map(str::to_owned),evidence:json!({"origin":"imported_unverified","source_segment":s,"source_attribution":"unknown"})});
+            // MacParakeet speaker ids are source-prefixed ("microphone", "system", "system:N").
+            // The mapped track is imported, unverified evidence of the source, not an identity.
+            let imported_kind = match s["speakerId"].as_str() {
+                Some("microphone") => Some(TrackKind::Microphone),
+                Some(id) if id == "system" || id.starts_with("system:") => Some(TrackKind::System),
+                _ => None,
+            };
+            let imported_track = imported_kind.as_ref().and_then(|kind| {
+                tracks
+                    .iter()
+                    .find(|t| &t.kind == kind)
+                    .map(|t| t.id.clone())
+            });
+            let source_attribution = match &imported_kind {
+                Some(TrackKind::Microphone) => "imported_microphone",
+                Some(_) => "imported_system",
+                None => "unknown",
+            };
+            segments.push(TranscriptSegment{id:stable_id("segment",&format!("{id}:{external}:{ordinal}")),recording_id:id.clone(),run_id:run_id.clone(),track_id:imported_track,ordinal,start_ms:start,end_ms:end,text:text.into(),speaker_claim:s["speakerLabel"].as_str().or_else(||s["speakerId"].as_str()).map(str::to_owned),evidence:json!({"origin":"imported_unverified","source_segment":s,"source_attribution":source_attribution})});
         }
     }
     if segments.is_empty()
@@ -360,134 +419,6 @@ impl RecordingSource for MacParakeetArtifacts {
     }
 }
 
-#[async_trait]
-impl LegacyNormalization for MacParakeetArtifacts {
-    async fn normalize(
-        &self,
-        source: &LegacySourceRecord,
-    ) -> Result<ImportBundle, CapabilityError> {
-        let key = format!(
-            "macparakeet:{}:{}",
-            source.source_type,
-            source.source_id.to_lowercase()
-        );
-        let id = stable_id("recording", &key);
-        let mut warnings = vec![];
-        let mut tracks = vec![];
-        if let Some(path) = &source.file_path {
-            let kind = if source.source_type == "meeting" {
-                TrackKind::Playback
-            } else {
-                TrackKind::File
-            };
-            let mut track = track_at(PathBuf::from(path), &id, kind, &json!({"startOffsetMs":0}));
-            if track.available {
-                match crate::audio::probe(Path::new(path)).await {
-                    Ok(probe) => {
-                        track.duration_ms = probe["duration_ms"].as_i64();
-                        track.sample_rate = probe["sample_rate"].as_u64().map(|r| r as u32);
-                        track.provenance["probe"] = probe;
-                        if let Err(error) = fingerprint_import(&mut track).await {
-                            track.available = false;
-                            warnings.push(error.to_string());
-                        }
-                    }
-                    Err(e) => {
-                        track.available = false;
-                        warnings.push(e.to_string());
-                    }
-                }
-            } else {
-                warnings.push(format!("{}: source audio missing", source.source_id));
-            }
-            tracks.push(track);
-        } else {
-            warnings.push(format!(
-                "{}: source has no retained audio path",
-                source.source_id
-            ));
-        }
-        let parse = |key: &str| {
-            source.original[key]
-                .as_str()
-                .and_then(|s| serde_json::from_str::<Value>(s).ok())
-                .unwrap_or(Value::Null)
-        };
-        let mut segments = vec![];
-        let raw_segments = parse("transcriptSegments");
-        let run_id = format!("import:{id}");
-        if let Some(list) = raw_segments.as_array() {
-            for (ordinal, s) in list.iter().enumerate() {
-                let Some(text) = s["text"].as_str() else {
-                    continue;
-                };
-                let start = s["startMs"].as_i64();
-                let end = s["endMs"].as_i64();
-                let timed = matches!((start,end),(Some(a),Some(b))if a>=0&&b>=a);
-                segments.push(TranscriptSegment {
-                    id: stable_id(
-                        "segment",
-                        &format!(
-                            "{id}:{}:{ordinal}",
-                            s["id"]
-                                .as_str()
-                                .map(str::to_owned)
-                                .unwrap_or_else(|| ordinal.to_string())
-                        ),
-                    ),
-                    recording_id: id.clone(),
-                    run_id: run_id.clone(),
-                    track_id: None,
-                    ordinal,
-                    start_ms: if timed { start } else { None },
-                    end_ms: if timed { end } else { None },
-                    text: text.into(),
-                    speaker_claim: s["speakerLabel"]
-                        .as_str()
-                        .or_else(|| s["speakerId"].as_str())
-                        .map(str::to_owned),
-                    evidence: json!({"origin":"imported_database_unverified","original":s}),
-                });
-            }
-        }
-        if segments.is_empty()
-            && let Some(text) = source.original["cleanTranscript"]
-                .as_str()
-                .or_else(|| source.original["rawTranscript"].as_str())
-                .filter(|s| !s.is_empty())
-        {
-            segments.push(TranscriptSegment {
-                id: stable_id("segment", &format!("{id}:untimed")),
-                recording_id: id.clone(),
-                run_id,
-                track_id: None,
-                ordinal: 0,
-                start_ms: None,
-                end_ms: None,
-                text: text.into(),
-                speaker_claim: None,
-                evidence: json!({"origin":"imported_database_unverified"}),
-            });
-        }
-        order_segments(&mut segments);
-        Ok(ImportBundle {
-            recording: Recording {
-                id,
-                source_key: key,
-                source_kind: source.source_type.clone(),
-                source_title: source.title.clone(),
-                title_override: None,
-                created_at: source.created_at.clone(),
-                duration_ms: source.duration_ms,
-                metadata: json!({"source_id":source.source_id,"source_url":source.original["sourceURL"],"channel":source.original["channelName"],"origin":"macparakeet_database_read_only"}),
-            },
-            tracks,
-            segments,
-            original: source.original.clone(),
-            warnings,
-        })
-    }
-}
 async fn fingerprint_import(track: &mut AudioTrack) -> Result<(), CapabilityError> {
     let identity = parakeet_application::audio_locations::AudioFileIdentityReader::identify(
         &crate::audio::LocalAudioIdentity,
@@ -526,6 +457,85 @@ mod tests {
         assert_eq!(b.segments[1].speaker_claim.as_deref(), Some("Me"));
         assert_eq!(b.segments[1].track_id, None);
     }
+    #[test]
+    fn imported_source_prefixed_speaker_ids_map_to_unverified_tracks() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("manifest.json"),
+            r#"{"schemaVersion":1,"meeting":{"id":"s","title":"T","createdAt":"2026-01-01"}}"#,
+        )
+        .unwrap();
+        std::fs::write(tmp.path().join("transcript.json"),r#"{"transcriptSegments":[{"text":"a","startMs":0,"endMs":1,"speakerId":"microphone","speakerLabel":"Alex"},{"text":"b","startMs":2,"endMs":3,"speakerId":"system:2","speakerLabel":"Others 2"},{"text":"c","startMs":4,"endMs":5,"speakerLabel":"x"}]}"#).unwrap();
+        std::fs::write(tmp.path().join("meeting-recording-metadata.json"), "{}").unwrap();
+        let b = parse_folder(tmp.path()).unwrap();
+        let mic = b
+            .tracks
+            .iter()
+            .find(|t| t.kind == TrackKind::Microphone)
+            .unwrap();
+        let sys = b
+            .tracks
+            .iter()
+            .find(|t| t.kind == TrackKind::System)
+            .unwrap();
+        assert_eq!(b.segments[0].track_id.as_deref(), Some(mic.id.as_str()));
+        assert_eq!(b.segments[1].track_id.as_deref(), Some(sys.id.as_str()));
+        assert_eq!(b.segments[2].track_id, None);
+        assert_eq!(
+            b.segments[0].evidence["source_attribution"],
+            "imported_microphone"
+        );
+        assert_eq!(b.segments[0].evidence["origin"], "imported_unverified");
+    }
+    #[test]
+    fn captured_source_that_never_reaches_speech_level_is_marked_silent() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("manifest.json"),r#"{"schema":"com.parakeet.local.capture","schemaVersion":1,"meeting":{"id":"s","title":"T","createdAt":"2026-01-01"}}"#).unwrap();
+        std::fs::write(tmp.path().join("meeting-recording-metadata.json"),r#"{"requestedMicrophoneUID":"mic","requestedSystemAudio":true,"sourceAlignment":{"microphone":{"writtenFrameCount":480000,"peakAmplitude":0.0,"startOffsetMs":0},"system":{"writtenFrameCount":480000,"peakAmplitude":0.4,"startOffsetMs":0}}}"#).unwrap();
+        std::fs::write(tmp.path().join("transcript.json"), "{}").unwrap();
+        let b = parse_folder(tmp.path()).unwrap();
+        let mic = b
+            .tracks
+            .iter()
+            .find(|t| t.kind == TrackKind::Microphone)
+            .unwrap();
+        let sys = b
+            .tracks
+            .iter()
+            .find(|t| t.kind == TrackKind::System)
+            .unwrap();
+        assert_eq!(mic.provenance["silent_source"], true);
+        assert!(sys.provenance["silent_source"].is_null());
+        assert!(
+            b.warnings
+                .iter()
+                .any(|w| w.contains("microphone source delivered audio"))
+        );
+    }
+    #[test]
+    fn dictation_captures_are_not_meetings() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("manifest.json"), r#"{"schema":"com.parakeet.local.capture","meeting":{"id":"dictation-test","title":"Dictation","kind":"dictation","createdAt":"2026-01-01"}}"#).unwrap();
+        std::fs::write(tmp.path().join("meeting-recording-metadata.json"), r#"{"requestedMicrophoneUID":"test-input","requestedSystemAudio":false,"errors":[],"sourceAlignment":{"microphone":{"writtenFrameCount":48000,"peakAmplitude":0.5,"startOffsetMs":0}}}"#).unwrap();
+        assert_eq!(
+            parse_folder(tmp.path()).unwrap().recording.source_kind,
+            "dictation"
+        );
+    }
+    #[test]
+    fn startup_failure_is_not_erased_when_a_source_later_delivers_frames() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("manifest.json"), r#"{"schema":"com.parakeet.local.capture","meeting":{"id":"capture-test","title":"Test","createdAt":"2026-01-01"}}"#).unwrap();
+        std::fs::write(tmp.path().join("meeting-recording-metadata.json"), r#"{"requestedMicrophoneUID":"test-input","requestedSystemAudio":false,"errors":["Microphone delivered no buffers before the deadline"],"sourceAlignment":{"microphone":{"writtenFrameCount":480000,"peakAmplitude":0.5,"startOffsetMs":6000}}}"#).unwrap();
+        let bundle = parse_folder(tmp.path()).unwrap();
+        assert!(
+            bundle
+                .warnings
+                .iter()
+                .any(|w| w.contains("Capture reported a source failure"))
+        );
+    }
+
     #[test]
     fn malformed_manifest_is_reported() {
         let tmp = tempfile::tempdir().unwrap();

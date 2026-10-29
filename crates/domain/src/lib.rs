@@ -33,6 +33,14 @@ pub struct Recording {
     pub metadata: Value,
 }
 impl Recording {
+    /// Capture integrity is independent of whether later transcription succeeded.
+    pub fn capture_needs_attention(&self) -> bool {
+        matches!(
+            self.metadata["state"].as_str(),
+            Some("partial_needs_inspection" | "recovered_partial")
+        )
+    }
+
     pub fn title(&self) -> &str {
         self.title_override.as_deref().unwrap_or(&self.source_title)
     }
@@ -189,6 +197,58 @@ pub struct ProcessingRun {
     pub result: Value,
     pub error: Option<String>,
 }
+impl ProcessingRun {
+    /// A diarization run that covered the whole source (not a bounded experiment).
+    fn covers_whole_source(&self) -> bool {
+        let request = &self.configuration["request"];
+        request["start_ms"].as_i64() == Some(0) && request["duration_ms"].is_null()
+    }
+}
+/// The diarization run that currently defines speaker attribution for each track:
+/// the latest completed full-source run, or the latest human cluster edit derived
+/// from it. Bounded experiments and edits of superseded runs never become current.
+pub fn current_diarization_runs<'a>(
+    runs: &'a [ProcessingRun],
+) -> std::collections::BTreeMap<String, &'a ProcessingRun> {
+    let done = |r: &&'a ProcessingRun| r.kind == "diarization" && r.status == "completed";
+    let by_id: std::collections::HashMap<&'a str, &'a ProcessingRun> = runs
+        .iter()
+        .filter(done)
+        .map(|r| (r.id.as_str(), r))
+        .collect();
+    let root = |mut run: &'a ProcessingRun| -> Option<String> {
+        for _ in 0..runs.len() + 1 {
+            match run.configuration["human_edit_source_run"].as_str() {
+                None => return run.covers_whole_source().then(|| run.id.clone()),
+                Some(parent) => run = by_id.get(parent).copied()?,
+            }
+        }
+        None
+    };
+    let mut full = std::collections::BTreeMap::<String, &'a ProcessingRun>::new();
+    for run in runs.iter().filter(done) {
+        let Some(track) = run.configuration["track"]["id"].as_str() else {
+            continue;
+        };
+        if run.configuration["human_edit_source_run"].is_null() && run.covers_whole_source() {
+            full.insert(track.to_owned(), run);
+        }
+    }
+    let mut current = full.clone();
+    for run in runs.iter().filter(done) {
+        let Some(track) = run.configuration["track"]["id"].as_str() else {
+            continue;
+        };
+        if run.configuration["human_edit_source_run"].is_string()
+            && full
+                .get(track)
+                .is_some_and(|f| root(run).as_deref() == Some(f.id.as_str()))
+        {
+            current.insert(track.to_owned(), run);
+        }
+    }
+    current
+}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpeakerProfile {
     pub id: String,
@@ -208,6 +268,18 @@ pub struct VoiceExample {
     pub capture_domain: String,
     pub vector: Vec<f32>,
     pub verified_at: String,
+    /// How the user's confirmation produced this example; `None` for a manually chosen interval.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<ExampleOrigin>,
+}
+/// Reversible provenance of an example admitted from a user's identification or correction.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExampleOrigin {
+    /// Always `user_identification`: a model prediction alone never creates an example.
+    pub verified_by: String,
+    /// `cluster_identification`, `suggestion_resolution` or `segment_correction`.
+    pub source_kind: String,
+    pub source_id: String,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Correction {
@@ -306,14 +378,53 @@ mod tests {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AudioPreferences {
     pub microphone_uid: Option<String>,
     pub system_audio: bool,
-    #[serde(default)]
+    /// Meetings are transcribed after Stop unless the user turns this off. When no verified
+    /// ASR model is installed the audio is still saved and the skipped transcription is reported.
+    #[serde(default = "transcribe_by_default")]
     pub transcribe_meetings_after_stop: bool,
-    #[serde(default)]
+    /// Speaker detection and the echo check run after Stop unless turned off: accuracy comes
+    /// first, and without the echo check microphone speech is never labeled "Me".
+    #[serde(default = "transcribe_by_default")]
     pub analyze_meetings_after_stop: bool,
+    /// Offer name suggestions after Stop using the saved calibrated criteria. Suggestions are
+    /// never confirmed names. Off until the user enables it.
+    #[serde(default)]
+    pub suggest_speakers_after_stop: bool,
+    #[serde(default)]
+    pub matching_policy: Option<SavedMatchingPolicy>,
+    /// Voice candidates the user chose to skip for good (for example people who will not come up
+    /// again), so they are not offered for naming every time the recording opens.
+    #[serde(default)]
+    pub skipped_voices: Vec<String>,
+}
+/// Criteria the user adopted from a calibration report, kept with the evidence behind them.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SavedMatchingPolicy {
+    pub policy: recognition::MatchPolicy,
+    pub saved_at: String,
+    pub provenance: calibration::CalibrationReport,
+}
+/// Peak amplitude (about -50 dBFS) below which a source that delivered audio is treated as silent.
+pub const SILENT_SOURCE_PEAK: f64 = 0.003;
+fn transcribe_by_default() -> bool {
+    true
+}
+impl Default for AudioPreferences {
+    fn default() -> Self {
+        Self {
+            microphone_uid: None,
+            system_audio: false,
+            transcribe_meetings_after_stop: true,
+            analyze_meetings_after_stop: true,
+            suggest_speakers_after_stop: false,
+            matching_policy: None,
+            skipped_voices: vec![],
+        }
+    }
 }
 impl AudioPreferences {
     pub fn validate(&self) -> Result<(), ValidationError> {
@@ -329,12 +440,93 @@ impl AudioPreferences {
                 "speaker analysis after Stop requires local transcription".into(),
             ));
         }
+        if self.suggest_speakers_after_stop
+            && (!self.analyze_meetings_after_stop || self.matching_policy.is_none())
+        {
+            return Err(ValidationError(
+                "speaker suggestions after Stop need speaker analysis and a saved calibrated policy"
+                    .into(),
+            ));
+        }
+        if let Some(saved) = &self.matching_policy {
+            saved.policy.validate()?;
+        }
         Ok(())
     }
 }
+impl AudioPreferences {
+    /// The criteria to apply after Stop, only when the user opted in.
+    pub fn after_stop_policy(&self) -> Option<recognition::MatchPolicy> {
+        self.suggest_speakers_after_stop
+            .then(|| {
+                self.matching_policy
+                    .as_ref()
+                    .map(|saved| saved.policy.clone())
+            })
+            .flatten()
+    }
+}
+
+pub mod calibration;
 
 pub mod reconciliation;
 
 pub mod cluster_edits;
 
 pub mod storage;
+
+#[cfg(test)]
+mod current_diarization_tests {
+    use super::*;
+    use serde_json::json;
+    fn run(id: &str, config: Value) -> ProcessingRun {
+        ProcessingRun {
+            id: id.into(),
+            recording_id: "r".into(),
+            kind: "diarization".into(),
+            model: "m".into(),
+            model_revision: "1".into(),
+            status: "completed".into(),
+            started_at: String::new(),
+            completed_at: None,
+            configuration: config,
+            result: json!({}),
+            error: None,
+        }
+    }
+    fn full(id: &str) -> ProcessingRun {
+        run(
+            id,
+            json!({"track":{"id":"t"},"request":{"start_ms":0,"duration_ms":null}}),
+        )
+    }
+    fn bounded(id: &str) -> ProcessingRun {
+        run(
+            id,
+            json!({"track":{"id":"t"},"request":{"start_ms":5000,"duration_ms":60000}}),
+        )
+    }
+    fn edit(id: &str, source: &str) -> ProcessingRun {
+        run(
+            id,
+            json!({"track":{"id":"t"},"human_edit_source_run":source}),
+        )
+    }
+    fn current(runs: &[ProcessingRun]) -> String {
+        current_diarization_runs(runs)["t"].id.clone()
+    }
+    #[test]
+    fn bounded_experiment_never_replaces_full_run() {
+        assert_eq!(current(&[full("f"), bounded("b")]), "f");
+        assert!(current_diarization_runs(&[bounded("b")]).is_empty());
+    }
+    #[test]
+    fn edit_of_current_full_run_wins_over_later_bounded_run() {
+        assert_eq!(current(&[full("f"), edit("e", "f"), bounded("b")]), "e");
+        assert_eq!(current(&[full("f"), edit("e", "f"), edit("u", "e")]), "u");
+    }
+    #[test]
+    fn new_full_run_supersedes_edits_of_older_run() {
+        assert_eq!(current(&[full("f1"), edit("e", "f1"), full("f2")]), "f2");
+    }
+}

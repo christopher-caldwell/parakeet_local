@@ -1,6 +1,14 @@
 use super::*;
 use crate::processing::{EmbeddingRequest, VoiceEmbeddings};
 use parakeet_domain::recognition::{IdentityDecision, MatchPolicy, suggest};
+mod history;
+mod identification;
+mod imported;
+mod reembed;
+pub use history::*;
+pub use identification::*;
+pub use imported::*;
+pub use reembed::*;
 operation_error!(ListSpeakersError,sources{Persistence:PersistenceError=>"persistence"},values{});
 operation_error!(ListVoiceExamplesError,sources{Persistence:PersistenceError=>"persistence"},values{});
 operation_error!(CreateSpeakerError,sources{Invalid:ValidationError=>"invalid_input",Persistence:PersistenceError=>"persistence"},values{});
@@ -23,7 +31,33 @@ pub struct SuggestSpeakerInput {
     pub track_id: String,
     pub start_ms: i64,
     pub end_ms: i64,
+    /// Further clean ranges of the same cluster pooled into one embedding.
+    pub more_ranges: Vec<(i64, i64)>,
     pub policy: MatchPolicy,
+}
+/// Voice examples a speaker decision admits and removes, written atomically with it.
+#[derive(Debug, Default)]
+pub(crate) struct LearningEffect {
+    pub admit: Vec<VoiceExample>,
+    pub remove: Vec<String>,
+    pub note: Option<String>,
+}
+fn origin(source_kind: &str, source_id: &str) -> parakeet_domain::ExampleOrigin {
+    parakeet_domain::ExampleOrigin {
+        verified_by: "user_identification".into(),
+        source_kind: source_kind.into(),
+        source_id: source_id.into(),
+    }
+}
+/// A saved correction plus the verified example it admitted, if any.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CorrectionOutcome {
+    #[serde(flatten)]
+    pub correction: Correction,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub example: Option<VoiceExampleSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub example_note: Option<String>,
 }
 #[derive(Debug, Clone)]
 pub struct CorrectSegmentInput {
@@ -36,6 +70,11 @@ pub struct CorrectSegmentInput {
 pub trait SpeakerQueries: Send + Sync {
     async fn profiles(&self) -> Result<Vec<SpeakerProfile>, PersistenceError>;
     async fn examples(&self, profile: Option<&str>) -> Result<Vec<VoiceExample>, PersistenceError>;
+    /// Examples cut from one recording, of any person.
+    async fn recording_examples(
+        &self,
+        recording_id: &str,
+    ) -> Result<Vec<VoiceExample>, PersistenceError>;
     async fn segment(&self, id: &str) -> Result<Option<TranscriptSegment>, PersistenceError>;
     async fn corrections(&self, segment_id: &str) -> Result<Vec<Correction>, PersistenceError>;
     async fn suggestions(
@@ -43,6 +82,15 @@ pub trait SpeakerQueries: Send + Sync {
         recording_id: Option<&str>,
     ) -> Result<Vec<SpeakerSuggestion>, PersistenceError>;
     async fn suggestion(&self, id: &str) -> Result<Option<SpeakerSuggestion>, PersistenceError>;
+    async fn notes(&self, profile_id: &str) -> Result<String, PersistenceError>;
+    async fn identification(
+        &self,
+        id: &str,
+    ) -> Result<Option<ClusterIdentification>, PersistenceError>;
+    async fn identifications(
+        &self,
+        recording_id: Option<&str>,
+    ) -> Result<Vec<ClusterIdentification>, PersistenceError>;
 }
 #[async_trait]
 pub trait SpeakerWrites: Send + Sync {
@@ -54,16 +102,39 @@ pub trait SpeakerWrites: Send + Sync {
         expected_revision: usize,
         correction: Option<&Correction>,
         expected_correction_revision: usize,
+        admit: &[VoiceExample],
+        remove: &[String],
     ) -> Result<bool, PersistenceError>;
     async fn create_profile(&self, profile: &SpeakerProfile) -> Result<(), PersistenceError>;
     async fn rename_profile(&self, id: &str, name: &str) -> Result<bool, PersistenceError>;
     async fn delete_profile(&self, id: &str) -> Result<bool, PersistenceError>;
     async fn enroll(&self, example: &VoiceExample) -> Result<(), PersistenceError>;
     async fn remove_example(&self, id: &str) -> Result<bool, PersistenceError>;
+    async fn save_notes(&self, profile_id: &str, notes: &str) -> Result<bool, PersistenceError>;
+    /// Atomically records a cluster identification, appends its segment corrections (each
+    /// against the expected revision) and inserts the examples it admitted. `false` on conflict.
+    async fn save_identification(
+        &self,
+        identification: &ClusterIdentification,
+        corrections: &[(Correction, usize)],
+        examples: &[VoiceExample],
+    ) -> Result<bool, PersistenceError>;
+    /// Atomically marks the identification undone, appends the reverting corrections and
+    /// deletes the examples it admitted. `false` if anything changed meanwhile.
+    async fn undo_identification(
+        &self,
+        identification: &ClusterIdentification,
+        corrections: &[(Correction, usize)],
+        example_ids: &[String],
+    ) -> Result<bool, PersistenceError>;
+    /// Appends the correction against the expected revision and applies its learning effect
+    /// (examples admitted and removed) atomically. `false` on conflict.
     async fn correct(
         &self,
         correction: &Correction,
         expected_revision: usize,
+        admit: &[VoiceExample],
+        remove: &[String],
     ) -> Result<bool, PersistenceError>;
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -89,6 +160,9 @@ pub struct VoiceExampleSummary {
     pub capture_domain: String,
     pub verified_at: String,
     pub vector_dimensions: usize,
+    /// Present when the example was admitted from a user's identification or correction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<parakeet_domain::ExampleOrigin>,
 }
 impl From<VoiceExample> for VoiceExampleSummary {
     fn from(e: VoiceExample) -> Self {
@@ -104,6 +178,7 @@ impl From<VoiceExample> for VoiceExampleSummary {
             capture_domain: e.capture_domain,
             verified_at: e.verified_at,
             vector_dimensions: e.vector.len(),
+            origin: e.origin,
         }
     }
 }
@@ -113,6 +188,12 @@ pub struct SpeakerService {
     library: Arc<dyn LibraryQueries>,
     engine: Arc<dyn VoiceEmbeddings>,
     models: Arc<dyn LocalModels>,
+}
+pub(crate) fn name_taken(name: &str) -> ValidationError {
+    ValidationError(format!(
+        "{} is already one of your people; choose them instead",
+        name.trim()
+    ))
 }
 impl SpeakerService {
     pub fn new(
@@ -145,8 +226,30 @@ impl SpeakerService {
             .map(VoiceExampleSummary::from)
             .collect())
     }
+    /// Proposes matching criteria from verified examples (tuning recordings only) and scores
+    /// them once on held-out recordings. Never changes any setting by itself.
+    pub async fn calibrate(
+        &self,
+    ) -> Result<parakeet_domain::calibration::CalibrationReport, ListVoiceExamplesError> {
+        Ok(parakeet_domain::calibration::calibrate(
+            &self.queries.examples(None).await?,
+        ))
+    }
+    /// A second person with the same name would split one person's voice and corrections.
+    pub(crate) async fn name_in_use(
+        &self,
+        name: &str,
+        except: Option<&str>,
+    ) -> Result<bool, PersistenceError> {
+        Ok(self.queries.profiles().await?.into_iter().any(|p| {
+            Some(p.id.as_str()) != except && p.name.trim().eq_ignore_ascii_case(name.trim())
+        }))
+    }
     pub async fn create(&self, name: &str) -> Result<SpeakerProfile, CreateSpeakerError> {
         Recording::validate_title(name)?;
+        if self.name_in_use(name, None).await? {
+            return Err(name_taken(name).into());
+        }
         let p = SpeakerProfile {
             id: new_id(),
             name: name.into(),
@@ -159,6 +262,9 @@ impl SpeakerService {
         let id = input.id.as_str();
         let name = input.name.as_str();
         Recording::validate_title(name)?;
+        if self.name_in_use(name, Some(id)).await? {
+            return Err(name_taken(name).into());
+        }
         if !self.writes.rename_profile(id, name).await? {
             return Err(RenameSpeakerError::NotFound(id.into()));
         }
@@ -218,6 +324,7 @@ impl SpeakerService {
                 track: track.clone(),
                 start_ms: input.start_ms,
                 end_ms: input.end_ms,
+                more_ranges: vec![],
                 model: self.models.selection().await?.embedding,
             })
             .await?;
@@ -265,6 +372,7 @@ impl SpeakerService {
             capture_domain: format!("{:?}", track.kind).to_lowercase(),
             vector: output.vector,
             verified_at: now(),
+            origin: None,
         };
         self.writes.enroll(&example).await?;
         Ok(example.into())
@@ -286,6 +394,7 @@ impl SpeakerService {
                 && existing.track_id == input.track_id
                 && existing.start_ms == input.start_ms
                 && existing.end_ms == input.end_ms
+                && existing.more_ranges == input.more_ranges
                 && existing.source_model.as_ref() == Some(model)
                 && json!(existing.policy) == json!(input.policy)
             {
@@ -311,12 +420,19 @@ impl SpeakerService {
         let track_id = input.track_id.as_str();
         let start_ms = input.start_ms;
         let end_ms = input.end_ms;
+        let more_ranges = input.more_ranges;
         let policy = input.policy;
         policy.validate()?;
-        if start_ms < 0 || end_ms - start_ms < 3000 || end_ms - start_ms > 30_000 {
-            return Err(
-                ValidationError("suggestion needs a 3–30 second clean sample".into()).into(),
-            );
+        let ranges = || std::iter::once((start_ms, end_ms)).chain(more_ranges.iter().copied());
+        let total: i64 = ranges().map(|(a, b)| b - a).sum();
+        if ranges().any(|(a, b)| a < 0 || b <= a || b - a > 30_000)
+            || !(3000..=90_000).contains(&total)
+        {
+            return Err(ValidationError(
+                "suggestion needs 3–90 seconds of clean speech in ranges of at most 30 seconds"
+                    .into(),
+            )
+            .into());
         }
         let d = self
             .library
@@ -334,6 +450,7 @@ impl SpeakerService {
                 track: t.clone(),
                 start_ms,
                 end_ms,
+                more_ranges: more_ranges.clone(),
                 model: if let Some(model) = model {
                     model.id.clone()
                 } else {
@@ -355,6 +472,7 @@ impl SpeakerService {
             track_id: track_id.into(),
             start_ms,
             end_ms,
+            more_ranges,
             model: e.model,
             revision: e.revision,
             source_model: model.cloned(),
@@ -369,7 +487,7 @@ impl SpeakerService {
     pub async fn correct(
         &self,
         input: CorrectSegmentInput,
-    ) -> Result<Correction, CorrectSegmentError> {
+    ) -> Result<CorrectionOutcome, CorrectSegmentError> {
         let segment_id = input.segment_id.as_str();
         let profile_id = input.profile_id;
         let text = input.text;
@@ -403,34 +521,137 @@ impl SpeakerService {
             action: action.into(),
             created_at: now(),
         };
-        if !self.writes.correct(&c, previous.len()).await? {
+        let mut after = previous.clone();
+        after.push(c.clone());
+        let effect = if action == "text" {
+            LearningEffect::default()
+        } else {
+            self.learning_effect(
+                segment_id,
+                &after,
+                Some(origin("segment_correction", &c.id)),
+                None,
+            )
+            .await?
+        };
+        if !self
+            .writes
+            .correct(&c, previous.len(), &effect.admit, &effect.remove)
+            .await?
+        {
             return Err(CorrectSegmentError::Conflict(
                 "Another correction was saved; reread before applying this change".into(),
             ));
         }
-        Ok(c)
+        Ok(CorrectionOutcome {
+            correction: c,
+            example: effect.admit.into_iter().next().map(Into::into),
+            example_note: effect.note,
+        })
+    }
+    /// What a segment's new speaker decision does to the learned voices. Examples overlapping the
+    /// segment that the decision contradicts are removed: those of anyone else when the segment is
+    /// now a person, all of them when it is now Unknown, and, when it returns to the model's
+    /// attribution, those admitted from segment decisions plus any learned for the person an undo
+    /// retracted.
+    /// A clean segment confirmed as a person admits one example.
+    pub(super) async fn learning_effect(
+        &self,
+        segment_id: &str,
+        history_after: &[Correction],
+        admit_origin: Option<parakeet_domain::ExampleOrigin>,
+        retracted_profile: Option<&str>,
+    ) -> Result<LearningEffect, PersistenceError> {
+        use parakeet_domain::corrections::{SpeakerOverride, resolve};
+        let mut effect = LearningEffect::default();
+        let speaker = resolve(segment_id, history_after).speaker;
+        let located = match self.queries.segment(segment_id).await? {
+            Some(segment) => match self.library.detail(&segment.recording_id).await? {
+                Some(detail) => identification::segment_local_range(&segment, &detail)
+                    .zip(segment.track_id.clone())
+                    .map(|(range, track)| (segment, detail, range, track)),
+                None => None,
+            },
+            None => None,
+        };
+        let Some((segment, detail, (start, end), track_id)) = located else {
+            effect.note = admit_origin
+                .is_some()
+                .then(|| "no example admitted: segment timing or source is unresolved".into());
+            return Ok(effect);
+        };
+        for e in self
+            .queries
+            .recording_examples(&segment.recording_id)
+            .await?
+            .iter()
+            .filter(|e| e.track_id == track_id && e.start_ms < end && e.end_ms > start)
+        {
+            let contradicted = match &speaker {
+                Some(SpeakerOverride::Profile(person)) => e.profile_id != *person,
+                Some(SpeakerOverride::Unknown) => true,
+                // Examples the user enrolled by hand are not tied to this line's decision.
+                None => e.origin.as_ref().is_some_and(|o| {
+                    retracted_profile == Some(e.profile_id.as_str())
+                        || ["segment_correction", "suggestion_resolution"]
+                            .contains(&o.source_kind.as_str())
+                }),
+            };
+            if contradicted {
+                effect.remove.push(e.id.clone());
+            }
+        }
+        let (Some(SpeakerOverride::Profile(person)), Some(origin)) = (&speaker, admit_origin)
+        else {
+            return Ok(effect);
+        };
+        let note = |why: &str| Some(format!("no example admitted: {why}"));
+        let Some(diarization) = current_diarization_runs(&detail.runs).remove(track_id.as_str())
+        else {
+            effect.note = note("no current diarization to confirm the speech is clean");
+            return Ok(effect);
+        };
+        let intervals: Vec<SpeakerInterval> =
+            serde_json::from_value(diarization.result["intervals"].clone()).unwrap_or_default();
+        let attribution =
+            parakeet_domain::reconciliation::reconcile(std::slice::from_ref(&segment), &intervals);
+        if attribution
+            .first()
+            .is_none_or(|a| a.state != "anonymous_model_attribution" || a.overlapping_speech)
+        {
+            effect.note = note("segment is not clean single-speaker speech");
+            return Ok(effect);
+        }
+        let Some(track) = detail.tracks.iter().find(|t| t.id == track_id) else {
+            effect.note = note("source unavailable");
+            return Ok(effect);
+        };
+        let (examples, why) = self
+            .admit_cluster_examples(
+                person,
+                &detail,
+                track,
+                vec![(start, end)],
+                origin,
+                &effect.remove,
+            )
+            .await;
+        effect.note = if examples.is_empty() {
+            why.map(|why| format!("no example admitted: {why}"))
+        } else {
+            None
+        };
+        effect.admit = examples;
+        Ok(effect)
     }
     pub async fn undo(&self, segment_id: &str) -> Result<Correction, UndoCorrectionError> {
         let history = self.queries.corrections(segment_id).await?;
-        if history.is_empty() {
+        let mut stack = active_decisions(&history);
+        let Some(undone) = stack.pop() else {
             return Err(UndoCorrectionError::NotFound(
                 "no correction to undo".into(),
             ));
-        }
-        let mut stack = Vec::new();
-        for event in &history {
-            if event.action == "undo" {
-                stack.pop();
-            } else {
-                stack.push(event);
-            }
-        }
-        if stack.is_empty() {
-            return Err(UndoCorrectionError::NotFound(
-                "no correction to undo".into(),
-            ));
-        }
-        stack.pop();
+        };
         let prior = stack.last();
         let c = Correction {
             id: new_id(),
@@ -440,13 +661,40 @@ impl SpeakerService {
             action: "undo".into(),
             created_at: now(),
         };
-        if !self.writes.correct(&c, history.len()).await? {
+        let mut after = history.clone();
+        after.push(c.clone());
+        // The restored decision regains its example; the undone one loses its own.
+        let effect = self
+            .learning_effect(
+                segment_id,
+                &after,
+                prior.map(|p| origin("segment_correction", &p.id)),
+                undone.profile_id.as_deref(),
+            )
+            .await?;
+        if !self
+            .writes
+            .correct(&c, history.len(), &effect.admit, &effect.remove)
+            .await?
+        {
             return Err(UndoCorrectionError::Conflict(
                 "Correction history changed; reread before undoing".into(),
             ));
         }
         Ok(c)
     }
+}
+/// The decisions still in effect after undos, oldest first; each undo retracts the latest one.
+pub(crate) fn active_decisions(history: &[Correction]) -> Vec<&Correction> {
+    let mut active = vec![];
+    for event in history {
+        if event.action == "undo" {
+            active.pop();
+        } else {
+            active.push(event);
+        }
+    }
+    active
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -458,7 +706,56 @@ pub struct EnrollmentCandidate {
     pub anonymous_speaker: String,
     pub local_start_ms: i64,
     pub local_end_ms: i64,
+    /// Other clean ranges of the same cluster, pooled with the representative clip.
+    #[serde(default)]
+    pub more_ranges: Vec<(i64, i64)>,
+    /// Total clean, non-overlapping speech pooled for this cluster.
+    #[serde(default)]
+    pub speech_ms: i64,
     pub note: String,
+}
+/// Shortest clean turn (after trimming its edges) that contributes to a pooled cluster embedding.
+const MIN_CLEAN_WINDOW_MS: i64 = 1500;
+const MAX_WINDOW_MS: i64 = 20_000;
+const POOLED_SPEECH_BUDGET_MS: i64 = 60_000;
+/// Clean (no other speaker active), edge-trimmed turns per anonymous speaker in source-local time.
+pub(crate) fn clean_windows(
+    intervals: &[SpeakerInterval],
+    offset: i64,
+) -> std::collections::BTreeMap<String, Vec<(i64, i64)>> {
+    let mut clean = std::collections::BTreeMap::<String, Vec<(i64, i64)>>::new();
+    for i in intervals {
+        if intervals
+            .iter()
+            .any(|j| j.speaker != i.speaker && j.start_ms < i.end_ms && j.end_ms > i.start_ms)
+        {
+            continue;
+        }
+        let start = i.start_ms - offset + 250;
+        let end = i.end_ms - offset - 250;
+        if start >= 0 && end - start >= MIN_CLEAN_WINDOW_MS {
+            clean
+                .entry(i.speaker.clone())
+                .or_default()
+                .push((start, end));
+        }
+    }
+    clean
+}
+/// Longest turns first within a speech budget, so pooling favours the most reliable speech.
+pub(crate) fn pool_windows(mut windows: Vec<(i64, i64)>) -> (Vec<(i64, i64)>, i64) {
+    windows.sort_by(|a, b| (b.1 - b.0).cmp(&(a.1 - a.0)).then(a.0.cmp(&b.0)));
+    let mut pooled = vec![];
+    let mut speech_ms = 0;
+    for (start, end) in windows {
+        let end = end.min(start + MAX_WINDOW_MS);
+        if speech_ms + (end - start) > POOLED_SPEECH_BUDGET_MS {
+            continue;
+        }
+        speech_ms += end - start;
+        pooled.push((start, end));
+    }
+    (pooled, speech_ms)
 }
 impl SpeakerService {
     pub async fn candidates(
@@ -484,16 +781,10 @@ impl SpeakerService {
             .detail(recording_id)
             .await?
             .ok_or_else(|| EnrollmentCandidatesError::NotFound(recording_id.into()))?;
-        let mut latest = std::collections::BTreeMap::new();
-        for r in d.runs.iter().filter(|r| {
-            r.kind == "diarization"
-                && r.status == "completed"
-                && run_ids.is_none_or(|ids| ids.contains(&r.id))
-        }) {
-            if let Some(track) = r.configuration["track"]["id"].as_str() {
-                latest.insert(track.to_owned(), r);
-            }
-        }
+        let latest = current_diarization_runs(&d.runs)
+            .into_iter()
+            .filter(|(_, r)| run_ids.is_none_or(|ids| ids.contains(&r.id)))
+            .collect::<std::collections::BTreeMap<_, _>>();
         let mut selected =
             std::collections::BTreeMap::<(String, String), EnrollmentCandidate>::new();
         for (track_id, run) in latest {
@@ -506,42 +797,35 @@ impl SpeakerService {
             let intervals: Vec<SpeakerInterval> =
                 serde_json::from_value(run.result["intervals"].clone())
                     .map_err(|e| EnrollmentCandidatesError::Embedding(CapabilityError::new(e)))?;
-            for (ordinal, i) in intervals.iter().enumerate() {
-                if i.end_ms - i.start_ms < 4000 {
+            let clean = clean_windows(&intervals, offset);
+            for (speaker, windows) in clean {
+                let (pooled, speech_ms) = pool_windows(windows);
+                if speech_ms < 3000 || pooled.is_empty() {
                     continue;
                 }
-                if intervals.iter().any(|j| {
-                    j.speaker != i.speaker && j.start_ms < i.end_ms && j.end_ms > i.start_ms
-                }) {
-                    continue;
-                }
-                let start = i.start_ms - offset + 500;
-                let end = (i.end_ms - offset - 500).min(start + 20_000);
-                if start < 0 || end - start < 3000 {
-                    continue;
-                }
-                let candidate = EnrollmentCandidate {
-                    id: stable_id("candidate", &format!("{}:{ordinal}", run.id)),
-                    recording_id: recording_id.into(),
-                    run_id: run.id.clone(),
-                    track_id: track_id.clone(),
-                    anonymous_speaker: i.speaker.clone(),
-                    local_start_ms: start,
-                    local_end_ms: end,
-                    note:
-                        "Model predicts one nonoverlapping voice; listen before confirming identity"
-                            .into(),
-                };
-                let key = (track_id.clone(), i.speaker.clone());
-                let replace = selected
-                    .get(&key)
-                    .is_none_or(|old| old.local_end_ms - old.local_start_ms < end - start);
-                if replace {
-                    selected.insert(key, candidate);
-                }
+                // Simultaneous speech is not evidence of echo. Keep microphone voices
+                // available for human review, including speech over meeting audio.
+                let (start, end) = pooled[0];
+                let mut more_ranges = pooled[1..].to_vec();
+                more_ranges.sort();
+                selected.insert(
+                    (track_id.clone(), speaker.clone()),
+                    EnrollmentCandidate {
+                        id: stable_id("candidate", &format!("{}:{speaker}", run.id)),
+                        recording_id: recording_id.into(),
+                        run_id: run.id.clone(),
+                        track_id: track_id.clone(),
+                        anonymous_speaker: speaker,
+                        local_start_ms: start,
+                        local_end_ms: end,
+                        more_ranges,
+                        speech_ms,
+                        note: "Model predicts one nonoverlapping voice; listen before confirming identity".into(),
+                    },
+                );
             }
         }
-        Ok(selected.into_values().take(12).collect())
+        Ok(selected.into_values().collect())
     }
 }
 
@@ -555,6 +839,9 @@ pub struct SpeakerSuggestion {
     pub track_id: String,
     pub start_ms: i64,
     pub end_ms: i64,
+    /// Additional pooled ranges; empty for a single-interval comparison.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub more_ranges: Vec<(i64, i64)>,
     pub model: String,
     pub revision: String,
     pub policy: MatchPolicy,
@@ -572,6 +859,10 @@ pub struct SuggestionResolution {
     pub segment_id: Option<String>,
     pub correction_id: Option<String>,
     pub created_at: String,
+    /// Reported on the call that created the resolution; the example is also listed under the
+    /// person and removed again when the decision is undone. Not stored with the resolution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admitted_example_id: Option<String>,
 }
 #[derive(Debug, Clone)]
 pub struct ResolveSuggestionInput {
@@ -613,7 +904,9 @@ fn covered_by_suggestion(
             .zip(offset)
             .and_then(|(t, o)| t.checked_sub(o))
     });
-    matches!((start,end),(Some(start),Some(end)) if start>=suggestion.start_ms && end<=suggestion.end_ms && end>start)
+    std::iter::once((suggestion.start_ms, suggestion.end_ms))
+        .chain(suggestion.more_ranges.iter().copied())
+        .any(|(from, to)| matches!((start,end),(Some(start),Some(end)) if start>=from && end<=to && end>start))
 }
 operation_error!(ListSuggestionsError,sources{Persistence:PersistenceError=>"persistence"},values{});
 operation_error!(ResolveSuggestionError,sources{Persistence:PersistenceError=>"persistence",Invalid:ValidationError=>"invalid_input"},values{NotFound=>"not_found",Conflict=>"conflict"});
@@ -698,6 +991,7 @@ impl SpeakerService {
         }
         let mut expected_correction = 0;
         let mut correction = None;
+        let mut segment_history = vec![];
         if let Some(profile_id) = &profile {
             let segment_id = input.segment_id.as_ref().ok_or_else(|| {
                 ValidationError(
@@ -727,6 +1021,7 @@ impl SpeakerService {
             }
             let history = self.queries.corrections(segment_id).await?;
             expected_correction = history.len();
+            segment_history = history.clone();
             correction = Some(Correction {
                 id: new_id(),
                 segment_id: segment_id.clone(),
@@ -736,6 +1031,7 @@ impl SpeakerService {
                 created_at: now(),
             });
         }
+        let mut retracted = None;
         if input.action == "undo" {
             let latest = latest.expect("validated latest resolution");
             if let (Some(correction_id), Some(segment_id)) =
@@ -748,15 +1044,9 @@ impl SpeakerService {
                     ));
                 }
                 expected_correction = history.len();
-                let mut active = Vec::new();
-                for event in &history {
-                    if event.action == "undo" {
-                        active.pop();
-                    } else {
-                        active.push(event);
-                    }
-                }
-                active.pop();
+                segment_history = history.clone();
+                let mut active = active_decisions(&history);
+                retracted = active.pop().and_then(|c| c.profile_id.clone());
                 let prior = active.last();
                 correction = Some(Correction {
                     id: new_id(),
@@ -768,14 +1058,33 @@ impl SpeakerService {
                 });
             }
         }
+        let resolution_id = new_id();
+        let effect = match &correction {
+            Some(c) => {
+                let mut after = segment_history;
+                after.push(c.clone());
+                let admit_origin = if c.action == "undo" {
+                    // The restored decision regains its example; the undone acceptance loses its own.
+                    active_decisions(&after)
+                        .last()
+                        .map(|p| origin("segment_correction", &p.id))
+                } else {
+                    Some(origin("suggestion_resolution", &resolution_id))
+                };
+                self.learning_effect(&c.segment_id, &after, admit_origin, retracted.as_deref())
+                    .await?
+            }
+            None => LearningEffect::default(),
+        };
         let resolution = SuggestionResolution {
-            id: new_id(),
+            id: resolution_id,
             suggestion_id: input.id,
             action: input.action,
             profile_id: profile,
             segment_id: correction.as_ref().map(|c| c.segment_id.clone()),
             correction_id: correction.as_ref().map(|c| c.id.clone()),
             created_at: now(),
+            admitted_example_id: None,
         };
         if !self
             .writes
@@ -784,6 +1093,8 @@ impl SpeakerService {
                 suggestion.resolutions.len(),
                 correction.as_ref(),
                 expected_correction,
+                &effect.admit,
+                &effect.remove,
             )
             .await?
         {
@@ -791,6 +1102,53 @@ impl SpeakerService {
                 "suggestion or correction changed; inspect before resolving again".into(),
             ));
         }
+        let mut resolution = resolution;
+        resolution.admitted_example_id = effect.admit.first().map(|e| e.id.clone());
         Ok(resolution)
+    }
+}
+
+#[cfg(test)]
+mod pooling_tests {
+    use super::*;
+    fn interval(speaker: &str, start_ms: i64, end_ms: i64) -> SpeakerInterval {
+        SpeakerInterval {
+            start_ms,
+            end_ms,
+            speaker: speaker.into(),
+            track_id: Some("t".into()),
+        }
+    }
+    #[test]
+    fn a_cluster_of_only_short_turns_pools_enough_clean_speech() {
+        let intervals: Vec<_> = (0..4)
+            .map(|n| interval("a", n * 10_000, n * 10_000 + 2_500))
+            .collect();
+        let windows = clean_windows(&intervals, 0).remove("a").unwrap();
+        assert_eq!(windows.len(), 4);
+        let (pooled, speech_ms) = pool_windows(windows);
+        assert_eq!(pooled.len(), 4);
+        assert_eq!(speech_ms, 4 * 2_000);
+    }
+    #[test]
+    fn overlapping_and_too_short_turns_are_not_clean() {
+        let intervals = vec![
+            interval("a", 0, 5_000),
+            interval("b", 4_000, 9_000),
+            interval("a", 20_000, 20_800),
+        ];
+        let clean = clean_windows(&intervals, 0);
+        assert!(clean.is_empty());
+    }
+    #[test]
+    fn more_than_twelve_clusters_are_all_kept_and_pooling_is_bounded() {
+        let intervals: Vec<_> = (0..20)
+            .map(|n| interval(&format!("s{n:02}"), n * 10_000, n * 10_000 + 5_000))
+            .collect();
+        assert_eq!(clean_windows(&intervals, 0).len(), 20);
+        let (pooled, speech_ms) =
+            pool_windows((0..10).map(|n| (n * 30_000, n * 30_000 + 20_000)).collect());
+        assert!(speech_ms <= POOLED_SPEECH_BUDGET_MS);
+        assert_eq!(pooled.len(), 3);
     }
 }

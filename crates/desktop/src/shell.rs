@@ -2,7 +2,6 @@ use super::*;
 
 #[derive(Clone)]
 pub enum ConfirmAction {
-    StageCleanup { id: String, digest: String },
     DeleteProfile(String),
     RemoveModel(String),
     RemoveExample { id: String, profile: String },
@@ -20,7 +19,7 @@ impl Workbench {
     pub(super) fn finalize_meeting(&mut self, id: String, cx: &mut Context<Self>) {
         let service = self.meeting.clone();
         let library = self.library.clone();
-        self.task(
+        self.heavy_task(
             "Finishing transcription from saved source audio",
             async move {
                 let warning = service
@@ -41,10 +40,85 @@ impl Workbench {
             cx,
         );
     }
+    /// Finishes a just-recorded meeting's transcript and speaker work without holding up the
+    /// recorder, dictation or the rest of the app.
+    pub(super) fn finish_meeting_after_stop(&mut self, id: String, cx: &mut Context<Self>) {
+        self.finishing_meetings.insert(id.clone());
+        let service = self.meeting.clone();
+        let library = self.library.clone();
+        self.background_task(
+            "Transcribing the meeting",
+            async move {
+                let warning = service
+                    .finalize(parakeet_application::meeting::FinalizeMeetingInput {
+                        id: id.clone(),
+                        model: None,
+                    })
+                    .await
+                    .err()
+                    .map(|e| e.to_string());
+                let detail = library
+                    .show(&id)
+                    .await
+                    .map(reader::Document::new)
+                    .map_err(|e| e.to_string());
+                Ok(Update::MeetingFinished(id, detail, warning))
+            },
+            cx,
+        );
+    }
+    /// Opens a recording that was just made, from a clean reading state.
+    pub(super) fn show_new_recording(&mut self, d: reader::Document, cx: &mut Context<Self>) {
+        self.editing_title = false;
+        self.close_editor(cx);
+        self.recording_tab = library::RecordingTab::Transcript;
+        self.show_transcript_find = false;
+        self.transcript_query.clear();
+        self.cluster_review = None;
+        self.selected_clusters.clear();
+        self.candidates.clear();
+        self.voices_key = None;
+        self.train_done.clear();
+        self.train_person = None;
+        self.train_hint = None;
+        self.suggestions.clear();
+        self.suggestion_review = None;
+        self.reader_list.reset(0);
+        self.library_filter = library::LibraryFilter::All;
+        let find = self.transcript_find.clone();
+        let search = self.search.clone();
+        let _ = cx.update_window(self.main_window, move |_, window, cx| {
+            find.update(cx, |input, cx| input.set_value("", window, cx));
+            search.update(cx, |input, cx| input.set_value("", window, cx));
+        });
+        let rid = d.recording.id.clone();
+        self.requested_recording = Some(rid.clone());
+        let service = self.speakers.clone();
+        self.task(
+            "Reading saved name suggestions",
+            async move {
+                Ok(Update::Suggestions(
+                    rid.clone(),
+                    service.suggestions(Some(&rid)).await?,
+                ))
+            },
+            cx,
+        );
+        self.selected_track = d.tracks.iter().find(|t| t.available).map(|t| t.id.clone());
+        if let Some(row) = self.records.iter_mut().find(|r| r.id == d.recording.id) {
+            *row = d.recording.clone();
+        }
+        self.receive_detail(d, cx);
+        self.area = Area::Library;
+        self.reload(cx);
+    }
     pub(super) fn navigate(&mut self, area: Area, cx: &mut Context<Self>) {
         self.area = area;
+        // A shortcut recording left armed would turn the next key typed elsewhere into one.
+        self.recording_shortcut = false;
+        self.shortcut_hint = None;
         match area {
-            Area::Storage => self.preview_storage(None, cx),
+            Area::Storage => self.measure_storage(cx),
             Area::Jobs => {
                 let service = self.recovery.clone();
                 self.task(
@@ -60,25 +134,29 @@ impl Workbench {
                     async move { Ok(Update::Devices(capture.devices().await?)) },
                     cx,
                 );
+                // Lets the screen warn before recording that nothing can transcribe it.
+                let models = self.models.clone();
+                self.task(
+                    "Reading local model registry",
+                    async move { Ok(Update::Models(models.list().await?)) },
+                    cx,
+                );
             }
             Area::Speakers => {
                 self.refresh_profiles(cx);
                 if let Some(d) = &self.detail {
                     let id = d.recording.id.clone();
-                    let service = self.speakers.clone();
-                    self.task(
-                        "Preparing clean enrollment candidates",
-                        async move {
-                            Ok(Update::Candidates(
-                                id.clone(),
-                                service.candidates(&id).await?,
-                            ))
-                        },
-                        cx,
-                    );
+                    self.load_voices(id, cx);
                 }
             }
             Area::Dictation => {
+                self.refresh_permissions(cx);
+                let capture = self.audio_inspection.clone();
+                self.task(
+                    "Checking selected microphone",
+                    async move { Ok(Update::Devices(capture.devices().await?)) },
+                    cx,
+                );
                 let service = self.dictation_history.clone();
                 self.task(
                     "Reading retained dictations",
@@ -106,6 +184,7 @@ impl Workbench {
                 );
             }
             Area::Privacy => {
+                self.refresh_permissions(cx);
                 let service = self.settings.clone();
                 self.task(
                     "Reading settings",
@@ -172,17 +251,17 @@ impl Workbench {
             (Area::Library, "Library", "library", "⌘1"),
             (Area::Capture, "Record a meeting", "mic", "⌘2"),
             (Area::Dictation, "Dictation", "keyboard", "⌘3"),
-            (Area::Speakers, "Speakers", "people", "⌘4"),
+            (Area::Speakers, "People", "people", "⌘4"),
             (Area::Models, "Local models", "models", ""),
             (Area::Jobs, "Background jobs", "jobs", ""),
             (Area::Storage, "Storage", "models", ""),
-            (Area::Privacy, "Privacy & AI", "shield", ""),
+            (Area::Privacy, "Permissions", "shield", ""),
         ]
         .into_iter()
         .enumerate()
         {
             if i == 4 {
-                nav = nav.child(caption("PREFERENCES").px_2().mt_5().mb_1());
+                nav = nav.child(caption("SETTINGS").px_2().mt_5().mb_1());
             }
             let active = self.area == area;
             nav = nav.child(
@@ -213,11 +292,11 @@ impl Workbench {
         )
     }
     pub(super) fn status_bar(&self, cx: &mut Context<Self>) -> Div {
-        let working = self.pending > 0;
+        let working = self.busy();
         let color = if self.last_error.is_some() {
             DANGER
         } else if working {
-            ACCENT
+            WARNING
         } else {
             SUCCESS
         };
@@ -267,7 +346,10 @@ impl Workbench {
                             .child(message),
                     )
                     .when(working, |row| {
-                        row.child(pill(format!("{} active", self.pending), ACCENT))
+                        row.child(pill(
+                            format!("{} active", self.pending + self.heavy),
+                            WARNING,
+                        ))
                     })
                     .child(
                         quiet(
@@ -315,9 +397,13 @@ impl Workbench {
         div()
             .flex_shrink_0()
             .bg(rgb(0x34262c))
-            .border_b_1()
+            .border_1()
             .border_color(rgb(0x67434a))
-            .px_5()
+            .rounded_lg()
+            .mx_5()
+            .mt_3()
+            .max_w(px(900.))
+            .px_4()
             .py_3()
             .flex()
             .items_center()
@@ -338,22 +424,25 @@ impl Workbench {
                     .child(caption(summary)),
             )
             .child(
-                quiet("error-details", "Details").on_click(cx.listener(|this, _, _, cx| {
-                    this.show_status_details = true;
-                    cx.notify();
-                })),
+                quiet("error-details", "Details")
+                    .self_center()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.show_status_details = true;
+                        cx.notify();
+                    })),
             )
             .child(
-                quiet("dismiss-error", "Dismiss").on_click(cx.listener(|this, _, _, cx| {
-                    this.last_error = None;
-                    this.show_status_details = false;
-                    cx.notify();
-                })),
+                quiet("dismiss-error", "Dismiss")
+                    .self_center()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.last_error = None;
+                        this.show_status_details = false;
+                        cx.notify();
+                    })),
             )
     }
     pub(super) fn confirmation(&self, cx: &mut Context<Self>) -> Div {
         let label = match &self.confirm_action {
-            Some(ConfirmAction::StageCleanup {id,..}) => format!("Move the exact file list in review {id} to recovery? You can restore it here. This does not free disk space."),
             Some(ConfirmAction::DeleteProfile(id)) => format!(
                 "Delete {} and their verified voice examples? This cannot be undone.",
                 self.profiles
@@ -390,76 +479,54 @@ impl Workbench {
                     })),
             )
             .child(
-                danger(
-                    "confirm-delete",
-                    if matches!(
-                        self.confirm_action,
-                        Some(ConfirmAction::StageCleanup { .. })
-                    ) {
-                        "Move reviewed files"
-                    } else {
-                        "Confirm removal"
-                    },
-                )
-                .flex_shrink_0()
-                .disabled(
-                    if matches!(
-                        self.confirm_action,
-                        Some(ConfirmAction::StageCleanup { .. })
-                    ) {
-                        self.storage_busy
-                    } else {
-                        self.pending > 0
-                    },
-                )
-                .on_click(cx.listener(|this, _, _, cx| {
-                    match this.confirm_action.take() {
-                        Some(ConfirmAction::StageCleanup { id, digest }) => {
-                            this.run_cleanup(id, Some(digest), cx)
+                danger("confirm-delete", "Confirm removal")
+                    .flex_shrink_0()
+                    .disabled(self.pending > 0)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        match this.confirm_action.take() {
+                            Some(ConfirmAction::DeleteProfile(id)) => {
+                                let service = this.speakers.clone();
+                                this.task(
+                                    "Deleting local voice profile",
+                                    async move {
+                                        service.delete(&id).await?;
+                                        Ok(Update::Profiles(service.profiles().await?))
+                                    },
+                                    cx,
+                                );
+                            }
+                            Some(ConfirmAction::RemoveExample { id, profile }) => {
+                                let service = this.speakers.clone();
+                                this.task(
+                                    "Removing voice example",
+                                    async move {
+                                        service.remove_example(&id).await?;
+                                        Ok(Update::Examples(
+                                            profile.clone(),
+                                            service.examples(Some(&profile)).await?,
+                                        ))
+                                    },
+                                    cx,
+                                );
+                            }
+                            Some(ConfirmAction::RemoveModel(id)) => {
+                                let service = this.models.clone();
+                                this.task(
+                                    "Removing downloaded model files",
+                                    async move {
+                                        service.remove(&id).await?;
+                                        Ok(Update::Models(service.list().await?))
+                                    },
+                                    cx,
+                                );
+                            }
+                            None => {}
                         }
-                        Some(ConfirmAction::DeleteProfile(id)) => {
-                            let service = this.speakers.clone();
-                            this.task(
-                                "Deleting local voice profile",
-                                async move {
-                                    service.delete(&id).await?;
-                                    Ok(Update::Profiles(service.profiles().await?))
-                                },
-                                cx,
-                            );
-                        }
-                        Some(ConfirmAction::RemoveExample { id, profile }) => {
-                            let service = this.speakers.clone();
-                            this.task(
-                                "Removing voice example",
-                                async move {
-                                    service.remove_example(&id).await?;
-                                    Ok(Update::Examples(
-                                        profile.clone(),
-                                        service.examples(Some(&profile)).await?,
-                                    ))
-                                },
-                                cx,
-                            );
-                        }
-                        Some(ConfirmAction::RemoveModel(id)) => {
-                            let service = this.models.clone();
-                            this.task(
-                                "Removing downloaded model files",
-                                async move {
-                                    service.remove(&id).await?;
-                                    Ok(Update::Models(service.list().await?))
-                                },
-                                cx,
-                            );
-                        }
-                        None => {}
-                    }
-                    cx.notify();
-                })),
+                        cx.notify();
+                    })),
             )
     }
-    pub(super) fn receive_detail(&mut self, d: reader::Document) {
+    pub(super) fn receive_detail(&mut self, d: reader::Document, cx: &mut Context<Self>) {
         if self.requested_recording.as_deref() != Some(d.recording.id.as_str()) {
             return;
         }
@@ -477,10 +544,25 @@ impl Workbench {
             *row = d.recording.clone();
         }
         self.reader_matches = d.matching(&self.transcript_query);
-        self.segment_page = self
-            .segment_page
-            .min(self.reader_matches.len().saturating_sub(1) / 40);
+        let id = d.recording.id.clone();
+        // Voices only change with the analysis runs; a text or title save must not reload them.
+        let key = (
+            id.clone(),
+            d.runs
+                .iter()
+                .map(|r| (r.id.clone(), r.status.clone()))
+                .collect::<Vec<_>>(),
+            d.analysis
+                .as_ref()
+                .ok()
+                .and_then(|p| p.as_ref())
+                .map(|p| p.status.clone()),
+        );
         self.detail = Some(d);
+        if self.voices_key.as_ref() != Some(&key) {
+            self.voices_key = Some(key);
+            self.load_voices(id, cx);
+        }
         self.reset_reader_rows(false);
     }
     pub(super) fn subscribe_search(&mut self, cx: &mut Context<Self>) {
@@ -514,7 +596,7 @@ impl Workbench {
         .detach();
         cx.subscribe(&self.edit_text, |this, _, event, cx| {
             if matches!(event, InputEvent::Change) && this.editing_segment.is_some() {
-                this.reset_reader_rows(false);
+                this.remeasure_editing_row();
                 cx.notify();
             }
         })

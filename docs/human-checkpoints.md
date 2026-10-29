@@ -1,19 +1,33 @@
 # Focused human checkpoints
 
-The existing recordings have already been imported and processed. No new dictation is needed for the next step.
+## 0. Pick the right transcript (about 10 minutes)
 
-## First checkpoint completed: three short clips
+Measures which speech model is more accurate on your own meetings, without anyone typing a reference transcript. Two models transcribe the same recordings; where they disagree, a page plays a short clip and shows both versions in random order. You pick the one that matches what was said.
 
-The user identified [A](../.local/enrollment-checkpoint/candidate-A.wav), [B](../.local/enrollment-checkpoint/candidate-B.wav) and [C](../.local/enrollment-checkpoint/candidate-C.wav), approximately 22.4 seconds total. All three exact intervals were enrolled through the application service. The three profile names, stable IDs, explicit confirmation and embedding provenance remain in the private library and `.local/enrollment-checkpoint/` receipts, outside Git.
+```sh
+python3 benchmarks/make_review_page.py .local/review/result-tdt.json .local/review/result-lv3.json .local/review --items 60
+open .local/review/review.html
+```
 
-Only the exact confirmed intervals became verified examples. The full containing speaker clusters were not labeled or enrolled. A microphone source is not assumed to be the user. Clip hashes were checked before enrollment; original track-local ranges are recorded in `.local/enrollment-checkpoint/candidates.json`.
+Answer, press **Save my answers**, then `python3 benchmarks/score_review.py .local/review ~/Downloads/review-answers.json` prints how often each transcript was right (counts only). The page, clips and answers hold private speech and stay under `.local/`.
 
-Twelve separate, nonoverlapping candidate intervals were compared locally, producing inspectable suggestion receipts. All remained Unknown under the explicit diagnostic policy (score 0.9, margin 0.05, two verified references). Each identity currently has one confirmed example. None of these predictions became enrollment data, and these unlabeled comparisons do not measure accuracy. One short sample is insufficient to certify a personal identity threshold. Future independent confirmed examples can support tuning; separate labeled material must remain held out for evaluation.
+## 1. Speaker identification session (about 15 minutes)
 
-The GPUI Speakers screen also supports playing candidates, choosing/creating a profile, confirming enrollment and removing an incorrect example. The CLI exposes the same services. Comparison review, confirmation/replacement, rejection and undo are now available in GPUI. Anonymous source-scoped cluster inspection, playback, split/merge and undo are also available in GPUI.
+No new recording is needed. In the desktop app: open a meeting that has been analyzed (Library → recording → **Name voices** tab; the Transcript tab shows a blue banner with a Name voices button while voices are waiting), then for each waiting voice:
 
-## Later: one controlled physical session
+1. Press **Play a clip**.
+2. Type who it is (or tap a name you already gave) and press **Save name**, or press **Skip this voice**.
 
-After enrollment work, use one short session to approve microphone access, select the intended physical microphone, record both sources, and check playback/source alignment. Then try the two configured hold shortcuts on the laptop and external keyboards, cancellation and insertion into the intended editor. Screen/audio, input monitoring and Accessibility preflights are already available; actual microphone approval and physical key delivery remain unverified.
+Saving names every line that voice speaks alone, leaves overlapping lines untouched, and keeps up to three clean turns as voice examples. **Undo** (listed under "Named in this recording") reverts the naming and removes exactly those examples. Repeat for the same person in other meetings so each person has examples from more than one recording and, ideally, both sources.
 
-Finish with a small real-meeting review of chronology, overlap and false local attribution. UI convenience and the M3 laptop need actual use. No remote AI profile needs to be enabled for any of these checks; choosing such a route is a separate explicit decision.
+When two or more people have examples from at least three recordings, open **People** and press **Check how well my verified voices are recognized**. It tunes criteria on some recordings and scores them once on the rest. Read the numbers and, if they are acceptable, press **Use these criteria**, then turn on **Suggest names for voices** (Record a meeting → After you stop). Suggestions are always shown as unconfirmed.
+
+Earlier checkpoint: three short clips (one example per person) were enrolled; their names and receipts stay in the private library and `.local/`, outside Git.
+
+## 2. One controlled physical session
+
+Approve microphone, Screen Recording, Accessibility and Input Monitoring from Privacy & AI (each prompts only when you press its button). Select the intended microphone, record both sources for a few minutes with someone speaking through the speakers, then check: playback and source alignment, that speech heard only through the speakers is not labelled Me, and that the silent-source and interruption warnings behave (mute the microphone once; unplug and replug it once).
+
+Then try each configured hold shortcut on the laptop and on the external keyboard (including a modifier-only hold such as Right Option), cancellation, and insertion into the intended editor. Bluetooth/external microphone changes and the M3 laptop need real use.
+
+Finish with a short real-meeting review of chronology, overlap and false local attribution. No remote AI profile needs to be enabled for any of these checks.

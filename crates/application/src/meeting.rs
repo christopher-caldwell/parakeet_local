@@ -167,13 +167,27 @@ impl RecordMeetingError {
 pub struct RecordedMeeting {
     pub recording_id: String,
     pub finalization: Option<MeetingFinalization>,
+    /// Why automatic transcription did not start although it was requested.
+    #[serde(default)]
+    pub transcription_skipped: Option<String>,
+    /// Why speaker detection after Stop did not run although the preference asked for it.
+    #[serde(default)]
+    pub analysis_skipped: Option<String>,
+    /// The saved audio still has a transcription plan to finish with `finalize`.
+    #[serde(default)]
+    pub transcription_planned: bool,
 }
 operation_error!(ListPendingMeetingsError,sources{Persistence:PersistenceError=>"persistence",Invalid:ValidationError=>"invalid_input"},values{});
 #[derive(Debug, Clone)]
 pub struct RecordMeetingInput {
     pub capture: CaptureRecordingInput,
     pub transcribe_after_stop: bool,
+    /// Preference-driven transcription records audio only when no verified ASR model exists;
+    /// an explicit request keeps failing before capture.
+    pub skip_unavailable_model: bool,
     pub analyze_speakers: bool,
+    /// Saved calibrated criteria for after-Stop suggestions, when the user enabled them.
+    pub matching_policy: Option<parakeet_domain::recognition::MatchPolicy>,
 }
 #[derive(Debug, Clone)]
 pub struct FinalizeMeetingInput {
@@ -238,7 +252,31 @@ impl MeetingService {
             updated_at: now(),
         })
     }
+    /// Records and then finishes the meeting's transcription and speaker work in one call.
     pub async fn record(
+        &self,
+        input: RecordMeetingInput,
+        stop: Arc<AtomicBool>,
+    ) -> Result<RecordedMeeting, RecordMeetingError> {
+        let mut recorded = self.record_audio(input, stop).await?;
+        if recorded.transcription_planned {
+            recorded.finalization = Some(
+                self.finalize(crate::meeting::FinalizeMeetingInput {
+                    id: recorded.recording_id.clone(),
+                    model: None,
+                })
+                .await
+                .map_err(|source| RecordMeetingError::Finalization {
+                    recording_id: recorded.recording_id.clone(),
+                    source,
+                })?,
+            );
+        }
+        Ok(recorded)
+    }
+    /// Records and saves the audio with its transcription plan, returning as soon as the audio
+    /// is saved so the caller can record again while `finalize` runs.
+    pub async fn record_audio(
         &self,
         input: RecordMeetingInput,
         stop: Arc<AtomicBool>,
@@ -246,55 +284,71 @@ impl MeetingService {
         let RecordMeetingInput {
             capture: mut request,
             transcribe_after_stop,
+            skip_unavailable_model: input_skip,
             analyze_speakers,
+            matching_policy,
         } = input;
         request
             .validate()
             .map_err(crate::capture::CaptureRecordingError::Invalid)?;
-        request.final_transcription = if transcribe_after_stop || analyze_speakers {
-            let mut plan = self.plan("selected-asr").await?;
+        let mut transcription_skipped = None;
+        let mut analysis_skipped = None;
+        let planned = if transcribe_after_stop || analyze_speakers {
+            match self.plan("selected-asr").await {
+                Ok(plan) => Some(plan),
+                // Record-only fallback: never lose the meeting because no verified model exists.
+                // Speaker detection needs the transcript, so it is skipped for the same reason.
+                Err(FinalizeMeetingError::Invalid(reason)) if input_skip => {
+                    transcription_skipped = Some(reason.to_string());
+                    if analyze_speakers {
+                        analysis_skipped = Some(reason.to_string());
+                    }
+                    None
+                }
+                Err(error) => return Err(error.into()),
+            }
+        } else {
+            None
+        };
+        request.final_transcription = if let Some(mut plan) = planned {
             if analyze_speakers {
                 let service = self.analysis.as_ref().ok_or_else(|| {
                     FinalizeMeetingError::Conflict(
                         "speaker analysis is not configured at this entry point".into(),
                     )
                 })?;
-                let recipe = service
-                    .prepare_recipe()
-                    .await
-                    .map_err(|source| RecordMeetingError::AnalysisPreparation(Box::new(source)))?;
-                if recipe.asr.id != plan.model || recipe.asr.revision != plan.model_revision {
-                    return Err(FinalizeMeetingError::Conflict(
-                        "ASR selection changed during preflight; retry".into(),
-                    )
-                    .into());
+                match service.prepare_recipe(matching_policy).await {
+                    Ok(recipe) => {
+                        if recipe.asr.id != plan.model || recipe.asr.revision != plan.model_revision
+                        {
+                            return Err(FinalizeMeetingError::Conflict(
+                                "ASR selection changed during preflight; retry".into(),
+                            )
+                            .into());
+                        }
+                        plan.speaker_analysis = Some(recipe);
+                    }
+                    // Like transcription: a preference never blocks recording; say why it was skipped.
+                    Err(error) if input_skip => {
+                        analysis_skipped = Some(error.to_string());
+                    }
+                    Err(source) => {
+                        return Err(RecordMeetingError::AnalysisPreparation(Box::new(source)));
+                    }
                 }
-                plan.speaker_analysis = Some(recipe);
             }
             Some(plan)
         } else {
             None
         };
+        let planned_transcription = request.final_transcription.is_some();
         let bundle = self.capture.record(request, stop).await?;
-        let recording_id = bundle.recording.id;
-        let finalization = if transcribe_after_stop || analyze_speakers {
-            Some(
-                self.finalize(crate::meeting::FinalizeMeetingInput {
-                    id: recording_id.to_string(),
-                    model: None,
-                })
-                .await
-                .map_err(|source| RecordMeetingError::Finalization {
-                    recording_id: recording_id.clone(),
-                    source,
-                })?,
-            )
-        } else {
-            None
-        };
         Ok(RecordedMeeting {
-            recording_id,
-            finalization,
+            recording_id: bundle.recording.id,
+            finalization: None,
+            transcription_skipped,
+            analysis_skipped,
+            transcription_planned: planned_transcription,
         })
     }
     pub async fn pending(&self) -> Result<Vec<MeetingFinalization>, ListPendingMeetingsError> {

@@ -104,6 +104,8 @@ async fn completed_run_replaces_view_without_destroying_imported_evidence_or_cor
             created_at: "now".into(),
         },
         0,
+        &[],
+        &[],
     )
     .await
     .unwrap();
@@ -200,7 +202,10 @@ async fn concurrent_corrections_compare_and_append() {
     let mut other = c.clone();
     other.id = "b".into();
     other.replacement_text = Some("two".into());
-    let (a, b) = tokio::join!(store.correct(&c, 0), store.correct(&other, 0));
+    let (a, b) = tokio::join!(
+        store.correct(&c, 0, &[], &[]),
+        store.correct(&other, 0, &[], &[])
+    );
     assert_ne!(a.unwrap(), b.unwrap());
     assert_eq!(store.corrections("segment").await.unwrap().len(), 1);
 }
@@ -378,6 +383,7 @@ async fn suggestion_resolution_is_durable_atomic_and_never_enrolls_predictions()
                 capture_domain: "system".into(),
                 vector: vec![1., 0.],
                 verified_at: "fixture-confirmation".into(),
+                origin: None,
             })
             .await
             .unwrap();
@@ -396,6 +402,7 @@ async fn suggestion_resolution_is_durable_atomic_and_never_enrolls_predictions()
             track_id: "track".into(),
             start_ms: 0,
             end_ms: 5000,
+            more_ranges: vec![],
             policy: MatchPolicy {
                 minimum_score: 0.9,
                 minimum_margin: 0.1,
@@ -493,8 +500,14 @@ async fn suggestion_resolution_is_durable_atomic_and_never_enrolls_predictions()
         segment_id: None,
         correction_id: None,
         created_at: "now".into(),
+        admitted_example_id: None,
     };
-    assert!(!store.resolve_suggestion(&stale, 0, None, 0).await.unwrap());
+    assert!(
+        !store
+            .resolve_suggestion(&stale, 0, None, 0, &[], &[])
+            .await
+            .unwrap()
+    );
     assert_eq!(
         store
             .suggestion(&s.id)
@@ -1175,6 +1188,7 @@ async fn meeting_capture_saves_a_durable_plan_and_finalization_is_idempotent() {
         .record(
             parakeet_application::meeting::RecordMeetingInput {
                 capture: parakeet_application::capture::CaptureRecordingInput {
+                    dictation: false,
                     microphone_uid: None,
                     system_audio: true,
                     title: "Fixture capture".into(),
@@ -1182,7 +1196,9 @@ async fn meeting_capture_saves_a_durable_plan_and_finalization_is_idempotent() {
                     final_transcription: None,
                 },
                 transcribe_after_stop: true,
+                skip_unavailable_model: false,
                 analyze_speakers: false,
+                matching_policy: None,
             },
             Arc::new(AtomicBool::new(false)),
         )
@@ -1220,7 +1236,7 @@ async fn meeting_capture_saves_a_durable_plan_and_finalization_is_idempotent() {
     // Existing settings JSON decodes safely; explicit UI preference persists separately.
     use parakeet_application::settings::{AudioPreferencesQueries, AudioPreferencesWrites};
     assert!(
-        !store
+        store
             .audio_preferences()
             .await
             .unwrap()
@@ -1937,300 +1953,6 @@ async fn cancellation_stops_remaining_sources_in_both_recording_workflows() {
 }
 
 #[tokio::test]
-async fn storage_policy_defaults_is_versioned_and_read_only_preview_does_not_initialize_models() {
-    use parakeet_application::storage::*;
-    use parakeet_domain::storage::RetentionPolicy;
-    use std::sync::Arc;
-    let (tmp, store) = database().await;
-    let store = Arc::new(store);
-    let inspection = Arc::new(parakeet_infrastructure::storage::LocalStorageInspection {
-        root: tmp.path().into(),
-        database: tmp.path().join("test.db"),
-    });
-    let service = Arc::new(StorageService::new(
-        store.clone(),
-        store.clone(),
-        inspection,
-    ));
-    let first = service.policy().await.unwrap();
-    assert_eq!(first.revision, 0);
-    assert_eq!(first.policy, RetentionPolicy::default());
-    let preview = service.preview(None).await.unwrap();
-    assert!(preview.candidates.is_empty());
-    assert!(!preview.automatic_cleanup);
-    assert!(!preview.execution_available);
-    assert!(!tmp.path().join("models").exists());
-    let p = RetentionPolicy {
-        completed_scratch_after_days: Some(30),
-    };
-    let saved = service
-        .save_policy(parakeet_application::storage::SaveRetentionPolicyInput {
-            policy: p,
-            expected_revision: 0,
-        })
-        .await
-        .unwrap();
-    assert_eq!(saved.revision, 1);
-    let (a, b) = tokio::join!(
-        service.save_policy(parakeet_application::storage::SaveRetentionPolicyInput {
-            policy: RetentionPolicy {
-                completed_scratch_after_days: Some(7)
-            },
-            expected_revision: 1
-        }),
-        service.save_policy(parakeet_application::storage::SaveRetentionPolicyInput {
-            policy: RetentionPolicy {
-                completed_scratch_after_days: Some(90)
-            },
-            expected_revision: 1
-        })
-    );
-    assert_ne!(a.is_ok(), b.is_ok());
-    assert_eq!(service.policy().await.unwrap().revision, 2);
-    assert!(matches!(
-        service
-            .save_policy(parakeet_application::storage::SaveRetentionPolicyInput {
-                policy: RetentionPolicy::default(),
-                expected_revision: 1
-            })
-            .await,
-        Err(SaveRetentionPolicyError::Conflict(_))
-    ));
-    assert!(
-        service
-            .save_policy(parakeet_application::storage::SaveRetentionPolicyInput {
-                policy: RetentionPolicy {
-                    completed_scratch_after_days: Some(0)
-                },
-                expected_revision: 2
-            })
-            .await
-            .is_err()
-    );
-    assert_eq!(service.policy().await.unwrap().revision, 2);
-    let readonly = SqliteStore::new(open_read_only(&tmp.path().join("test.db")).await.unwrap());
-    assert_eq!(readonly.retention_policy().await.unwrap().revision, 2);
-    assert!(
-        readonly
-            .save_retention_policy(&RetentionPolicy::default(), 2, "invalid read-only mutation")
-            .await
-            .is_err()
-    );
-}
-
-#[tokio::test]
-async fn storage_preview_only_admits_old_owned_completed_scratch_without_losing_evidence() {
-    use parakeet_application::storage::*;
-    use parakeet_domain::storage::{RetentionPolicy, StorageProtection};
-    use std::sync::Arc;
-    let (tmp, store) = database().await;
-    let audio = tmp.path().join("original.wav");
-    std::fs::write(&audio, b"read-only source fixture").unwrap();
-    let original = std::fs::read(&audio).unwrap();
-    let mut eligible = None;
-    for name in [
-        "eligible",
-        "active",
-        "failed",
-        "interrupted",
-        "recent",
-        "unresolved",
-        "pending",
-        "speaker",
-        "correction",
-        "unmanaged",
-    ] {
-        let mut b = bundle();
-        b.recording.id = name.into();
-        b.recording.source_key = format!("fixture:{name}");
-        b.recording.title_override = Some(format!("User title {name}"));
-        if name == "pending" {
-            b.recording.metadata["meeting_finalization"] = json!({"status":"failed"});
-        }
-        b.tracks[0].id = format!("track-{name}");
-        b.tracks[0].recording_id = name.into();
-        b.tracks[0].path = audio.to_str().unwrap().into();
-        b.tracks[0].available = true;
-        b.segments[0].id = format!("segment-{name}");
-        b.segments[0].recording_id = name.into();
-        b.segments[0].run_id = format!("import-{name}");
-        b.segments[0].track_id = Some(b.tracks[0].id.clone());
-        store.import(&b).await.unwrap();
-        let mut run = ProcessingRun {
-            id: uuid::Uuid::new_v4().to_string(),
-            recording_id: name.into(),
-            kind: "transcription".into(),
-            model: "fixture".into(),
-            model_revision: "fixture".into(),
-            status: "running".into(),
-            started_at: "2020-01-01T00:00:00Z".into(),
-            completed_at: None,
-            configuration: if name == "unmanaged" {
-                json!({})
-            } else {
-                json!({"ownership_protocol":"file-lock-v1"})
-            },
-            result: json!({"raw":"original result remains in the database"}),
-            error: None,
-        };
-        store.start(&run).await.unwrap();
-        if name != "active" {
-            run.status = if ["failed", "interrupted"].contains(&name) {
-                name
-            } else {
-                "completed"
-            }
-            .into();
-            run.completed_at = Some(match name {
-                "recent" => parakeet_application::now(),
-                "unresolved" => "not a timestamp".into(),
-                _ => "2020-01-02T00:00:00Z".into(),
-            });
-            store.finish(&run, &[]).await.unwrap();
-        }
-        let work = tmp
-            .path()
-            .join("models/work")
-            .join(&run.id)
-            .join("whisper-chunks");
-        std::fs::create_dir_all(&work).unwrap();
-        std::fs::write(work.join("chunk-0000.json"), b"checkpoint fixture").unwrap();
-        if name == "eligible" {
-            eligible = Some(run.id.clone());
-            std::fs::write(work.join("chunk-0001.json.partial"), b"uncertain").unwrap();
-            std::fs::hard_link(&audio, work.parent().unwrap().join("audio.f32")).unwrap();
-            let request = work.parent().unwrap().join("request.json");
-            std::fs::write(&request, b"linked request fixture").unwrap();
-            std::fs::hard_link(&request, tmp.path().join("other-link")).unwrap();
-        }
-        if name == "speaker" {
-            store
-                .create_profile(&SpeakerProfile {
-                    id: "profile".into(),
-                    name: "Fixture person".into(),
-                    created_at: "fixture".into(),
-                })
-                .await
-                .unwrap();
-            store
-                .enroll(&VoiceExample {
-                    id: "example".into(),
-                    profile_id: "profile".into(),
-                    recording_id: name.into(),
-                    track_id: format!("track-{name}"),
-                    start_ms: 0,
-                    end_ms: 1000,
-                    model: "fixture".into(),
-                    revision: "1".into(),
-                    capture_domain: "fixture".into(),
-                    vector: vec![1., 0.],
-                    verified_at: "human fixture".into(),
-                })
-                .await
-                .unwrap();
-        }
-        if name == "correction" {
-            store
-                .correct(
-                    &Correction {
-                        id: "correction".into(),
-                        segment_id: format!("segment-{name}"),
-                        profile_id: None,
-                        replacement_text: Some("Human correction".into()),
-                        action: "text".into(),
-                        created_at: "fixture".into(),
-                    },
-                    0,
-                )
-                .await
-                .unwrap();
-        }
-    }
-    let unknown = tmp
-        .path()
-        .join("models/work")
-        .join(uuid::Uuid::new_v4().to_string());
-    std::fs::create_dir_all(&unknown).unwrap();
-    std::fs::write(unknown.join("audio.f32"), b"unknown owner").unwrap();
-    for path in [
-        "models/weights/model.bin",
-        "captures/recoverable/source.caf",
-        "playback/current.wav",
-        "clipboard-recovery/journal.json",
-    ] {
-        let p = tmp.path().join(path);
-        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
-        std::fs::write(p, b"protected fixture").unwrap();
-    }
-    let store = Arc::new(store);
-    let service = StorageService::new(
-        store.clone(),
-        store.clone(),
-        Arc::new(parakeet_infrastructure::storage::LocalStorageInspection {
-            root: tmp.path().into(),
-            database: tmp.path().join("test.db"),
-        }),
-    );
-    let readonly_default = service.preview(None).await.unwrap();
-    assert!(readonly_default.candidates.is_empty());
-    let preview = service
-        .preview(Some(RetentionPolicy {
-            completed_scratch_after_days: Some(1),
-        }))
-        .await
-        .unwrap();
-    assert!(preview.hypothetical);
-    assert_eq!(preview.saved_policy.revision, 0);
-    assert_eq!(preview.candidates.len(), 1);
-    assert_eq!(preview.candidates[0].run_id, eligible.unwrap());
-    assert_eq!(
-        preview.candidate_totals.logical_bytes,
-        b"checkpoint fixture".len() as u64
-    );
-    for reason in [
-        StorageProtection::ActiveRun,
-        StorageProtection::RecoverableRun,
-        StorageProtection::TooRecentOrFuture,
-        StorageProtection::CompletionTimeUnknown,
-        StorageProtection::PendingMeeting,
-        StorageProtection::SpeakerReference,
-        StorageProtection::ManualCorrection,
-        StorageProtection::UnknownRun,
-        StorageProtection::LinkedAudio,
-        StorageProtection::MultipleHardLinks,
-        StorageProtection::UncertainArtifact,
-        StorageProtection::Models,
-        StorageProtection::RecordedAudio,
-        StorageProtection::Playback,
-        StorageProtection::Recovery,
-    ] {
-        assert!(
-            preview.protected.contains_key(&reason),
-            "missing {reason:?}"
-        );
-    }
-    let protected = preview
-        .protected
-        .values()
-        .map(|s| s.logical_bytes)
-        .sum::<u64>();
-    assert_eq!(
-        protected + preview.candidate_totals.logical_bytes,
-        preview.usage.owned_totals.logical_bytes
-    );
-    assert_eq!(std::fs::read(&audio).unwrap(), original);
-    assert_eq!(store.examples(None).await.unwrap().len(), 1);
-    let corrected = store.detail("correction").await.unwrap().unwrap();
-    assert_eq!(
-        corrected.recording.title_override.as_deref(),
-        Some("User title correction")
-    );
-    assert_eq!(corrected.corrections.len(), 1);
-    assert!(!preview.execution_available);
-    assert!(!preview.automatic_cleanup);
-}
-
-#[tokio::test]
 async fn storage_accounting_separates_database_override_and_referenced_external_audio() {
     use parakeet_application::storage::StorageService;
     use std::sync::Arc;
@@ -2246,7 +1968,6 @@ async fn storage_accounting_separates_database_override_and_referenced_external_
     store.import(&b).await.unwrap();
     let store = Arc::new(store);
     let service = StorageService::new(
-        store.clone(),
         store,
         Arc::new(parakeet_infrastructure::storage::LocalStorageInspection {
             root: root.clone(),
@@ -2341,6 +2062,8 @@ async fn regression_library_search_must_find_corrected_current_text() {
             created_at: "now".into(),
         },
         0,
+        &[],
+        &[],
     )
     .await
     .unwrap();
@@ -2589,92 +2312,6 @@ async fn regression_shortcut_stream_failure_must_cancel_active_capture() {
 }
 
 #[tokio::test]
-async fn source_catalog_reads_foreign_legacy_and_live_wal_without_changing_source() {
-    use parakeet_application::LegacyCatalog;
-    use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
-    for text_uuid in [false, true] {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("source.db");
-        let pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect_with(
-                SqliteConnectOptions::new()
-                    .filename(&path)
-                    .create_if_missing(true)
-                    .journal_mode(SqliteJournalMode::Wal),
-            )
-            .await
-            .unwrap();
-        sqlx::query("CREATE TABLE transcriptions(id BLOB PRIMARY KEY,fileName TEXT,createdAt TEXT,titleOverride TEXT)").execute(&pool).await.unwrap();
-        let uuid = "11111111-1111-4111-8111-111111111111";
-        if text_uuid {
-            sqlx::query(
-                "INSERT INTO transcriptions VALUES(?1,'original title','2020-01-01','User title')",
-            )
-            .bind(uuid)
-            .execute(&pool)
-            .await
-            .unwrap();
-        } else {
-            sqlx::query(
-                "INSERT INTO transcriptions VALUES(?1,'original title','2020-01-01','User title')",
-            )
-            .bind(uuid::Uuid::parse_str(uuid).unwrap().as_bytes().as_slice())
-            .execute(&pool)
-            .await
-            .unwrap();
-        }
-        // Keep the writer alive and its committed changes in WAL, not a copied main file.
-        let before_db = std::fs::read(&path).unwrap();
-        let wal = path.with_file_name("source.db-wal");
-        let before_wal = std::fs::read(&wal).unwrap();
-        let rows = parakeet_database::MacParakeetCatalog
-            .read(&path)
-            .await
-            .unwrap();
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].source_id, uuid);
-        assert_eq!(rows[0].title, "User title");
-        assert_eq!(std::fs::read(&path).unwrap(), before_db);
-        assert_eq!(std::fs::read(&wal).unwrap(), before_wal);
-        assert_eq!(
-            sqlx::query_scalar::<_, i64>("PRAGMA application_id")
-                .fetch_one(&pool)
-                .await
-                .unwrap(),
-            0
-        );
-        assert!(
-            parakeet_database::open_existing(&path).await.is_err(),
-            "destination ownership guard remains strict"
-        );
-        pool.close().await;
-    }
-    let tmp = tempfile::tempdir().unwrap();
-    let path = tmp.path().join("unsupported.db");
-    let pool = SqlitePoolOptions::new()
-        .connect_with(
-            SqliteConnectOptions::new()
-                .filename(&path)
-                .create_if_missing(true),
-        )
-        .await
-        .unwrap();
-    sqlx::query("CREATE TABLE transcriptions(unrelated TEXT)")
-        .execute(&pool)
-        .await
-        .unwrap();
-    assert!(
-        parakeet_database::MacParakeetCatalog
-            .read(&path)
-            .await
-            .unwrap_err()
-            .to_string()
-            .contains("columns missing")
-    );
-}
-
-#[tokio::test]
 async fn coordinated_transcription_publishes_all_sources_together_and_search_ignores_history() {
     let (_tmp, s) = database().await;
     let mut b = bundle();
@@ -2728,6 +2365,8 @@ async fn coordinated_transcription_publishes_all_sources_together_and_search_ign
             created_at: "now".into(),
         },
         0,
+        &[],
+        &[],
     )
     .await
     .unwrap();
@@ -2742,6 +2381,8 @@ async fn coordinated_transcription_publishes_all_sources_together_and_search_ign
             created_at: "now".into(),
         },
         1,
+        &[],
+        &[],
     )
     .await
     .unwrap();
@@ -2752,4 +2393,143 @@ async fn coordinated_transcription_publishes_all_sources_together_and_search_ign
             .is_empty()
     );
     assert_eq!(s.list(Some("new batch token")).await.unwrap().len(), 1);
+}
+#[tokio::test]
+async fn stale_schema_is_refused_without_migrating() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = tmp.path().join("test.db");
+    create_empty(&p).await.unwrap();
+    assert!(open_existing(&p).await.is_err());
+    migrate(&p).await.unwrap();
+    let pool = open_existing(&p).await.unwrap();
+    sqlx::query(
+        "DELETE FROM _sqlx_migrations WHERE version=(SELECT MAX(version) FROM _sqlx_migrations)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    pool.close().await;
+    let error = open_existing(&p).await.unwrap_err().to_string();
+    assert!(error.contains("db migrate"), "{error}");
+    assert!(open_read_only(&p).await.is_err());
+    assert!(verify(&p).await.is_ok());
+}
+struct UnverifiedModels;
+#[async_trait::async_trait]
+impl parakeet_application::LocalModels for UnverifiedModels {
+    async fn selection(
+        &self,
+    ) -> Result<parakeet_application::ModelSelection, parakeet_application::CapabilityError> {
+        FixtureModels.selection().await
+    }
+    async fn list(
+        &self,
+    ) -> Result<Vec<parakeet_application::ModelInfo>, parakeet_application::CapabilityError> {
+        FixtureModels.list().await
+    }
+    async fn install(
+        &self,
+        id: &str,
+    ) -> Result<parakeet_application::ModelInfo, parakeet_application::CapabilityError> {
+        FixtureModels.install(id).await
+    }
+    async fn verify(
+        &self,
+        id: &str,
+    ) -> Result<parakeet_application::ModelInfo, parakeet_application::CapabilityError> {
+        let mut m = FixtureModels.verify(id).await?;
+        m.verified = false;
+        Ok(m)
+    }
+    async fn select(&self, id: &str) -> Result<(), parakeet_application::CapabilityError> {
+        FixtureModels.select(id).await
+    }
+    async fn select_embedding(
+        &self,
+        id: &str,
+    ) -> Result<(), parakeet_application::CapabilityError> {
+        FixtureModels.select_embedding(id).await
+    }
+    async fn remove(&self, id: &str) -> Result<(), parakeet_application::CapabilityError> {
+        FixtureModels.remove(id).await
+    }
+}
+#[tokio::test]
+async fn meeting_without_a_verified_asr_model_records_audio_and_reports_the_skip() {
+    use std::sync::{Arc, atomic::AtomicBool};
+    let (tmp, store) = database().await;
+    let store = Arc::new(store);
+    let engine = Arc::new(MeetingEngine::default());
+    let ownership = Arc::new(
+        parakeet_infrastructure::jobs::FileProcessingOwnership::for_database(
+            &tmp.path().join("test.db"),
+        )
+        .unwrap(),
+    );
+    let models = Arc::new(UnverifiedModels);
+    let processing = Arc::new(parakeet_application::processing::ProcessingService::new(
+        store.clone(),
+        store.clone(),
+        models.clone(),
+        engine.clone(),
+        store.clone(),
+        ownership.clone(),
+        store.clone(),
+    ));
+    let service = parakeet_application::meeting::MeetingService::new(
+        Arc::new(parakeet_application::capture::CaptureService::new(
+            Arc::new(FixtureCapture),
+            store.clone(),
+        )),
+        store.clone(),
+        store.clone(),
+        models,
+        processing,
+        ownership,
+    );
+    // Speaker detection after Stop is on by default; it must not stop the meeting being saved.
+    for analyze_speakers in [false, true] {
+        let report = service
+            .record(
+                parakeet_application::meeting::RecordMeetingInput {
+                    capture: parakeet_application::capture::CaptureRecordingInput {
+                        dictation: false,
+                        microphone_uid: None,
+                        system_audio: true,
+                        title: "Fixture capture".into(),
+                        maximum_seconds: 1,
+                        final_transcription: None,
+                    },
+                    transcribe_after_stop: true,
+                    skip_unavailable_model: true,
+                    analyze_speakers,
+                    matching_policy: None,
+                },
+                Arc::new(AtomicBool::new(false)),
+            )
+            .await
+            .unwrap();
+        assert!(report.finalization.is_none());
+        assert!(report.transcription_skipped.is_some());
+        assert_eq!(report.analysis_skipped.is_some(), analyze_speakers);
+        assert!(store.detail(&report.recording_id).await.unwrap().is_some());
+    }
+    assert!(engine.calls.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn concurrent_preference_changes_both_survive() {
+    use parakeet_application::settings::AudioSettingsService;
+    let (_tmp, store) = database().await;
+    let store = std::sync::Arc::new(store);
+    let service = AudioSettingsService::new(store.clone(), store);
+    let (a, b) = tokio::join!(
+        service.update(|p| p.skipped_voices.push("voice".into())),
+        service.update(|p| p.system_audio = true),
+    );
+    a.unwrap();
+    b.unwrap();
+    let saved = service.get().await.unwrap();
+    assert_eq!(saved.skipped_voices, vec!["voice".to_owned()]);
+    assert!(saved.system_audio);
 }

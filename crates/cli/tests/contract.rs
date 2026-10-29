@@ -224,7 +224,7 @@ fn meeting_finalization_commands_keep_provisioning_and_consent_explicit() {
     assert_eq!(run(&root, &["db", "migrate"]).0, 0);
     let (code, settings) = run(&root, &["capture", "settings"]);
     assert_eq!(code, 0);
-    assert_eq!(settings["data"]["transcribe_meetings_after_stop"], false);
+    assert_eq!(settings["data"]["transcribe_meetings_after_stop"], true);
     assert_eq!(
         run(
             &root,
@@ -289,289 +289,22 @@ fn job_inspection_and_control_keep_read_only_and_mutating_commands_distinct() {
 }
 
 #[test]
-fn storage_inspection_is_read_only_and_policy_saves_require_an_explicit_revision() {
+fn storage_inspection_is_read_only() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("absent");
-    for args in [
-        &["storage", "usage"][..],
-        &["storage", "preview"][..],
-        &["storage", "policy"][..],
-    ] {
-        assert_ne!(run(&root, args).0, 0);
-        assert!(!root.exists());
-    }
+    assert_ne!(run(&root, &["storage", "usage"]).0, 0);
+    assert!(!root.exists());
     assert_eq!(run(&root, &["db", "create"]).0, 0);
     assert_eq!(run(&root, &["db", "migrate"]).0, 0);
-    let (code, p) = run(&root, &["storage", "policy"]);
+    let (code, usage) = run(&root, &["storage", "usage"]);
     assert_eq!(code, 0);
-    assert_eq!(p["data"]["revision"], 0);
-    assert!(p["data"]["policy"]["completed_scratch_after_days"].is_null());
-    let (code, p) = run(
-        &root,
-        &["storage", "preview", "--completed-scratch-days", "30"],
-    );
-    assert_eq!(code, 0);
-    assert_eq!(p["data"]["hypothetical"], true);
-    assert_eq!(p["data"]["automatic_cleanup"], false);
-    assert_eq!(p["data"]["execution_available"], false);
+    assert!(usage["data"]["owned_totals"]["files"].as_u64().unwrap() > 0);
     assert!(!root.join("models").exists());
-    assert_eq!(
-        run(
-            &root,
-            &[
-                "storage",
-                "set-policy",
-                "--completed-scratch-days",
-                "30",
-                "--expected-revision",
-                "0"
-            ]
-        )
-        .0,
-        0
-    );
-    assert_eq!(
-        run(
-            &root,
-            &[
-                "storage",
-                "set-policy",
-                "--keep-all",
-                "--expected-revision",
-                "0"
-            ]
-        )
-        .0,
-        5
-    );
-    assert_eq!(
-        run(
-            &root,
-            &[
-                "storage",
-                "set-policy",
-                "--completed-scratch-days",
-                "0",
-                "--expected-revision",
-                "1"
-            ]
-        )
-        .0,
-        2
-    );
-    let p = run(&root, &["storage", "policy"]).1;
-    assert_eq!(p["data"]["revision"], 1);
-    assert_eq!(p["data"]["policy"]["completed_scratch_after_days"], 30);
-    assert_eq!(
-        run(
-            &root,
-            &[
-                "storage",
-                "set-policy",
-                "--keep-all",
-                "--expected-revision",
-                "1"
-            ]
-        )
-        .0,
-        0
-    );
-    assert_eq!(
-        run(&root, &["storage", "preview"]).1["data"]["effective_policy"]["completed_scratch_after_days"],
-        Value::Null
-    );
+    let (code, archive) = run(&root, &["storage", "archive-audio", "--dry-run"]);
+    assert_eq!(code, 0);
+    assert_eq!(archive["data"]["dry_run"], true);
 }
 
-#[test]
-fn cleanup_review_is_explicit_bounded_and_read_only_queries_do_not_initialize() {
-    use parakeet_application::{LibraryWrites, processing::RunWrites};
-    use parakeet_domain::*;
-    let tmp = tempfile::tempdir().unwrap();
-    let root = tmp.path().join("app");
-    for args in [
-        ["storage", "cleanup", "list"].as_slice(),
-        ["storage", "cleanup", "show", "absent"].as_slice(),
-    ] {
-        assert_ne!(run(&root, args).0, 0);
-        assert!(!root.exists());
-    }
-    assert_eq!(run(&root, &["db", "create"]).0, 0);
-    assert_eq!(run(&root, &["db", "migrate"]).0, 0);
-    assert!(
-        run(&root, &["storage", "cleanup", "list"]).1["data"]
-            .as_array()
-            .unwrap()
-            .is_empty()
-    );
-    assert!(!root.join("models").exists());
-    assert!(!root.join("parakeet.db.storage-access.lock").exists());
-    let job = "11111111-1111-4111-8111-111111111111";
-    let relative = format!("models/work/{job}/request.json");
-    std::fs::create_dir_all(root.join(&relative).parent().unwrap()).unwrap();
-    std::fs::write(root.join(&relative), b"CLI scratch fixture").unwrap();
-    tokio::runtime::Runtime::new().unwrap().block_on(async {
-        let store = parakeet_database::SqliteStore::new(
-            parakeet_database::open_existing(&root.join("parakeet.db"))
-                .await
-                .unwrap(),
-        );
-        store
-            .import(&ImportBundle {
-                recording: Recording {
-                    id: "r".into(),
-                    source_key: "fixture".into(),
-                    source_kind: "meeting".into(),
-                    source_title: "Fixture".into(),
-                    title_override: Some("User title".into()),
-                    created_at: "2020-01-01".into(),
-                    duration_ms: None,
-                    metadata: json!({}),
-                },
-                tracks: vec![],
-                segments: vec![],
-                original: json!({}),
-                warnings: vec![],
-            })
-            .await
-            .unwrap();
-        let mut job = ProcessingRun {
-            id: job.into(),
-            recording_id: "r".into(),
-            kind: "transcription".into(),
-            model: "fixture".into(),
-            model_revision: "v1".into(),
-            status: "running".into(),
-            started_at: "2020-01-01T00:00:00Z".into(),
-            completed_at: None,
-            configuration: json!({"ownership_protocol":"file-lock-v1"}),
-            result: json!({}),
-            error: None,
-        };
-        store.start(&job).await.unwrap();
-        job.status = "completed".into();
-        job.completed_at = Some("2020-01-02T00:00:00Z".into());
-        store.finish(&job, &[]).await.unwrap();
-    });
-    assert!(run(&root, &["storage", "cleanup", "review"]).1["data"]["review"].is_null());
-    assert_eq!(
-        run(&root, &["storage", "cleanup", "review", "--limit", "0"]).0,
-        2
-    );
-    let (code, result) = run(
-        &root,
-        &[
-            "storage",
-            "cleanup",
-            "review",
-            "--completed-scratch-days",
-            "30",
-        ],
-    );
-    assert_eq!(code, 0);
-    let review = &result["data"]["review"];
-    let id = review["id"].as_str().unwrap();
-    let digest = review["digest"].as_str().unwrap();
-    assert_eq!(review["state"], "reviewed");
-    assert!(root.join(&relative).exists());
-    assert_eq!(
-        run(
-            &root,
-            &["storage", "cleanup", "apply", id, "--review-digest", digest]
-        )
-        .0,
-        4
-    );
-    assert_eq!(
-        run(
-            &root,
-            &[
-                "storage",
-                "cleanup",
-                "apply",
-                id,
-                "--review-digest",
-                "wrong",
-                "--confirm"
-            ]
-        )
-        .0,
-        5
-    );
-    let (code, staged) = run(
-        &root,
-        &[
-            "storage",
-            "cleanup",
-            "apply",
-            id,
-            "--review-digest",
-            digest,
-            "--confirm",
-        ],
-    );
-    assert_eq!(code, 0);
-    assert_eq!(staged["data"]["state"], "staged");
-    assert_eq!(staged["data"]["reclaimed_bytes"], 0);
-    std::fs::write(root.join(&relative), b"conflicting new file").unwrap();
-    let (code, failed) = run(&root, &["storage", "cleanup", "restore", id]);
-    assert_eq!(code, 1);
-    assert_eq!(failed["error"]["kind"], "storage");
-    assert_eq!(failed["retained_result"]["id"], id);
-    assert_eq!(failed["retained_result"]["state"], "needs_attention");
-    std::fs::rename(root.join(&relative), root.join("unrelated-file")).unwrap();
-    assert_eq!(
-        run(&root, &["storage", "cleanup", "restore", id]).1["data"]["state"],
-        "restored"
-    );
-    assert_eq!(
-        std::fs::read(root.join(&relative)).unwrap(),
-        b"CLI scratch fixture"
-    );
-    assert_eq!(run(&root, &["storage", "policy"]).1["data"]["revision"], 0);
-}
-
-#[test]
-fn benchmark_import_respects_the_same_exclusive_storage_gate_as_library_import() {
-    let tmp = tempfile::tempdir().unwrap();
-    let root = tmp.path().join("app");
-    assert_eq!(run(&root, &["db", "create"]).0, 0);
-    assert_eq!(run(&root, &["db", "migrate"]).0, 0);
-    // Valid minimal PCM WAV, generated locally; no model install or inference.
-    let audio = tmp.path().join("synthetic.wav");
-    let mut wave = Vec::new();
-    wave.extend_from_slice(b"RIFF");
-    wave.extend_from_slice(&32036u32.to_le_bytes());
-    wave.extend_from_slice(b"WAVEfmt ");
-    wave.extend_from_slice(&16u32.to_le_bytes());
-    wave.extend_from_slice(&1u16.to_le_bytes());
-    wave.extend_from_slice(&1u16.to_le_bytes());
-    wave.extend_from_slice(&16000u32.to_le_bytes());
-    wave.extend_from_slice(&32000u32.to_le_bytes());
-    wave.extend_from_slice(&2u16.to_le_bytes());
-    wave.extend_from_slice(&16u16.to_le_bytes());
-    wave.extend_from_slice(b"data");
-    wave.extend_from_slice(&32000u32.to_le_bytes());
-    wave.extend_from_slice(&[0; 32000]);
-    std::fs::write(&audio, wave).unwrap();
-    let suite = tmp.path().join("suite.json");
-    std::fs::write(&suite,json!({"id":"gate-regression","dataset":"synthetic","split":"test","labels":"synthetic","entries":[{"id":"silence","audio":audio}],"models":["whisper-base.en"],"collar_ms":0,"score_overlap":true}).to_string()).unwrap();
-    let runtime = tokio::runtime::Runtime::new().unwrap();
-    let gate =
-        parakeet_infrastructure::cleanup::StorageGate::for_database(&root.join("parakeet.db"))
-            .unwrap();
-    let guard = runtime.block_on(gate.acquire(true)).unwrap();
-    assert_ne!(
-        run(&root, &["benchmark", "run", suite.to_str().unwrap()]).0,
-        0
-    );
-    assert!(
-        run(&root, &["meetings", "list"]).1["data"]
-            .as_array()
-            .unwrap()
-            .is_empty()
-    );
-    drop(guard);
-}
 #[test]
 fn analysis_is_explicit_and_all_matching_thresholds_are_required() {
     let tmp = tempfile::tempdir().unwrap();
@@ -590,7 +323,8 @@ fn analysis_is_explicit_and_all_matching_thresholds_are_required() {
     assert_eq!(run(&root, &["db", "migrate"]).0, 0);
     let (code, preferences) = run(&root, &["capture", "settings"]);
     assert_eq!(code, 0);
-    assert_eq!(preferences["data"]["analyze_meetings_after_stop"], false);
+    // Speaker detection (and the echo check behind "Me") runs after Stop by default.
+    assert_eq!(preferences["data"]["analyze_meetings_after_stop"], true);
     let (code, preferences) = run(
         &root,
         &["capture", "settings", "--analyze-after-stop", "true"],

@@ -150,20 +150,40 @@ pub trait AudioPreferencesWrites: Send + Sync {
 pub struct AudioSettingsService {
     queries: Arc<dyn AudioPreferencesQueries>,
     writes: Arc<dyn AudioPreferencesWrites>,
+    /// Serializes read-modify-write updates so two changes made close together both survive.
+    updating: tokio::sync::Mutex<()>,
 }
 impl AudioSettingsService {
     pub fn new(
         queries: Arc<dyn AudioPreferencesQueries>,
         writes: Arc<dyn AudioPreferencesWrites>,
     ) -> Self {
-        Self { queries, writes }
+        Self {
+            queries,
+            writes,
+            updating: tokio::sync::Mutex::new(()),
+        }
     }
     pub async fn get(&self) -> Result<AudioPreferences, ReadAudioPreferencesError> {
         Ok(self.queries.audio_preferences().await?)
     }
     pub async fn save(&self, p: &AudioPreferences) -> Result<(), SaveAudioPreferencesError> {
         p.validate()?;
+        let _serialized = self.updating.lock().await;
         self.writes.save_audio_preferences(p).await?;
         Ok(())
+    }
+    /// Applies one change to the saved preferences, not to a caller's possibly stale copy, so
+    /// unrelated settings changed meanwhile are kept. Returns what was saved.
+    pub async fn update(
+        &self,
+        change: impl FnOnce(&mut AudioPreferences) + Send,
+    ) -> Result<AudioPreferences, SaveAudioPreferencesError> {
+        let _serialized = self.updating.lock().await;
+        let mut preferences = self.queries.audio_preferences().await?;
+        change(&mut preferences);
+        preferences.validate()?;
+        self.writes.save_audio_preferences(&preferences).await?;
+        Ok(preferences)
     }
 }

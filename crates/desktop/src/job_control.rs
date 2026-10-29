@@ -8,6 +8,7 @@ impl Workbench {
         self.job_monitor_running = true;
         let service = self.recovery.clone();
         let library = self.library.clone();
+        let analysis = self.analysis.clone();
         let runtime = self.runtime.clone();
         cx.spawn(async move |this, cx| {
             let mut first = true;
@@ -18,7 +19,7 @@ impl Workbench {
                         first = false;
                         return true;
                     }
-                    if this.pending == 0 && this.area != Area::Jobs && this.pending_jobs.is_empty() {
+                    if !this.busy() && this.area != Area::Jobs && this.pending_jobs.is_empty() && !this.analysis_active {
                         this.job_monitor_running = false;
                         false
                     } else {
@@ -36,12 +37,26 @@ impl Workbench {
                     });
                     break;
                 };
+                let selected = this.update(cx, |this, _| this.requested_recording.clone()).ok().flatten();
+                let activity = if let Some(id) = selected.clone() {
+                    let analysis = analysis.clone();
+                    runtime.spawn(async move { analysis.is_active(&id).await }).await.ok().and_then(Result::ok)
+                } else { None };
                 let ended = this.update(cx, |this, cx| {
-                    if serde_json::to_value(&jobs).ok() == serde_json::to_value(&this.pending_jobs).ok() {
+                    let controller_ended = selected == this.requested_recording
+                        && activity == Some(false) && this.analysis_active;
+                    let mut changed = serde_json::to_value(&jobs).ok()
+                        != serde_json::to_value(&this.pending_jobs).ok();
+                    if selected == this.requested_recording && let Some(active) = activity {
+                        changed |= this.analysis_active != active;
+                        this.analysis_active = active;
+                    }
+                    if !changed {
+                        // Unchanged progress must not redraw the window every tick.
                         return None;
                     }
                     let ended = this.detail.as_ref().filter(|detail| {
-                        this.pending_jobs.iter().any(|run| run.recording_id == detail.recording.id && !jobs.iter().any(|job| job.id == run.id))
+                        controller_ended || this.pending_jobs.iter().any(|run| run.recording_id == detail.recording.id && !jobs.iter().any(|job| job.id == run.id))
                     }).map(|detail| detail.recording.id.clone());
                     this.pending_jobs = jobs;
                     cx.notify();
@@ -53,7 +68,7 @@ impl Workbench {
                         let result = runtime.spawn(async move { library.show(&id).await.map(reader::Document::new) }).await;
                         let _ = this.update(cx, |this, cx| {
                             match result {
-                                Ok(Ok(detail)) => this.receive_detail(detail),
+                                Ok(Ok(detail)) => this.receive_detail(detail, cx),
                                 _ => this.last_error = Some("Processing stopped, but its recording could not be refreshed. Reopen the recording to retry.".into()),
                             }
                             // A background refresh must preserve cancellation/failure feedback.

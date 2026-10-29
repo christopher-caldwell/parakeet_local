@@ -15,6 +15,7 @@ macro_rules! operation_error {
         impl $name{pub fn kind(&self)->&'static str{match self{$(Self::$source_variant(_)=>$source_kind,)*$(Self::$value_variant(_)=>$value_kind,)*}}}
     };
 }
+pub mod audio_archive;
 pub mod audio_locations;
 pub mod jobs;
 pub mod meeting;
@@ -64,7 +65,6 @@ operation_error!(PlanImportError,sources{Invalid:ValidationError=>"invalid_input
 operation_error!(DiscoverRecordingsError,sources{Source:CapabilityError=>"source"},values{});
 operation_error!(InspectMediaError,sources{Source:CapabilityError=>"source"},values{});
 operation_error!(MediaImportError,sources{Source:CapabilityError=>"source",Persistence:PersistenceError=>"persistence"},values{});
-operation_error!(ImportLegacyError,sources{Source:CapabilityError=>"source",Persistence:PersistenceError=>"persistence"},values{});
 #[derive(Debug, Clone)]
 pub struct ImportRecordingsInput {
     pub path: std::path::PathBuf,
@@ -74,11 +74,6 @@ pub struct ImportRecordingsInput {
 pub struct RenameRecordingInput {
     pub id: String,
     pub title: String,
-}
-#[derive(Debug, Clone)]
-pub struct ImportLegacyInput {
-    pub path: std::path::PathBuf,
-    pub dry_run: bool,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecordingDetail {
@@ -90,6 +85,9 @@ pub struct RecordingDetail {
     pub attributions: Vec<parakeet_domain::reconciliation::SegmentAttribution>,
     #[serde(default)]
     pub word_attributions: Vec<parakeet_domain::word_timing::WordAttribution>,
+    /// Me / Them / Unknown per segment: where the audio came from, never a confirmed identity.
+    #[serde(default)]
+    pub source_attributions: Vec<parakeet_domain::reconciliation::SourceAttribution>,
     pub unmapped_corrected_segments: Vec<String>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -300,21 +298,34 @@ impl LibraryService {
             .into_iter()
             .collect();
         let mut latest = std::collections::BTreeMap::<String, Vec<SpeakerInterval>>::new();
-        for run in d
-            .runs
-            .iter()
-            .filter(|r| r.kind == "diarization" && r.status == "completed")
-        {
-            let track = run.configuration["track"]["id"]
-                .as_str()
-                .unwrap_or("unknown")
-                .to_owned();
+        for (track, run) in current_diarization_runs(&d.runs) {
             if let Ok(intervals) = serde_json::from_value(run.result["intervals"].clone()) {
                 latest.insert(track, intervals);
             }
         }
         let intervals = latest.into_values().flatten().collect::<Vec<_>>();
         d.attributions = parakeet_domain::reconciliation::reconcile(&d.segments, &intervals);
+        let saved = &d.recording.metadata["meeting_analysis"]["bleed"];
+        let bleed = saved.is_object().then(|| {
+            let mic_offset = d
+                .tracks
+                .iter()
+                .find(|t| t.kind == TrackKind::Microphone)
+                .and_then(|t| t.meeting_offset_ms())
+                .unwrap_or(0);
+            parakeet_domain::reconciliation::BleedCheck {
+                spans: serde_json::from_value(saved["spans"].clone()).unwrap_or_default(),
+                checked_until_ms: mic_offset
+                    + (saved["analyzed_seconds"].as_f64().unwrap_or(0.) * 1000.) as i64,
+            }
+        });
+        d.source_attributions = parakeet_domain::reconciliation::attribute_sources(
+            &d.segments,
+            &d.attributions,
+            &intervals,
+            &d.tracks,
+            bleed.as_ref(),
+        );
         d.word_attributions = parakeet_domain::word_timing::reconcile_words(
             &d.segments,
             &intervals,
@@ -336,7 +347,12 @@ impl LibraryService {
         }
         Ok(())
     }
-    pub async fn export_markdown(&self, id: &str) -> Result<String, ExportMarkdownError> {
+    /// Markdown transcript; `people` names the speakers the user confirmed.
+    pub async fn export_markdown(
+        &self,
+        id: &str,
+        people: &[SpeakerProfile],
+    ) -> Result<String, ExportMarkdownError> {
         let d = self.show(id).await?;
         let mut text = format!(
             "# {}\n\nRecording: {}\n\n",
@@ -346,9 +362,26 @@ impl LibraryService {
         for segment in d.segments {
             let correction = parakeet_domain::corrections::resolve(&segment.id, &d.corrections);
             let words = correction.text.as_deref().unwrap_or(&segment.text);
+            let source = d
+                .source_attributions
+                .iter()
+                .find(|a| a.segment_id == segment.id)
+                .map(|a| match a.category.as_str() {
+                    "me" => "Me (microphone)",
+                    "them" => "Them (system audio)",
+                    _ if a.reasons == ["not_checked_for_echo"] => {
+                        "Microphone (not checked for echo)"
+                    }
+                    _ => "Unknown source",
+                })
+                .unwrap_or("Unknown source");
             let speaker = match correction.speaker.as_ref() {
-                Some(parakeet_domain::corrections::SpeakerOverride::Profile(id)) => id.as_str(),
-                _ => "Unknown",
+                Some(parakeet_domain::corrections::SpeakerOverride::Profile(id)) => people
+                    .iter()
+                    .find(|p| p.id == *id)
+                    .map(|p| p.name.as_str())
+                    .unwrap_or("Removed person"),
+                _ => source,
             };
             let time = segment
                 .start_ms
@@ -425,7 +458,7 @@ fn default_embedding_choice() -> String {
 impl Default for ModelSelection {
     fn default() -> Self {
         Self {
-            asr: "whisper-base.en".into(),
+            asr: "parakeet-tdt-0.6b-v2".into(),
             diarization: "nemotron3-fast128".into(),
             embedding: default_embedding_choice(),
         }
@@ -643,71 +676,6 @@ impl PlaybackService {
 
 pub mod capture;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LegacySourceRecord {
-    pub source_id: String,
-    pub source_type: String,
-    pub title: String,
-    pub created_at: String,
-    pub duration_ms: Option<i64>,
-    pub file_path: Option<String>,
-    pub original: Value,
-}
-#[async_trait]
-pub trait LegacyCatalog: Send + Sync {
-    async fn read(&self, path: &Path) -> Result<Vec<LegacySourceRecord>, CapabilityError>;
-}
-#[async_trait]
-pub trait LegacyNormalization: Send + Sync {
-    async fn normalize(&self, source: &LegacySourceRecord)
-    -> Result<ImportBundle, CapabilityError>;
-}
-pub struct LegacyImportService {
-    catalog: Arc<dyn LegacyCatalog>,
-    normalizer: Arc<dyn LegacyNormalization>,
-    writes: Arc<dyn LibraryWrites>,
-}
-impl LegacyImportService {
-    pub fn new(
-        catalog: Arc<dyn LegacyCatalog>,
-        normalizer: Arc<dyn LegacyNormalization>,
-        writes: Arc<dyn LibraryWrites>,
-    ) -> Self {
-        Self {
-            catalog,
-            normalizer,
-            writes,
-        }
-    }
-    pub async fn import(
-        &self,
-        input: ImportLegacyInput,
-    ) -> Result<ImportReport, ImportLegacyError> {
-        let path = input.path.as_path();
-        let dry_run = input.dry_run;
-        let rows = self.catalog.read(path).await?;
-        let mut report = ImportReport {
-            imported: 0,
-            existing: 0,
-            recordings: vec![],
-            warnings: vec![],
-        };
-        for row in rows {
-            let b = self.normalizer.normalize(&row).await?;
-            report.recordings.push(b.recording.id.clone());
-            report.warnings.extend(b.warnings.clone());
-            if !dry_run {
-                if self.writes.import(&b).await? {
-                    report.imported += 1;
-                } else {
-                    report.existing += 1;
-                }
-            }
-        }
-        Ok(report)
-    }
-}
-
 pub mod dictation;
 
 #[cfg(test)]
@@ -832,7 +800,5 @@ impl PlaybackService {
 }
 
 pub mod storage;
-
-pub mod cleanup;
 
 pub mod analysis;

@@ -1,4 +1,4 @@
-use crate::{SpeakerInterval, TranscriptSegment};
+use crate::{AudioTrack, SpeakerInterval, TrackKind, TranscriptSegment};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -45,7 +45,7 @@ pub fn reconcile(
                     && b > start
                 {
                     result.overlapping_source_audio = true;
-                    if words.len() >= 4 && words == normalize_words(&other.text) {
+                    if similar_text(&words, &normalize_words(&other.text)) {
                         result.possible_cross_source_duplicate = true;
                     }
                 }
@@ -103,6 +103,23 @@ pub fn reconcile(
         .collect()
 }
 
+/// Speech heard on both sources is usually the same words, not necessarily identical ones:
+/// echo and separate recognition runs drop, add or alter a few words.
+fn similar_text(a: &[String], b: &[String]) -> bool {
+    if a.len() < 3 || b.len() < 3 {
+        return false;
+    }
+    let (short, long) = if a.len() <= b.len() { (a, b) } else { (b, a) };
+    let mut remaining = long.to_vec();
+    let mut shared = 0;
+    for word in short {
+        if let Some(position) = remaining.iter().position(|w| w == word) {
+            remaining.swap_remove(position);
+            shared += 1;
+        }
+    }
+    shared as f64 / short.len() as f64 >= 0.7
+}
 fn normalize_words(text: &str) -> Vec<String> {
     text.split_whitespace()
         .map(|w| {
@@ -113,6 +130,160 @@ fn normalize_words(text: &str) -> Vec<String> {
         })
         .filter(|s| !s.is_empty())
         .collect()
+}
+/// Where the audio came from: a source category, never a person.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SourceAttribution {
+    pub segment_id: String,
+    /// `me` (microphone), `them` (system audio) or `unknown`.
+    pub category: String,
+    /// Why the category is `unknown`, or what supports `me`/`them`.
+    pub reasons: Vec<String>,
+}
+/// A stretch of a source in which most of the signal is explained by the other source.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BleedSpan {
+    pub track_id: String,
+    pub start_ms: i64,
+    pub end_ms: i64,
+}
+/// The result of the microphone bleed check: flagged stretches, and how far it looked.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct BleedCheck {
+    pub spans: Vec<BleedSpan>,
+    /// Meeting time up to which the microphone was checked.
+    pub checked_until_ms: i64,
+}
+/// Me / Them / Unknown per segment. Microphone speech is `me` only while nothing undermines
+/// it: bleed from the system source, a duplicate of system speech, another voice on the
+/// microphone, overlapping or ambiguous speakers, or speech the diarizer did not see.
+pub fn attribute_sources(
+    segments: &[TranscriptSegment],
+    attributions: &[SegmentAttribution],
+    intervals: &[SpeakerInterval],
+    tracks: &[AudioTrack],
+    bleed: Option<&BleedCheck>,
+) -> Vec<SourceAttribution> {
+    let has_system = tracks.iter().any(|t| t.kind == TrackKind::System);
+    // The dominant voice on a microphone is the best candidate for its owner.
+    let mut speaking = BTreeMap::<(&str, &str), i64>::new();
+    for (segment, attribution) in segments.iter().zip(attributions) {
+        if let (Some(track), [speaker], "anonymous_model_attribution") = (
+            segment.track_id.as_deref(),
+            attribution.anonymous_speakers.as_slice(),
+            attribution.state.as_str(),
+        ) {
+            *speaking.entry((track, speaker)).or_default() +=
+                segment.end_ms.unwrap_or(0) - segment.start_ms.unwrap_or(0);
+        }
+    }
+    let dominant = |track: &str| -> Option<&str> {
+        speaking
+            .iter()
+            .filter(|((t, _), _)| *t == track)
+            .max_by(|a, b| a.1.cmp(b.1).then(b.0.1.cmp(a.0.1)))
+            .map(|((_, speaker), _)| *speaker)
+    };
+    segments
+        .iter()
+        .zip(attributions)
+        .map(|(segment, attribution)| {
+            let mut result = SourceAttribution {
+                segment_id: segment.id.clone(),
+                category: "unknown".into(),
+                reasons: vec![],
+            };
+            let Some(track) = segment
+                .track_id
+                .as_ref()
+                .and_then(|id| tracks.iter().find(|t| &t.id == id))
+            else {
+                result.reasons.push("unresolved_source".into());
+                return result;
+            };
+            if segment.start_ms.is_none() || track.meeting_offset_ms().is_none() {
+                result.reasons.push("unresolved_timing".into());
+                return result;
+            }
+            match track.kind {
+                TrackKind::System => {
+                    result.category = "them".into();
+                    result.reasons.push("system_audio".into());
+                }
+                TrackKind::Microphone => {
+                    let diarized = intervals
+                        .iter()
+                        .any(|i| i.track_id.as_deref() == Some(track.id.as_str()));
+                    let mut doubts = vec![];
+                    if attribution.possible_cross_source_duplicate {
+                        doubts.push("duplicate_of_system_audio");
+                    }
+                    match bleed {
+                        Some(check) if is_bleed_dominated(segment, &track.id, &check.spans) => {
+                            doubts.push("system_audio_bleed")
+                        }
+                        // Meeting audio may have leaked into an unchecked microphone.
+                        Some(check)
+                            if has_system
+                                && segment.end_ms.unwrap_or(i64::MAX) > check.checked_until_ms =>
+                        {
+                            doubts.push("not_checked_for_echo")
+                        }
+                        None if has_system => doubts.push("not_checked_for_echo"),
+                        _ => {}
+                    }
+                    if segment.evidence["uncertain_speech"] == true {
+                        doubts.push("uncertain_speech");
+                    }
+                    if diarized {
+                        match (
+                            attribution.state.as_str(),
+                            attribution.anonymous_speakers.as_slice(),
+                        ) {
+                            ("anonymous_model_attribution", [speaker])
+                                if !attribution.overlapping_speech =>
+                            {
+                                if dominant(&track.id) != Some(speaker.as_str()) {
+                                    doubts.push("another_voice_on_microphone");
+                                }
+                            }
+                            ("unknown", _) => doubts.push("no_speech_detected_by_diarization"),
+                            _ => doubts.push("overlapping_or_ambiguous_speakers"),
+                        }
+                    }
+                    if doubts.is_empty() {
+                        result.category = "me".into();
+                        result.reasons.push(if diarized {
+                            "dominant_microphone_voice".into()
+                        } else {
+                            "microphone_without_diarization".into()
+                        });
+                    } else {
+                        result.reasons = doubts.into_iter().map(str::to_owned).collect();
+                    }
+                }
+                // Files and mixed playback carry no source-side evidence of who is speaking.
+                TrackKind::Playback | TrackKind::File => {
+                    result.reasons.push("not_a_capture_source".into())
+                }
+            }
+            result
+        })
+        .collect()
+}
+fn is_bleed_dominated(segment: &TranscriptSegment, track_id: &str, bleed: &[BleedSpan]) -> bool {
+    let (Some(start), Some(end)) = (segment.start_ms, segment.end_ms) else {
+        return false;
+    };
+    if end <= start {
+        return false;
+    }
+    let covered: i64 = bleed
+        .iter()
+        .filter(|b| b.track_id == track_id)
+        .map(|b| (end.min(b.end_ms) - start.max(b.start_ms)).max(0))
+        .sum();
+    covered * 2 >= end - start
 }
 #[cfg(test)]
 mod tests {
@@ -173,6 +344,198 @@ mod tests {
             .state,
             "ambiguous"
         );
+    }
+    fn track(id: &str, kind: TrackKind) -> AudioTrack {
+        AudioTrack {
+            id: id.into(),
+            recording_id: "r".into(),
+            kind,
+            path: "p".into(),
+            start_offset_ms: Some(0),
+            sample_rate: Some(16000),
+            duration_ms: Some(100_000),
+            available: true,
+            size_bytes: None,
+            modified_unix_ms: None,
+            provenance: Value::Null,
+        }
+    }
+    fn spoken(id: &str, track: &str, start: i64, end: i64, text: &str) -> TranscriptSegment {
+        let mut s = seg(Some(track));
+        s.id = id.into();
+        s.start_ms = Some(start);
+        s.end_ms = Some(end);
+        s.text = text.into();
+        s
+    }
+    fn categories(
+        segments: &[TranscriptSegment],
+        intervals: &[SpeakerInterval],
+        bleed: &[BleedSpan],
+    ) -> Vec<(String, Vec<String>)> {
+        let check = BleedCheck {
+            spans: bleed.to_vec(),
+            checked_until_ms: i64::MAX,
+        };
+        let tracks = [
+            track("mic", TrackKind::Microphone),
+            track("sys", TrackKind::System),
+        ];
+        let attributions = reconcile(segments, intervals);
+        attribute_sources(segments, &attributions, intervals, &tracks, Some(&check))
+            .into_iter()
+            .map(|a| (a.category, a.reasons))
+            .collect()
+    }
+    #[test]
+    fn clean_single_voice_mic_is_me_and_system_is_them() {
+        let segments = [
+            spoken(
+                "a",
+                "mic",
+                0,
+                4000,
+                "I think we should ship the release on friday",
+            ),
+            spoken("b", "sys", 5000, 9000, "that works for me thanks"),
+        ];
+        let intervals = [
+            interval(0, 4000, "m1", "mic"),
+            interval(5000, 9000, "s1", "sys"),
+        ];
+        let result = categories(&segments, &intervals, &[]);
+        assert_eq!(result[0].0, "me");
+        assert_eq!(result[1].0, "them");
+    }
+    #[test]
+    fn leaked_far_end_speech_is_unknown_never_me() {
+        let segments = [
+            spoken(
+                "echo",
+                "mic",
+                1000,
+                5000,
+                "we should ship the release on friday morning",
+            ),
+            spoken(
+                "far",
+                "sys",
+                900,
+                5000,
+                "we should ship the release on friday",
+            ),
+        ];
+        let intervals = [
+            interval(1000, 5000, "m1", "mic"),
+            interval(900, 5000, "s1", "sys"),
+        ];
+        let result = categories(&segments, &intervals, &[]);
+        assert_eq!(result[0].0, "unknown");
+        assert!(
+            result[0]
+                .1
+                .contains(&"duplicate_of_system_audio".to_owned())
+        );
+        assert_eq!(result[1].0, "them");
+        // Bleed evidence alone, with different recognized words, also withholds "Me".
+        let lone = [spoken("echo", "mic", 1000, 5000, "garbled words entirely")];
+        let bleed = [BleedSpan {
+            track_id: "mic".into(),
+            start_ms: 0,
+            end_ms: 6000,
+        }];
+        assert_eq!(
+            categories(&lone, &[interval(1000, 5000, "m1", "mic")], &bleed)[0].0,
+            "unknown"
+        );
+    }
+    #[test]
+    fn a_second_voice_in_the_room_is_not_me() {
+        let segments = [
+            spoken("owner1", "mic", 0, 5000, "my own words go here today"),
+            spoken("owner2", "mic", 6000, 11000, "more of my words go here"),
+            spoken("guest", "mic", 12000, 15000, "hello from the next desk"),
+        ];
+        let intervals = [
+            interval(0, 5000, "m1", "mic"),
+            interval(6000, 11000, "m1", "mic"),
+            interval(12000, 15000, "m2", "mic"),
+        ];
+        let result = categories(&segments, &intervals, &[]);
+        assert_eq!(
+            result.iter().map(|r| r.0.as_str()).collect::<Vec<_>>(),
+            ["me", "me", "unknown"]
+        );
+        assert!(
+            result[2]
+                .1
+                .contains(&"another_voice_on_microphone".to_owned())
+        );
+    }
+    #[test]
+    fn overlap_missing_timing_and_unseen_speech_are_unknown() {
+        let segments = [spoken("a", "mic", 0, 4000, "words in the overlap here")];
+        let overlap = [
+            interval(0, 4000, "m1", "mic"),
+            interval(1000, 3000, "m2", "mic"),
+        ];
+        assert_eq!(categories(&segments, &overlap, &[])[0].0, "unknown");
+        let elsewhere = [interval(60000, 64000, "m1", "mic")];
+        assert_eq!(categories(&segments, &elsewhere, &[])[0].0, "unknown");
+        let mut untimed = segments[0].clone();
+        untimed.start_ms = None;
+        assert_eq!(categories(&[untimed], &[], &[])[0].0, "unknown");
+        // Without any diarization the source alone supports "Me" only for a clean mic.
+        assert_eq!(categories(&segments, &[], &[])[0].0, "me");
+    }
+    #[test]
+    fn an_unchecked_microphone_is_never_me_while_meeting_audio_exists() {
+        let segments = [spoken(
+            "a",
+            "mic",
+            0,
+            4000,
+            "words spoken into the microphone",
+        )];
+        let intervals = [interval(0, 4000, "m1", "mic")];
+        let tracks = [
+            track("mic", TrackKind::Microphone),
+            track("sys", TrackKind::System),
+        ];
+        let attributions = reconcile(&segments, &intervals);
+        let unchecked = attribute_sources(&segments, &attributions, &intervals, &tracks, None);
+        assert_eq!(unchecked[0].category, "unknown");
+        assert_eq!(unchecked[0].reasons, ["not_checked_for_echo"]);
+        // Checked only up to 2 s: the segment's tail was never examined.
+        let partial = BleedCheck {
+            spans: vec![],
+            checked_until_ms: 2000,
+        };
+        let tail = attribute_sources(
+            &segments,
+            &attributions,
+            &intervals,
+            &tracks,
+            Some(&partial),
+        );
+        assert_eq!(tail[0].category, "unknown");
+        // A microphone-only recording has no meeting audio to leak.
+        let alone = attribute_sources(&segments, &attributions, &intervals, &tracks[..1], None);
+        assert_eq!(alone[0].category, "me");
+    }
+    #[test]
+    fn near_duplicate_text_is_detected_but_distinct_speech_is_not() {
+        let a = normalize_words("we should ship it on friday morning");
+        let b = normalize_words("we should ship on friday");
+        assert!(similar_text(&a, &b));
+        assert!(!similar_text(
+            &a,
+            &normalize_words("completely different sentence about lunch")
+        ));
+        assert!(!similar_text(
+            &normalize_words("yes ok"),
+            &normalize_words("yes ok")
+        ));
     }
     #[test]
     fn anonymous_evidence_does_not_create_named_speaker() {

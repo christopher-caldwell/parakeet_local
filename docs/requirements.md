@@ -1,19 +1,62 @@
-# Parakeet Local
+# Requirements
 
-The October 27, 2026 user brief is the product authority. This workspace implements a personal Apple Silicon macOS tool with a Rust application core, SQLx/SQLite persistence, CLI, and native GPUI entry point. No HTTP frontend, accounts, synchronization, analytics, or cloud transcription.
+The product authority is the user's original brief, "MacParakeet Clone — Product Requirements and Autonomous Implementation Brief" (October 27, 2026). It is kept outside Git (the repo is public): read `.local/brief/original_brief.md` on a machine that has it, and ask the user for it otherwise. Cite it as B§n. This page extracts the requirements that earlier summaries lost or inverted; it does not replace the brief. Deviations are recorded in `.local/brief/parakeet_local_design_deviations.md`.
 
-Primary correctness requirements: independent microphone/system sources with real offsets; audio-time transcript ordering and explicit overlap; unknown attribution instead of guessed “Me”; raw model output separate from corrections; persistent title overrides; verified enrollment separate from predictions; model/version/capture-domain compatibility; multiple owning hold shortcuts; per-bundle-ID AI routing disabled until explicitly authorized.
+## Product
 
-Source recordings and the original MacParakeet database are read-only. Work products, model downloads, imported snapshots, and derived audio belong to this application. Referenced originals are fingerprinted; absence or movement is reported, never repaired in place. Private artifacts and model weights are excluded from Git.
+- A personal, local-only macOS tool. Transcription, diarization and voice embeddings run on-device; nothing goes to an AI service without explicit authorization (B§2).
+- Priorities: reliable microphone selection, a responsive native UI, trustworthy speaker identification, correct transcript chronology, and no fabricated speech (B§1).
 
-## Executable milestones
+## Priorities stated by the owner (October 28)
 
-1. Shared core: build/test; discover and audit actual artifacts; isolated database; import twice without duplicates; list/show/tracks/search/rename/export; source evidence unchanged.
-2. Processing: explicit model install/verify; real local ASR and timed anonymous diarization on retained audio; durable run provenance and failures; source offsets preserved; reproducible public and personal diagnostic reports.
-3. Recognition: verified examples; compatible embeddings; conservative evidence-based suggestions; reversible corrections; no enrollment from guesses.
-4. Desktop: GPUI invokes those services, with background work and explicit errors; library/transcripts/models/speakers.
-5. Integrations: capture/health/recovery, shortcuts/insertion, opt-in AI routes, media metadata/import. Hardware claims require actual hardware evidence.
+- **Accuracy comes first.** Meetings may take minutes to transcribe after they end. Dictation also values accuracy, but must not make the owner wait long after they stop speaking.
+- **Dictation is transcribe-then-paste.** Typing as the owner speaks is not required. Live transcript preview is out of scope.
+- **No MacParakeet import and no feature parity.** Only add what the owner cares about.
+- **Raw recordings are kept seven days, then replaced by a verified lossless copy**, so a wrong transcript or speaker label can still be redone from the original.
+- **Maturity stages** (gates below): proof of concept, usable, stable, replacement. Headphones are the normal setup, so microphone bleed is a lower priority unless "Me" turns out wrong. Words invented while the microphone is muted or silent are a defect to measure and fix.
+- The default speech model is the most accurate one measured on the benchmarks in `benchmarks/results/`, not the one assumed to be best.
 
-These are implementation milestones, not human approval gates. Unavailable Swift tooling, model access, or hardware permission does not block independent work. Human checkpoints require only actual identity labels, OS permission, physical keyboard/capture checks, and subjective acceptance after useful workflows exist.
+## Maturity gates
 
-Current scope, conformance findings and reset priorities are tracked in the [top-to-bottom project review](project-review.md), audited at `64a6278`. The original product brief remains authoritative; a green build or isolated feature receipt is not whole-product acceptance.
+Each gate is passed by doing the owner's real workflow, not by tests alone. Work that does not block the current gate waits.
+
+| Gate | Passed when | Screens that gate it |
+|---|---|---|
+| **Proof of concept** (reached) | One real meeting goes end to end: accurate transcript, speakers detected, voices named, names recognized. Accuracy is measured on the owner's own audio. | none |
+| **Usable** (current) | The owner records a real meeting, dictates, reads and corrects a transcript, and names voices, all from the app with no terminal and no help. A muted or silent microphone produces no invented words. Errors say what to do. | Record a meeting, Dictation, Privacy (permissions), Library transcript, Name voices |
+| **Stable** | A few weeks of daily use without lost audio or silent failures: the 7-day lossless archive is verified, interrupted work resumes, recognition criteria are calibrated and the owner has seen the numbers. | Background jobs, Storage, Processing, error states |
+| **Replacement** | The owner stops opening MacParakeet. Only the features the owner cares about exist. | everything, as used |
+
+## Me, Them and Unknown (B§7, B§9, B§26)
+
+- Source categories are **Me** (microphone), **Them** (system audio) and **Unknown** (unattributed or ambiguous). They are source attribution, not confirmed identities.
+- Never label all microphone speech as the user. Bleed, echo, extra voices or ambiguity make a segment Unknown. Prefer Unknown to a false "Me".
+- Distinguish original audio, source attribution, inferred speakers and confirmed identities.
+
+## Learning from the user (B§1, B§10, B§20)
+
+- The system learns from explicit human identification **and corrections**: a naming, accepted suggestion or correction the user confirms creates verified, reversible, inspectable voice examples.
+- Model predictions and imported labels are never verified examples and never auto-enroll.
+- Recognition is automatic: embed each new cluster, compare with compatible enrolled profiles, apply calibrated acceptance criteria, and suggest an identity or Unknown. Criteria are proposed from measured evidence on tuning data, never invented, and held-out data stays untouched.
+- Profiles hold several examples, model/domain provenance, enrollment and recognition history, and optional notes.
+- A training session should let the user identify several speakers quickly (play, choose person/new/Unknown, save) without listening to whole meetings.
+
+## Capture and transcript (B§7, B§17)
+
+- Meetings record with local transcription; independent mic and system capture with real offsets; sort by audio time; keep overlap, untimed text and raw output.
+- A silent or failed microphone must not yield an apparently successful recording; device changes are handled and surfaced.
+- A meeting that requests a microphone must not start until that explicitly selected input delivers audio buffers and its effective device is verified. An unavailable input disables microphone recording; a startup failure blocks the meeting rather than silently recording system audio alone. Muted buffers are valid input, not a startup failure. Interruptions after startup retain audio and remain visible in the saved recording. (Owner clarification, October 28.)
+- Treat the false-attribution defect class as a priority: evaluate silence/noise, mic-system duplication, bleed, echo removal, missing audio, chunk boundaries and word alignment.
+
+## Dictation, AI, media (B§8, B§13, B§14)
+
+- Several shortcuts work at once on laptop and external keyboards; correct key lifecycle; clipboard preserved; failed insertion keeps the text.
+- AI enhancement is per-bundle-ID, off by default, explicitly authorized, with raw text preserved.
+- YouTube imports use source metadata for titles; every item has an editable, persistent title.
+
+## Engineering (B§4, B§5, B§22, B§23, B§25)
+
+- One shared Rust core with CLI and GPUI entry points; the CLI is the main verification surface.
+- Report evidence by category: implemented, unit-tested, integration-tested, real-model-tested, real-recording-tested, hardware-tested, human-validated, blocked or unverified. Never claim an accuracy or performance gain that was not measured.
+- Schedule concurrent work deliberately (capture, dictation, transcription, diarization, installs, CLI) without a distributed scheduler.
+- Record material deviations from the brief and their reasons.

@@ -1,0 +1,45 @@
+{
+ "id": "parakeet-tdt-vs-whisper",
+ "date": "2026-10-28",
+ "tool": "FluidAudio v0.9.1 fluidaudiocli transcribe --model-version v2 (parakeet-tdt-0.6b-v2 Core ML), upstream CLI built from source with Swift 6.3.3 in Swift 5 language mode; whole files, no app VAD",
+ "data": "Same clips and normalization as whisper-models.json; WER recomputed with one script for every model (lowercase, punctuation stripped, hyphens as spaces).",
+ "wer_percent": {
+  "librispeech_long_set2": {
+   "parakeet-tdt-v2": 1.69,
+   "whisper-large-v3": 2.03,
+   "whisper-medium.en": 2.65,
+   "whisper-small.en": 3.13
+  },
+  "ami_headset_tracks": {
+   "parakeet-tdt-v2": 18.44,
+   "whisper-large-v3": 19.52,
+   "whisper-medium.en": 19.52,
+   "whisper-small.en": 20.28
+  }
+ },
+ "muted_mic_false_words": {
+  "parakeet-tdt-v2": 0,
+  "whisper-large-v3": 11,
+  "whisper-small.en": 0,
+  "note": "seven synthetic non-speech tracks, 3 minutes each"
+ },
+ "speed": {
+  "parakeet_wall_seconds_ami_10min_tracks": "about 3 s each",
+  "note": "includes warm Core ML load; Whisper large-v3 real-time factor was 0.12-0.18"
+ },
+ "limits": "Public audio only; 5 AMI tracks and 4 LibriSpeech joins, so treat the ranking as a strong direction, not a precise figure. Not yet run on the owner's recordings.",
+ "in_app_pipeline": {
+  "what": "parakeet-tdt-0.6b-v2 installed through the app's checksummed installer and run through the app's own speech-aligned chunking and native helper (`parakeet benchmark run`)",
+  "wer_percent": {
+   "librispeech_long_set2": 1.66,
+   "ami_headset_tracks": 16.42
+  },
+  "real_time_factor": {
+   "librispeech_long_set2": 0.007,
+   "ami_headset_tracks": 0.01
+  },
+  "muted_mic_false_words": 0,
+  "dictation_8s_clip_wall_seconds": 0.35,
+  "note": "The app's chunking improved TDT on AMI from 18.44% (whole files) to 16.42%; Whisper large-v3 scored 19.52%. Same public clips and scoring script as above."
+ }
+}

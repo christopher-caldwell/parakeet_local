@@ -62,6 +62,9 @@ pub struct EmbeddingRequest {
     pub track: AudioTrack,
     pub start_ms: i64,
     pub end_ms: i64,
+    /// Further clean ranges of the same source; their audio is concatenated after the first
+    /// range so a speaker with only short turns can still be embedded.
+    pub more_ranges: Vec<(i64, i64)>,
     pub model: String,
 }
 #[async_trait]

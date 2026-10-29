@@ -128,8 +128,11 @@ impl DictationService {
                 CaptureRecordingInput {
                     microphone_uid: Some(microphone_uid),
                     system_audio: false,
-                    title: format!("Dictation {}", now()),
+                    title: chrono::Local::now()
+                        .format("Dictation %b %-d, %Y at %-I:%M:%S %p")
+                        .to_string(),
                     maximum_seconds: 120,
+                    dictation: true,
                     final_transcription: None,
                 },
                 control.stop.clone(),

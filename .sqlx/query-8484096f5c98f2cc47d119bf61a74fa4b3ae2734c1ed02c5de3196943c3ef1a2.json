@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT data FROM voice_examples WHERE json_extract(data,'$.recording_id')=?1 ORDER BY id\n",
+  "describe": {
+    "columns": [
+      {
+        "name": "data",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "8484096f5c98f2cc47d119bf61a74fa4b3ae2734c1ed02c5de3196943c3ef1a2"
+}

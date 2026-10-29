@@ -3,46 +3,68 @@ use super::*;
 use parakeet_application::analysis::AnalyzeMeetingInput;
 impl Workbench {
     pub(super) fn analysis_panel(&self, detail: &reader::Document, cx: &mut Context<Self>) -> Div {
-        let mut panel=div().p_4().rounded_lg().bg(rgb(PANEL)).flex().flex_col().gap_3()
-            .child(section("Meeting & speakers", "Transcribe sources, diarize and prepare playable voice examples. Names stay unconfirmed until you identify them."));
+        let waiting = self.waiting_voices().len();
+        let mut panel = panel().child(
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(
+                    div()
+                        .text_size(px(16.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child("Speakers"),
+                )
+                .child(caption(
+                    "Finds the separate voices in this meeting. Names stay unconfirmed until you name them.",
+                )),
+        );
         match &detail.analysis {
             Ok(Some(plan)) => {
-                panel = panel
-                    .child(caption(format!(
-                        "{} · {} · {} sources · {} voice clips · {} comparisons",
-                        plan.status,
-                        plan.stage,
-                        plan.sources.len(),
-                        plan.candidates.len(),
-                        plan.suggestions.len()
-                    )))
-                    .child(caption(format!(
-                        "ASR {} · diarization {}",
-                        plan.asr.id, plan.diarization.id
-                    )))
-                    .child(caption(if plan.matching_policy.is_some() {
-                        "Saved explicit identity policy; resume uses the same thresholds and model."
-                    } else {
-                        "Anonymous analysis. No identity comparison requested."
-                    }));
+                let (label, color) = match plan.status.as_str() {
+                    "completed" => ("Speakers detected", SUCCESS),
+                    "failed" => ("Detection failed", DANGER),
+                    _ => ("Detection in progress", WARNING),
+                };
+                panel = panel.child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .items_center()
+                        .gap_2()
+                        .child(pill(label, color))
+                        .child(caption(match waiting {
+                            0 => "No voices are waiting to be named.".to_owned(),
+                            1 => "1 voice is waiting to be named.".to_owned(),
+                            n => format!("{n} voices are waiting to be named."),
+                        })),
+                );
+                if self.show_status_details {
+                    panel = panel
+                        .child(caption(format!(
+                            "{} · {} sources · {} comparisons",
+                            plan.stage,
+                            plan.sources.len(),
+                            plan.suggestions.len()
+                        )))
+                        .child(caption(format!(
+                            "Transcription {} · speaker detection {}",
+                            plan.asr.id, plan.diarization.id
+                        )))
+                        .child(caption(if plan.matching_policy.is_some() {
+                            "Saved explicit identity policy; resume uses the same thresholds and model."
+                        } else {
+                            "Anonymous analysis. No identity comparison requested."
+                        }));
+                }
                 for failure in plan.failures.iter().take(8) {
                     panel = panel.child(caption(failure.clone()).text_color(rgb(WARNING)));
                 }
-                let candidates = plan.candidates.clone();
-                panel = panel.child(
-                    quiet("analysis-review-speakers", "Review prepared voices")
-                        .disabled(candidates.is_empty())
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.candidates = candidates.clone();
-                            this.speaker_mode = SpeakerMode::Profiles;
-                            this.area = Area::Speakers;
-                            this.refresh_profiles(cx);
-                            cx.notify();
-                        })),
-                );
             }
             Ok(None) => {
-                panel=panel.child(caption("No saved analysis. Uses the installed models selected in Models; no weights are downloaded."));
+                panel = panel.child(caption(
+                    "Not done yet. Detecting speakers uses the speaker model marked In use under Local models.",
+                ));
             }
             Err(error) => {
                 panel = panel.child(
@@ -51,15 +73,49 @@ impl Workbench {
                 );
             }
         }
-        panel=panel.child(div().flex().flex_wrap().gap_2()
-            .child(button("analyze-meeting","Analyze / resume meeting").disabled(self.pending>0).on_click(cx.listener(|this,_,_,cx|this.analyze_meeting(false,false,cx))))
-            .child(quiet("analysis-new-anonymous","New anonymous analysis").disabled(self.pending>0).on_click(cx.listener(|this,_,_,cx|this.analyze_meeting(true,false,cx)))))
-            .child(caption("Optional identity comparison: enter all three thresholds. Similarity is not a probability; personal thresholds have not been calibrated."))
-            .child(div().flex().flex_wrap().gap_2().child(field(&self.match_score).w(px(200.))).child(field(&self.match_margin).w(px(160.))).child(field(&self.match_examples).w(px(190.))))
-            .child(quiet("analysis-new-matching","New analysis with entered policy").disabled(self.pending>0).on_click(cx.listener(|this,_,_,cx|this.analyze_meeting(true,true,cx))));
+        let any_candidates = waiting > 0;
+        panel = panel.child(
+            div()
+                .flex()
+                .flex_wrap()
+                .gap_2()
+                .child(if any_candidates {
+                    primary("analysis-review-speakers", "Name the voices")
+                        .on_click(cx.listener(|this, _, _, cx| this.open_voices(cx)))
+                } else {
+                    button("analysis-review-speakers", "Name the voices")
+                        .disabled(true)
+                        .on_click(cx.listener(|this, _, _, cx| this.open_voices(cx)))
+                })
+                .child(
+                    button("analyze-meeting", "Detect speakers")
+                        .disabled(self.busy())
+                        .on_click(
+                            cx.listener(|this, _, _, cx| this.analyze_meeting(false, false, cx)),
+                        ),
+                )
+                .child(
+                    quiet("analysis-new-anonymous", "Start over")
+                        .disabled(self.busy())
+                        .on_click(
+                            cx.listener(|this, _, _, cx| this.analyze_meeting(true, false, cx)),
+                        ),
+                ),
+        );
+        if self.show_status_details {
+            panel=panel
+                .child(caption("Advanced: compare voices with named people while detecting. Enter all three thresholds; similarity is not a probability and these have not been calibrated for you."))
+                .child(div().flex().flex_wrap().gap_2().child(field(&self.match_score).w(px(200.))).child(field(&self.match_margin).w(px(160.))).child(field(&self.match_examples).w(px(190.))))
+                .child(quiet("analysis-new-matching","New analysis with entered policy").disabled(self.busy()).on_click(cx.listener(|this,_,_,cx|this.analyze_meeting(true,true,cx))));
+        }
         panel
     }
-    fn analyze_meeting(&mut self, new_run: bool, matching: bool, cx: &mut Context<Self>) {
+    pub(super) fn analyze_meeting(
+        &mut self,
+        new_run: bool,
+        matching: bool,
+        cx: &mut Context<Self>,
+    ) {
         let Some(detail) = &self.detail else { return };
         let recording_id = detail.recording.id.clone();
         let matching_policy = if matching {
@@ -85,10 +141,14 @@ impl Workbench {
             None
         };
         let service = self.analysis.clone();
+        let recovery = self.recovery.clone();
         let library = self.library.clone();
-        self.task(
+        self.heavy_task(
             "Analyzing meeting locally; source audio and corrections retained",
             async move {
+                if !new_run {
+                    recovery.recover_recording(&recording_id).await?;
+                }
                 let warning = service
                     .analyze(AnalyzeMeetingInput {
                         recording_id: recording_id.clone(),

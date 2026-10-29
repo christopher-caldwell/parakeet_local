@@ -6,16 +6,19 @@ pub enum LibraryFilter {
     All,
     Meetings,
     Media,
+    Dictations,
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum RecordingTab {
     Transcript,
+    Voices,
     Audio,
     Processing,
 }
 fn recording_kind(kind: &str) -> &'static str {
     match kind {
         "meeting" => "Meeting",
+        "dictation" => "Dictation",
         "youtube" => "YouTube",
         "file" => "Audio file",
         _ => "Recording",
@@ -118,6 +121,28 @@ impl Workbench {
             cx,
         );
     }
+    /// Closes the line editor. Text that differs from the saved line is kept as a draft, so
+    /// Escape, paging or opening another recording never throws away what you typed.
+    pub(super) fn close_editor(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self.editing_segment.take() else {
+            return;
+        };
+        let text = self.edit_text.read(cx).value().to_string();
+        let saved = self.detail.as_ref().and_then(|d| {
+            let index = d.segments.iter().position(|s| s.id == id)?;
+            Some(
+                d.row_corrections[index]
+                    .text
+                    .clone()
+                    .unwrap_or_else(|| d.segments[index].text.clone()),
+            )
+        });
+        if saved.is_some_and(|saved| saved != text) {
+            self.drafts.insert(id, text);
+        } else {
+            self.drafts.remove(&id);
+        }
+    }
     pub(super) fn save_segment_text(&mut self, cx: &mut Context<Self>) {
         let Some(segment_id) = self.editing_segment.clone() else {
             return;
@@ -214,15 +239,19 @@ impl Workbench {
                     )
                     .child(caption("Recordings, meetings, and imported media")),
             )
+            .when(self.show_status_details, |row| {
+                row.child(
+                    quiet("show-import-path", "From path…").on_click(cx.listener(
+                        |this, _, _, cx| {
+                            this.show_import_path = !this.show_import_path;
+                            this.show_media_import = false;
+                            cx.notify();
+                        },
+                    )),
+                )
+            })
             .child(
-                quiet("show-import-path", "From path…").on_click(cx.listener(|this, _, _, cx| {
-                    this.show_import_path = !this.show_import_path;
-                    this.show_media_import = false;
-                    cx.notify();
-                })),
-            )
-            .child(
-                button("show-media-import", "YouTube URL").on_click(cx.listener(
+                quiet("show-media-import", "YouTube URL").on_click(cx.listener(
                     |this, _, window, cx| {
                         this.show_media_import = !this.show_media_import;
                         this.show_import_path = false;
@@ -234,7 +263,7 @@ impl Workbench {
                 )),
             )
             .child(
-                primary("import-file", "Import audio…")
+                button("import-file", "Import audio…")
                     .on_click(cx.listener(|this, _, _, cx| this.choose_audio(cx))),
             );
         let mut view = div()
@@ -276,11 +305,23 @@ impl Workbench {
         }
         if self.show_media_import {
             view=view.child(div().px_5().py_3().border_b_1().border_color(rgb(BORDER)).bg(rgb(PANEL)).flex().flex_col().gap_2()
-                .child(caption("Download the audio and transcribe it with your selected local model."))
+                .child(caption(if self.media_importing {
+                    "Downloading and transcribing… this can take a few minutes. You can keep working; the recording opens here when it's ready."
+                } else {
+                    "Download the audio and transcribe it with your selected local model."
+                }))
                 .child(div().flex().items_center().gap_2().child(div().flex_1().min_w_0().child(field(&self.media_url)))
-                    .child(primary("import-youtube","Download & transcribe").disabled(self.pending>0).on_click(cx.listener(|this,_,_,cx|{
-                        let service=this.media.clone();let library=this.library.clone();let url=this.media_url.read(cx).value().to_string();let generation=this.search_generation;let query=this.search.read(cx).value().to_string();
-                        this.task("Downloading and transcribing media",async move{let result=service.transcribe(TranscribeMediaInput{url,model:"selected-asr".into()}).await?;if let Some(error)=result.transcription_failure{anyhow::bail!("Audio was saved as {}. Transcription failed: {error}",result.recording.id);}Ok(Update::LibrarySearch(generation,library.list(if query.is_empty(){None}else{Some(&query)}).await?))},cx);
+                    .child(primary("import-youtube",if self.media_importing {"Working…"} else {"Download & transcribe"}).disabled(self.media_importing).on_click(cx.listener(|this,_,_,cx|{
+                        let service=this.media.clone();let library=this.library.clone();let url=this.media_url.read(cx).value().to_string();
+                        this.media_importing=true;
+                        this.background_task("Downloading and transcribing media",async move{
+                            let outcome=async{
+                                let result=service.transcribe(TranscribeMediaInput{url,model:"selected-asr".into()}).await?;
+                                let warning=result.transcription_failure.map(|error|format!("Audio saved, but transcription failed: {error}"));
+                                Ok::<_,anyhow::Error>((library.show(&result.recording.id).await.map(reader::Document::new)?,warning))
+                            }.await.map_err(|e|e.to_string());
+                            Ok(Update::MediaImported(outcome))
+                        },cx);
                     })))
                     .child(quiet("close-media-import","Cancel").on_click(cx.listener(|this,_,_,cx|{this.show_media_import=false;cx.notify();})))));
         }
@@ -295,9 +336,11 @@ impl Workbench {
     }
     fn recording_list(&self, cx: &mut Context<Self>) -> Div {
         let matching = |r: &&Recording| match self.library_filter {
-            LibraryFilter::All => true,
+            // Dictations are many and short; they have their own list.
+            LibraryFilter::All => r.source_kind != "dictation",
             LibraryFilter::Meetings => r.source_kind == "meeting",
-            LibraryFilter::Media => r.source_kind != "meeting",
+            LibraryFilter::Media => !["meeting", "dictation"].contains(&r.source_kind.as_str()),
+            LibraryFilter::Dictations => r.source_kind == "dictation",
         };
         let visible = self.records.iter().filter(matching).collect::<Vec<_>>();
         let mut filters = div().flex().gap_1();
@@ -305,6 +348,7 @@ impl Workbench {
             (LibraryFilter::All, "All"),
             (LibraryFilter::Meetings, "Meetings"),
             (LibraryFilter::Media, "Media"),
+            (LibraryFilter::Dictations, "Dictations"),
         ]
         .into_iter()
         .enumerate()
@@ -332,7 +376,7 @@ impl Workbench {
             let id = recording.id.clone();
             let active = self.requested_recording.as_deref() == Some(id.as_str());
             let glyph = match recording.source_kind.as_str() {
-                "meeting" => "mic",
+                "meeting" | "dictation" => "mic",
                 "youtube" => "link",
                 _ => "file",
             };
@@ -372,7 +416,10 @@ impl Workbench {
                                 } else {
                                     recording_kind(&recording.source_kind).into()
                                 }
-                            ))),
+                            )))
+                            .when(recording.capture_needs_attention(), |row| {
+                                row.child(caption("Audio needs attention").text_color(rgb(WARNING)))
+                            }),
                     )
                     .on_click(
                         cx.listener(move |this, _, window, cx| this.open(id.clone(), window, cx)),
@@ -451,10 +498,10 @@ impl Workbench {
         let Some(detail) = &self.detail else {
             let loading = self.requested_recording.is_some() && self.pending > 0;
             return reader.items_center().justify_center().gap_3().p_8()
-                .child(div().size(px(58.)).rounded_xl().bg(rgb(PANEL)).text_color(rgb(ACCENT)).flex().items_center().justify_center().child(icon("wave").size(px(30.))))
+                .child(div().size(px(58.)).rounded_xl().bg(rgb(PANEL)).text_color(rgb(ACCENT)).flex().items_center().justify_center().child(icon("wave").size(px(30.)).text_color(rgb(MUTED))))
                 .child(div().text_size(px(21.)).font_weight(FontWeight::SEMIBOLD).child(if loading{"Opening recording…"}else{"A place for every conversation"}))
                 .child(div().max_w(px(340.)).text_center().text_color(rgb(MUTED)).child(if loading{"Loading the saved transcript and source details."}else{"Select a recording to read its transcript, listen to the original audio, or review its speakers."}))
-                .when(!loading,|view|view.child(primary("empty-import","Import audio…").on_click(cx.listener(|this,_,_,cx|this.choose_audio(cx)))))
+                .when(!loading,|view|view.child(primary("empty-record","Record a meeting").self_center().on_click(cx.listener(|this,_,_,cx|this.navigate(Area::Capture,cx)))))
                 .child(caption("⌘O  Import audio     ⌘F  Find words"));
         };
         let mut heading = div()
@@ -534,7 +581,7 @@ impl Workbench {
                 .flex_wrap()
                 .items_center()
                 .gap_2()
-                .child(pill(recording_kind(&detail.recording.source_kind), ACCENT))
+                .child(pill(recording_kind(&detail.recording.source_kind), MUTED))
                 .child(caption(date_label(&detail.recording.created_at)))
                 .when(detail.recording.duration_ms.is_some(), |row| {
                     row.child(caption(time_label(detail.recording.duration_ms)))
@@ -543,19 +590,41 @@ impl Workbench {
                     row.child(pill("Source unavailable", WARNING))
                 }),
         );
+        if detail.recording.capture_needs_attention() {
+            heading = heading.child(
+                div()
+                    .self_start()
+                    .max_w(px(640.))
+                    .p_3()
+                    .rounded_lg()
+                    .bg(rgba((WARNING << 8) | 0x1f))
+                    .text_color(rgb(WARNING))
+                    .child("Audio saved with problems. Some audio may be missing or silent. Check Audio & sources and listen before relying on this transcript."),
+            );
+        }
         let mut tabs = div()
             .px_5()
             .pb_2()
             .flex_shrink_0()
             .flex()
+            .flex_wrap()
             .items_center()
             .gap_1()
             .border_b_1()
             .border_color(rgb(BORDER));
+        let waiting = self.waiting_voices().len();
         for (i, (tab, label)) in [
-            (RecordingTab::Transcript, "Transcript"),
-            (RecordingTab::Audio, "Audio & sources"),
-            (RecordingTab::Processing, "Processing"),
+            (RecordingTab::Transcript, "Transcript".to_owned()),
+            (
+                RecordingTab::Voices,
+                if waiting > 0 {
+                    format!("Name voices ({waiting})")
+                } else {
+                    "Name voices".to_owned()
+                },
+            ),
+            (RecordingTab::Audio, "Audio & sources".to_owned()),
+            (RecordingTab::Processing, "Processing".to_owned()),
         ]
         .into_iter()
         .enumerate()
@@ -563,7 +632,11 @@ impl Workbench {
             tabs = tabs.child(
                 choice(("recording-tab", i), label, self.recording_tab == tab).on_click(
                     cx.listener(move |this, _, _, cx| {
-                        this.recording_tab = tab;
+                        if tab == RecordingTab::Voices {
+                            this.open_voices(cx);
+                        } else {
+                            this.recording_tab = tab;
+                        }
                         this.reset_reader_rows(true);
                         cx.notify();
                     }),
@@ -572,16 +645,63 @@ impl Workbench {
         }
         reader = reader.child(heading).child(tabs);
         match self.recording_tab {
-            RecordingTab::Transcript => reader.child(self.transcript_view(detail, cx)),
+            RecordingTab::Transcript => {
+                if waiting > 0 {
+                    reader = reader.child(self.naming_banner(waiting, cx));
+                }
+                reader.child(self.transcript_view(detail, cx))
+            }
+            RecordingTab::Voices => reader.child(
+                div()
+                    .id("voice-reader")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .child(self.voices_view(cx)),
+            ),
             RecordingTab::Audio => reader.child(self.audio_view(detail, cx)),
             RecordingTab::Processing => reader.child(self.processing_view(detail, cx)),
         }
     }
+    /// The next step for a recording whose voices have no names yet, shown above its transcript.
+    fn naming_banner(&self, waiting: usize, cx: &mut Context<Self>) -> Div {
+        div()
+            .flex_shrink_0()
+            .self_start()
+            .max_w(px(640.))
+            .mx_5()
+            .mt_3()
+            .px_4()
+            .py_3()
+            .rounded_lg()
+            .bg(rgba((WARNING << 8) | 0x1f))
+            .border_1()
+            .border_color(rgba((WARNING << 8) | 0x55))
+            .flex()
+            .items_center()
+            .gap_3()
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .child(div().font_weight(FontWeight::SEMIBOLD).child(format!(
+                        "{waiting} {} in this recording {} no name yet",
+                        if waiting == 1 { "voice" } else { "voices" },
+                        if waiting == 1 { "has" } else { "have" }
+                    )))
+                    .child(caption(
+                        "Name them once and every line they speak shows who said it.",
+                    )),
+            )
+            .child(
+                primary("name-voices", "Name voices")
+                    .on_click(cx.listener(|this, _, _, cx| this.open_voices(cx))),
+            )
+    }
     fn transcript_view(&self, detail: &reader::Document, cx: &mut Context<Self>) -> Div {
         let segments = &self.reader_matches;
-        let page = self.segment_page.min(segments.len().saturating_sub(1) / 40);
-        let begin = page * 40;
-        let end = (begin + 40).min(segments.len());
         let toolbar = div()
             .flex_shrink_0()
             .px_5()
@@ -594,9 +714,7 @@ impl Workbench {
                     "No matching speech".into()
                 } else {
                     format!(
-                        "{}–{} of {} {} · All sources",
-                        begin + 1,
-                        end,
+                        "{} {} · All sources",
                         segments.len(),
                         if segments.len() == 1 {
                             "segment"
@@ -637,27 +755,7 @@ impl Workbench {
                         cx.notify();
                     })),
                 )
-            })
-            .child(
-                quiet("previous-segments", "Previous")
-                    .disabled(page == 0)
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.segment_page = this.segment_page.saturating_sub(1);
-                        this.reset_reader_rows(true);
-                        this.editing_segment = None;
-                        cx.notify();
-                    })),
-            )
-            .child(
-                quiet("next-segments", "Next")
-                    .disabled(end >= segments.len())
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.segment_page += 1;
-                        this.reset_reader_rows(true);
-                        this.editing_segment = None;
-                        cx.notify();
-                    })),
-            );
+            });
         let mut toolbar = div().flex_shrink_0().flex().flex_col().child(toolbar);
         if self.show_transcript_find {
             toolbar = toolbar.child(
@@ -679,7 +777,7 @@ impl Workbench {
                 else {
                     return div().into_any_element();
                 };
-                let Some(index) = indices.get(begin + i) else {
+                let Some(index) = indices.get(i) else {
                     return div().into_any_element();
                 };
                 let Some(segment) = detail.segments.get(*index) else {
@@ -703,6 +801,17 @@ impl Workbench {
             .min_h_0()
             .flex()
             .flex_col();
+        if detail
+            .source_attributions
+            .iter()
+            .any(|a| a.reasons.iter().any(|r| r == "not_checked_for_echo"))
+        {
+            rows = rows.child(
+                caption("Microphone lines aren't marked Me until the microphone has been checked for meeting audio leaking into it. That check runs with speaker detection (Name voices).")
+                    .px_5()
+                    .pt_2(),
+            );
+        }
         if self.show_word_evidence {
             rows = rows.child(caption("Original estimated word timing is separate from your corrections. Unknown words remain unattributed.").px_5().py_3());
         }
@@ -733,12 +842,14 @@ impl Workbench {
                         "Try another search. Your saved transcript is unchanged."
                     }))
                     .when(detail.segments.is_empty(), |row| {
-                        row.child(button("open-audio-tab", "Audio & sources").on_click(
-                            cx.listener(|this, _, _, cx| {
-                                this.recording_tab = RecordingTab::Audio;
-                                cx.notify();
-                            }),
-                        ))
+                        row.child(
+                            button("open-audio-tab", "Audio & sources")
+                                .self_center()
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.recording_tab = RecordingTab::Audio;
+                                    cx.notify();
+                                })),
+                        )
                     }),
             );
         }
@@ -786,15 +897,46 @@ impl Workbench {
                             .unwrap_or("unknown"),
                     ),
                 ),
-                _ => ("Unknown speaker".into(), false, WARNING),
+                _ => match (
+                    imported_claim(segment),
+                    suggested_name(self, detail, segment),
+                ) {
+                    (Some(claim), _) => (claim.to_owned(), false, MUTED),
+                    (None, Some(name)) => (name, false, WARNING),
+                    (None, None) => ("Unknown speaker".into(), false, WARNING),
+                },
             },
         };
+        let imported = correction.speaker.is_none() && imported_claim(segment).is_some();
+        let source_label = detail.row_attributions[index]
+            .and_then(|i| detail.source_attributions.get(i))
+            .map(|a| match a.category.as_str() {
+                "me" => ("Me · microphone".to_owned(), MUTED),
+                "them" => ("Them · system audio".to_owned(), MUTED),
+                // Explained once above the transcript rather than on every line.
+                _ if a.reasons == ["not_checked_for_echo"] => ("Microphone".to_owned(), MUTED),
+                _ => (
+                    format!(
+                        "Unknown source · {}",
+                        a.reasons.join(", ").replace('_', " ")
+                    ),
+                    WARNING,
+                ),
+            });
+        let suggested = correction.speaker.is_none()
+            && !imported
+            && suggested_name(self, detail, segment).is_some();
         let source = segment
             .track_id
             .as_ref()
             .and_then(|id| detail.tracks.iter().find(|t| &t.id == id))
             .map(|t| track_name(&t.kind))
             .unwrap_or("Unresolved source");
+        let source_shown = source_label.is_none();
+        let can_name = !confirmed
+            && correction.speaker.is_none()
+            && attribution.is_some_and(|a| a.state == "anonymous_model_attribution")
+            && self.has_waiting_voices();
         let segment_id = segment.id.clone();
         let play_id = segment.id.clone();
         let recording = detail.recording.id.clone();
@@ -824,7 +966,31 @@ impl Workbench {
                             .child(label.clone()),
                     )
                     .when(confirmed, |row| row.child(pill("Confirmed", SUCCESS)))
-                    .child(caption(source))
+                    .when(can_name, |row| {
+                        row.child(
+                            quiet(format!("name-voice-{}", segment.id), "Name…")
+                                .text_size(px(11.))
+                                .px_2()
+                                .py_0p5()
+                                .min_h(px(22.))
+                                .text_color(rgb(ACCENT))
+                                .on_click(cx.listener(|this, _, _, cx| this.open_voices(cx))),
+                        )
+                    })
+                    .when(imported, |row| {
+                        row.child(pill("Imported · unverified", MUTED))
+                    })
+                    .when(
+                        !editing && self.drafts.contains_key(segment.id.as_str()),
+                        |row| row.child(pill("Unsaved edit · open Edit to finish", WARNING)),
+                    )
+                    .when(suggested, |row| {
+                        row.child(pill("Suggested · not confirmed", WARNING))
+                    })
+                    .when_some(source_label, |row, (text, color)| {
+                        row.child(pill(text, color))
+                    })
+                    .when(source_shown, |row| row.child(caption(source)))
                     .child(
                         quiet(
                             format!("play-speech-{}", segment.id),
@@ -856,7 +1022,11 @@ impl Workbench {
                     .child(
                         quiet(
                             format!("edit-segment-{}", segment.id),
-                            if editing { "Close" } else { "Edit" },
+                            if editing {
+                                "Close"
+                            } else {
+                                "Edit text or speaker"
+                            },
                         )
                         .text_size(px(11.))
                         .px_2()
@@ -865,12 +1035,18 @@ impl Workbench {
                         .on_click(cx.listener(
                             move |this, _, window, cx| {
                                 if this.editing_segment.as_deref() == Some(segment_id.as_str()) {
-                                    this.editing_segment = None;
+                                    this.close_editor(cx);
                                 } else {
+                                    this.close_editor(cx);
                                     this.editing_segment = Some(segment_id.clone());
-                                    this.edit_text.update(cx, |input, cx| {
-                                        input.set_value(edit_text.clone(), window, cx)
-                                    });
+                                    // An unsaved draft of this line comes back where it was left.
+                                    let text = this
+                                        .drafts
+                                        .get(segment_id.as_str())
+                                        .cloned()
+                                        .unwrap_or_else(|| edit_text.clone());
+                                    this.edit_text
+                                        .update(cx, |input, cx| input.set_value(text, window, cx));
                                     this.edit_text.focus_handle(cx).focus(window, cx);
                                 }
                                 this.reset_reader_rows(false);
@@ -904,11 +1080,6 @@ impl Workbench {
             }
             if segment.evidence["uncertain_speech"] == true {
                 evidence = evidence.child(pill("Uncertain speech", WARNING));
-            }
-            if a.state == "ambiguous" && correction.speaker.is_none() {
-                evidence = evidence.child(caption(
-                    "Multiple voices or a turn boundary · identity unresolved",
-                ));
             }
             body = body.child(evidence);
         }
@@ -983,17 +1154,28 @@ impl Workbench {
             .flex_wrap()
             .gap_2()
             .child(caption("Speaker").py_1());
+        // The line's current speaker is shown selected.
+        let current = correction.speaker.as_ref();
         let unknown_id = id.clone();
-        people = people.child(button(format!("unknown-{}", id), "Unknown").on_click(
-            cx.listener(move |this, _, _, cx| this.assign_segment(unknown_id.clone(), None, cx)),
-        ));
+        people =
+            people.child(
+                choice(
+                    format!("unknown-{}", id),
+                    "Unknown",
+                    matches!(current, Some(SpeakerOverride::Unknown)),
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.assign_segment(unknown_id.clone(), None, cx)
+                })),
+            );
         for profile in &self.profiles {
             let profile_id = profile.id.clone();
             let segment_id = id.clone();
             people = people.child(
-                button(
+                choice(
                     format!("assign-{}-{}", id, profile.id),
                     profile.name.clone(),
+                    matches!(current, Some(SpeakerOverride::Profile(p)) if *p == profile.id),
                 )
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.assign_segment(segment_id.clone(), Some(profile_id.clone()), cx)
@@ -1012,7 +1194,7 @@ impl Workbench {
             .gap_3()
             .child(people)
             .child(caption(
-                "Assign only after listening. A correction does not enroll a voice example.",
+                "Assign only after listening. When the speech is clean, your confirmation also saves a removable voice example; undoing the correction removes it.",
             ))
             .child(
                 div()
@@ -1054,7 +1236,7 @@ impl Workbench {
         let id = detail.recording.id.clone();
         view = view.child(
             primary("finalize-meeting", "Finish transcription of all sources")
-                .disabled(self.pending > 0)
+                .disabled(self.busy())
                 .on_click(cx.listener(move |this, _, _, cx| this.finalize_meeting(id.clone(), cx))),
         );
         for run in self
@@ -1091,6 +1273,10 @@ impl Workbench {
                             .flex_col()
                             .gap_1()
                             .child(track_name(&track.kind))
+                            .when(track.provenance["silent_source"] == true, |column| {
+                                column
+                                    .child(pill("Silent source — no speech-level signal", WARNING))
+                            })
                             .child(caption(format!(
                                 "{} · {} · {}",
                                 time_label(track.duration_ms),
@@ -1128,45 +1314,48 @@ impl Workbench {
         {
             view=view.child(div().mt_2().flex().flex_col().gap_2().child(caption(format!("Selected source: {}",track_name(&track.kind))))
                 .child(div().flex().flex_wrap().gap_2()
-                    .child(primary("transcribe-source","Transcribe source").disabled(!track.available||self.pending>0).on_click(cx.listener(|this,_,_,cx|this.process(false,false,cx))))
-                    .child(button("diarize-source","Detect speakers").disabled(!track.available||self.pending>0).on_click(cx.listener(|this,_,_,cx|this.process(true,false,cx))))
-                    .child(quiet("review-source-clusters","Review clusters").on_click(cx.listener(|this,_,_,cx|{this.speaker_mode=SpeakerMode::Clusters;this.navigate(Area::Speakers,cx);this.inspect_clusters(cx);}))))
-                .child(caption("Processing creates a new result. Existing audio, title, and corrections are retained.")));
+                    .child(primary("transcribe-source","Transcribe source").disabled(!track.available||self.busy()).on_click(cx.listener(|this,_,_,cx|this.process(false,false,cx))))
+                    .child(button("diarize-source","Speakers in this source only").disabled(!track.available||self.busy()).on_click(cx.listener(|this,_,_,cx|this.process(true,false,cx))))
+                    .child(button("identify-voices","Name voices").on_click(cx.listener(|this,_,_,cx|this.open_voices(cx))))
+                    .child(button("review-source-clusters","Review voice groups").on_click(cx.listener(|this,_,_,cx|{this.speaker_mode=SpeakerMode::Clusters;this.navigate(Area::Speakers,cx);this.inspect_clusters(cx);}))))
+                .child(caption("Processing creates a new result. Existing audio, title, and corrections are retained. To find and name everyone, including the check for meeting audio leaking into your microphone, use Name voices.")));
+            if self.show_status_details {
+                view = view.child(
+                    div()
+                        .mt_3()
+                        .p_4()
+                        .rounded_lg()
+                        .bg(rgb(PANEL))
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .child(
+                            div()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child("Listen to an interval"),
+                        )
+                        .child(caption(
+                            "Track-local milliseconds · choose up to 30 seconds",
+                        ))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_wrap()
+                                .items_center()
+                                .gap_2()
+                                .child(caption("Start"))
+                                .child(field(&self.start).w(px(110.)))
+                                .child(caption("End"))
+                                .child(field(&self.end).w(px(110.)))
+                                .child(
+                                    button("play-interval", "Play clip")
+                                        .on_click(cx.listener(|this, _, _, cx| this.play(cx))),
+                                ),
+                        ),
+                );
+            }
             view = view.child(
-                div()
-                    .mt_3()
-                    .p_4()
-                    .rounded_lg()
-                    .bg(rgb(PANEL))
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .child(
-                        div()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child("Listen to an interval"),
-                    )
-                    .child(caption(
-                        "Track-local milliseconds · choose up to 30 seconds",
-                    ))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_wrap()
-                            .items_center()
-                            .gap_2()
-                            .child(caption("Start"))
-                            .child(field(&self.start).w(px(110.)))
-                            .child(caption("End"))
-                            .child(field(&self.end).w(px(110.)))
-                            .child(
-                                button("play-interval", "Play clip")
-                                    .on_click(cx.listener(|this, _, _, cx| this.play(cx))),
-                            ),
-                    ),
-            );
-            view = view.child(
-                quiet(
+                button(
                     "audio-locations",
                     if self.show_location_tools {
                         "Hide file details"
@@ -1189,10 +1378,12 @@ impl Workbench {
                     .child(div().flex().flex_wrap().gap_2().child(button("check-replacement","Check replacement").on_click(cx.listener(|this,_,_,cx|this.relink_audio(true,cx))))
                         .child(button("relink-audio","Relink audio").on_click(cx.listener(|this,_,_,cx|this.relink_audio(false,cx))))));
             }
-            view=view.child(div().mt_3().p_4().rounded_lg().border_1().border_color(rgb(BORDER)).flex().flex_col().gap_2()
+            if self.show_status_details {
+                view=view.child(div().mt_3().p_4().rounded_lg().border_1().border_color(rgb(BORDER)).flex().flex_col().gap_2()
                 .child(div().font_weight(FontWeight::SEMIBOLD).child("Experimental word timing"))
                 .child(caption("Whisper can retain estimated word times for speaker review. These estimates are not verified alignments."))
-                .child(button("transcribe-estimated-words","Transcribe with word estimates").disabled(!track.available||self.pending>0).on_click(cx.listener(|this,_,_,cx|this.process(false,true,cx)))));
+                .child(button("transcribe-estimated-words","Transcribe with word estimates").disabled(!track.available||self.busy()).on_click(cx.listener(|this,_,_,cx|this.process(false,true,cx)))));
+            }
         }
         div()
             .id("recording-audio")
@@ -1239,7 +1430,7 @@ impl Workbench {
             view = view.child(
                 button("resume-finalization", "Resume final transcription")
                     .disabled(
-                        self.pending > 0
+                        self.busy()
                             || (plan["status"] == "completed"
                                 && (plan["speaker_analysis"].is_null()
                                     || detail
@@ -1280,12 +1471,7 @@ impl Workbench {
                 _ => WARNING,
             };
             view = view.child(
-                div()
-                    .p_4()
-                    .rounded_lg()
-                    .bg(rgb(PANEL))
-                    .flex()
-                    .flex_col()
+                panel()
                     .gap_2()
                     .child(
                         div()
@@ -1296,21 +1482,38 @@ impl Workbench {
                                 div()
                                     .flex_1()
                                     .font_weight(FontWeight::SEMIBOLD)
-                                    .child(run.model.clone()),
+                                    .child(ui::model_name(&run.model).to_owned()),
                             )
-                            .child(pill(run.status.clone(), color)),
+                            .child(pill(
+                                match run.status.as_str() {
+                                    "completed" => "Completed",
+                                    "failed" => "Failed",
+                                    "interrupted" => "Interrupted",
+                                    "running" => "Running",
+                                    "pending" => "Waiting",
+                                    "superseded" => "Replaced",
+                                    other => other,
+                                },
+                                color,
+                            )),
                     )
                     .child(caption(format!(
                         "{} · {}{}",
                         date_label(&run.started_at),
-                        run.kind,
+                        match run.kind.as_str() {
+                            "diarization" => "Speaker detection",
+                            "transcription" | "asr" => "Transcription",
+                            other => other,
+                        },
                         if run.configuration["human_edit"].is_object() {
                             " · Manual cluster edit"
                         } else {
                             ""
                         }
                     )))
-                    .child(caption(format!("Run {}", run.id)))
+                    .when(self.show_status_details, |card| {
+                        card.child(caption(format!("Run {}", run.id)))
+                    })
                     .when(run.result["metrics"]["resume"]["status"] == "reused", |row| {
                         let resume=&run.result["metrics"]["resume"];
                         row.child(caption(format!("Reused {} saved chunks · {} audio · {} new inference chunks",resume["reused_chunks"].as_u64().unwrap_or(0),time_label(resume["reused_audio_ms"].as_i64()),run.result["metrics"]["inference_chunks"].as_u64().unwrap_or(0))))
@@ -1335,12 +1538,12 @@ impl Workbench {
                         |row| {
                             row.child(
                                 button(format!("retry-{}", run.id), "Retry from retained audio")
-                                    .disabled(self.pending > 0)
+                                    .disabled(self.busy())
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         let service = this.processing.clone();
                                         let library = this.library.clone();
                                         let id = id.clone();
-                                        this.task(
+                                        this.heavy_task(
                                             "Retrying retained audio",
                                             async move {
                                                 let run = service.retry(&id).await?;
@@ -1380,4 +1583,43 @@ impl Workbench {
             .overflow_y_scroll()
             .child(view)
     }
+}
+
+/// A speaker label carried over from an imported MacParakeet transcript: a claim, never a verified name.
+fn imported_claim(segment: &TranscriptSegment) -> Option<&str> {
+    (segment.evidence["origin"] == "imported_unverified")
+        .then_some(segment.speaker_claim.as_deref())
+        .flatten()
+}
+
+/// A name the saved comparisons propose for this segment's speech. It is a prediction, shown
+/// apart from confirmed names, and only while no decision on that comparison is active.
+fn suggested_name(
+    view: &Workbench,
+    detail: &reader::Document,
+    segment: &TranscriptSegment,
+) -> Option<String> {
+    let track_id = segment.track_id.as_ref()?;
+    let offset = detail
+        .tracks
+        .iter()
+        .find(|t| &t.id == track_id)?
+        .meeting_offset_ms()?;
+    let (start, end) = (segment.start_ms? - offset, segment.end_ms? - offset);
+    view.suggestions
+        .iter()
+        .filter(|s| {
+            &s.track_id == track_id
+                && s.resolutions.last().is_none_or(|r| r.action == "undo")
+                && std::iter::once((s.start_ms, s.end_ms))
+                    .chain(s.more_ranges.iter().copied())
+                    .any(|(from, to)| start >= from && end <= to)
+        })
+        .find_map(|s| {
+            let id = s.decision.suggested_profile.as_ref()?;
+            view.profiles
+                .iter()
+                .find(|p| &p.id == id)
+                .map(|p| p.name.clone())
+        })
 }
