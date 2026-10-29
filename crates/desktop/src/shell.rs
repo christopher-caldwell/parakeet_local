@@ -134,6 +134,13 @@ impl Workbench {
                     async move { Ok(Update::Devices(capture.devices().await?)) },
                     cx,
                 );
+                // Lets the screen warn before recording that nothing can transcribe it.
+                let models = self.models.clone();
+                self.task(
+                    "Reading local model registry",
+                    async move { Ok(Update::Models(models.list().await?)) },
+                    cx,
+                );
             }
             Area::Speakers => {
                 self.refresh_profiles(cx);

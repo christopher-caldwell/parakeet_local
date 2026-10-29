@@ -305,11 +305,23 @@ impl Workbench {
         }
         if self.show_media_import {
             view=view.child(div().px_5().py_3().border_b_1().border_color(rgb(BORDER)).bg(rgb(PANEL)).flex().flex_col().gap_2()
-                .child(caption("Download the audio and transcribe it with your selected local model."))
+                .child(caption(if self.media_importing {
+                    "Downloading and transcribing… this can take a few minutes. You can keep working; the recording opens here when it's ready."
+                } else {
+                    "Download the audio and transcribe it with your selected local model."
+                }))
                 .child(div().flex().items_center().gap_2().child(div().flex_1().min_w_0().child(field(&self.media_url)))
-                    .child(primary("import-youtube","Download & transcribe").disabled(self.pending>0).on_click(cx.listener(|this,_,_,cx|{
-                        let service=this.media.clone();let library=this.library.clone();let url=this.media_url.read(cx).value().to_string();let generation=this.search_generation;let query=this.search.read(cx).value().to_string();
-                        this.task("Downloading and transcribing media",async move{let result=service.transcribe(TranscribeMediaInput{url,model:"selected-asr".into()}).await?;if let Some(error)=result.transcription_failure{anyhow::bail!("Audio was saved as {}. Transcription failed: {error}",result.recording.id);}Ok(Update::LibrarySearch(generation,library.list(if query.is_empty(){None}else{Some(&query)}).await?))},cx);
+                    .child(primary("import-youtube",if self.media_importing {"Working…"} else {"Download & transcribe"}).disabled(self.media_importing).on_click(cx.listener(|this,_,_,cx|{
+                        let service=this.media.clone();let library=this.library.clone();let url=this.media_url.read(cx).value().to_string();
+                        this.media_importing=true;
+                        this.background_task("Downloading and transcribing media",async move{
+                            let outcome=async{
+                                let result=service.transcribe(TranscribeMediaInput{url,model:"selected-asr".into()}).await?;
+                                let warning=result.transcription_failure.map(|error|format!("Audio saved, but transcription failed: {error}"));
+                                Ok::<_,anyhow::Error>((library.show(&result.recording.id).await.map(reader::Document::new)?,warning))
+                            }.await.map_err(|e|e.to_string());
+                            Ok(Update::MediaImported(outcome))
+                        },cx);
                     })))
                     .child(quiet("close-media-import","Cancel").on_click(cx.listener(|this,_,_,cx|{this.show_media_import=false;cx.notify();})))));
         }
@@ -1303,10 +1315,10 @@ impl Workbench {
             view=view.child(div().mt_2().flex().flex_col().gap_2().child(caption(format!("Selected source: {}",track_name(&track.kind))))
                 .child(div().flex().flex_wrap().gap_2()
                     .child(primary("transcribe-source","Transcribe source").disabled(!track.available||self.pending>0).on_click(cx.listener(|this,_,_,cx|this.process(false,false,cx))))
-                    .child(button("diarize-source","Detect speakers").disabled(!track.available||self.pending>0).on_click(cx.listener(|this,_,_,cx|this.process(true,false,cx))))
+                    .child(button("diarize-source","Speakers in this source only").disabled(!track.available||self.pending>0).on_click(cx.listener(|this,_,_,cx|this.process(true,false,cx))))
                     .child(button("identify-voices","Name voices").on_click(cx.listener(|this,_,_,cx|this.open_voices(cx))))
                     .child(button("review-source-clusters","Review voice groups").on_click(cx.listener(|this,_,_,cx|{this.speaker_mode=SpeakerMode::Clusters;this.navigate(Area::Speakers,cx);this.inspect_clusters(cx);}))))
-                .child(caption("Processing creates a new result. Existing audio, title, and corrections are retained.")));
+                .child(caption("Processing creates a new result. Existing audio, title, and corrections are retained. To find and name everyone, including the check for meeting audio leaking into your microphone, use Name voices.")));
             if self.show_status_details {
                 view = view.child(
                     div()

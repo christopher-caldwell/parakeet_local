@@ -95,6 +95,8 @@ enum Update {
     Captured(Result<reader::Document, String>, Option<String>, bool),
     /// Transcription and speaker work after Stop ended for this recording.
     MeetingFinished(String, Result<reader::Document, String>, Option<String>),
+    /// A downloaded media file and its transcription (with a warning when it failed).
+    MediaImported(Result<(reader::Document, Option<String>), String>),
     MeetingFinalized(Result<reader::Document, String>, Option<String>),
     MeetingPlans(Vec<parakeet_application::meeting::MeetingFinalization>),
 }
@@ -185,6 +187,10 @@ struct Workbench {
     examples: Vec<VoiceExampleSummary>,
     candidates: Vec<EnrollmentCandidate>,
     voices_generation: u64,
+    /// A YouTube download and transcription is running.
+    media_importing: bool,
+    /// When the current meeting capture started, for its elapsed time.
+    capture_started: Option<Instant>,
     /// Unsaved text of transcript lines whose editor was closed, kept until saved or cleared.
     drafts: std::collections::HashMap<String, String>,
     /// Meetings whose transcript and speaker work after Stop is still running.
@@ -440,6 +446,7 @@ impl Workbench {
                                 // The recorder is free as soon as the audio is saved; the
                                 // transcript is finished in the background.
                                 this.capture_stop = None;
+                                this.capture_started = None;
                                 match result {
                                     Ok(d) => {
                                         let id = d.recording.id.clone();
@@ -470,6 +477,35 @@ impl Workbench {
                                         return;
                                     }
                                 }
+                            }
+                            Update::MediaImported(outcome) => {
+                                this.media_importing = false;
+                                match outcome {
+                                    Ok((d, warning)) => {
+                                        let title = d.recording.title().to_owned();
+                                        this.show_media_import = false;
+                                        let url = this.media_url.clone();
+                                        let _ = cx.update_window(this.main_window, move |_, window, cx| {
+                                            url.update(cx, |input, cx| input.set_value("", window, cx));
+                                        });
+                                        if this.area == Area::Library {
+                                            this.show_new_recording(d, cx);
+                                        } else {
+                                            this.reload(cx);
+                                        }
+                                        this.status = format!("“{title}” imported");
+                                        if let Some(warning) = warning {
+                                            this.status = warning.clone();
+                                            this.last_error = Some(warning);
+                                        }
+                                    }
+                                    Err(error) => {
+                                        this.status = format!("Import failed: {error}");
+                                        this.last_error = Some(this.status.clone());
+                                    }
+                                }
+                                cx.notify();
+                                return;
                             }
                             Update::MeetingFinished(id, result, warning) => {
                                 this.finishing_meetings.remove(&id);
@@ -1459,6 +1495,7 @@ impl Workbench {
         let matching_policy = self.audio_preferences.after_stop_policy();
         let stop = Arc::new(AtomicBool::new(false));
         self.capture_stop = Some(stop.clone());
+        self.capture_started = Some(Instant::now());
         let meeting = self.meeting.clone();
         let lib = self.library.clone();
         self.background_task(
@@ -2065,6 +2102,8 @@ fn run() -> anyhow::Result<()> {
                             examples: vec![],
                             candidates: vec![],
                             voices_generation: 0,
+                            media_importing: false,
+                            capture_started: None,
                             drafts: Default::default(),
                             finishing_meetings: Default::default(),
                             voices_key: None,

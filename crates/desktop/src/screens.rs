@@ -121,7 +121,7 @@ impl Workbench {
                 .as_array()
                 .is_some_and(|ds| ds.iter().any(|d| d["uid"].as_str() == selected))
         {
-            return Some("Choose an available microphone in Record a meeting.".into());
+            return Some("Choose an available microphone below.".into());
         }
         if self.permissions_error.is_some() {
             return Some(
@@ -368,6 +368,58 @@ impl Workbench {
         card.child(div().flex_1()).child(actions)
     }
 
+    /// The microphones to choose from, shared by the Record and Dictation screens.
+    fn microphone_picker(&self, cx: &mut Context<Self>) -> Div {
+        let recording = self.capture_stop.is_some();
+        let mut view = div().flex().flex_col().gap_2();
+        let devices = self.devices["devices"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        if devices.is_empty() {
+            view = view.child(caption(if self.pending > 0 {
+                "Checking available audio inputs…"
+            } else {
+                "No microphones found. Connect one and press Refresh. You can still record meeting audio alone."
+            }));
+        }
+        if recording || self.dictation_stop.is_some() {
+            view = view.child(caption(if recording {
+                "Stop the recording to change the microphone."
+            } else {
+                "Turn off dictation to change the microphone."
+            }));
+        }
+        let tiles = devices
+            .iter()
+            .enumerate()
+            .map(|(index, device)| {
+                let uid = device["uid"].as_str().unwrap_or_default().to_owned();
+                let selected = self.audio_preferences.microphone_uid.as_ref() == Some(&uid);
+                tile(
+                    ("device", index),
+                    device["name"]
+                        .as_str()
+                        .unwrap_or("Unknown input")
+                        .to_owned(),
+                    (device["is_default"] == true).then(|| "Mac default".to_owned()),
+                    selected,
+                )
+                .disabled(recording || self.dictation_stop.is_some())
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    let uid = uid.clone();
+                    this.change_preferences(
+                        "Saving explicit microphone",
+                        "Selected microphone saved",
+                        move |p| p.microphone_uid = Some(uid.clone()),
+                        cx,
+                    );
+                }))
+                .into_any_element()
+            })
+            .collect();
+        view.child(grid(self.columns, tiles))
+    }
     pub(super) fn capture_view(&self, cx: &mut Context<Self>) -> Div {
         let health = self.capture.status();
         let recording = self.capture_stop.is_some();
@@ -437,15 +489,18 @@ impl Workbench {
                                 }
                             })),
                     )
-                    .when(self.show_status_details, |row| {
+                    // Without a microphone, meeting audio alone is the way to record.
+                    .when(self.show_status_details || no_mic, |row| {
                         row.child(
-                            quiet("record-system", "Meeting audio only")
+                            quiet("record-system", "Record meeting audio only")
                                 .disabled(recording)
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.start_capture(false, true, cx)
                                 })),
                         )
-                        .child(
+                    })
+                    .when(self.show_status_details, |row| {
+                        row.child(
                             quiet("record-mic", "Microphone only")
                                 .disabled(recording || no_mic)
                                 .on_click(cx.listener(|this, _, _, cx| {
@@ -462,11 +517,44 @@ impl Workbench {
                 }
                 None => "Choose a microphone below to start recording.".into(),
             }));
-        if recording && matches!(state, "completed" | "completed_with_warnings") {
+        if let Some(started) = self.capture_started.filter(|_| recording) {
+            card = card.child(
+                div()
+                    .text_size(px(20.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(library::time_label(Some(
+                        started.elapsed().as_millis() as i64
+                    ))),
+            );
+        }
+        if !self.finishing_meetings.is_empty() {
+            card = card.child(caption(
+                "Transcribing your last meeting in the background. You can record again now.",
+            ));
+        }
+        let transcriber_ready = self
+            .model_list
+            .iter()
+            .any(|m| m.category == "asr" && m.verified && m.detail["selected"] == true);
+        if !recording
+            && !self.model_list.is_empty()
+            && !transcriber_ready
+            && self.audio_preferences.transcribe_meetings_after_stop
+        {
             card = card.child(
                 div()
                     .flex()
-                    .child(pill("Audio saved · finishing transcription", WARNING)),
+                    .flex_wrap()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        caption("No transcription model is ready, so a meeting will be saved as audio only.")
+                            .text_color(rgb(WARNING)),
+                    )
+                    .child(
+                        quiet("capture-models", "Local models")
+                            .on_click(cx.listener(|this, _, _, cx| this.navigate(Area::Models, cx))),
+                    ),
             );
         }
         if let Some(message) = health["message"].as_str() {
@@ -545,46 +633,7 @@ impl Workbench {
             button("refresh-audio-devices", "Refresh")
                 .on_click(cx.listener(|this, _, _, cx| this.navigate(Area::Capture, cx))),
         ));
-        let devices = self.devices["devices"]
-            .as_array()
-            .cloned()
-            .unwrap_or_default();
-        if devices.is_empty() {
-            view = view.child(caption(if self.pending > 0 {
-                "Checking available audio inputs…"
-            } else {
-                "No microphones found. Connect one and press Refresh. You can still record meeting audio alone."
-            }));
-        }
-        let tiles = devices
-            .iter()
-            .enumerate()
-            .map(|(index, device)| {
-                let uid = device["uid"].as_str().unwrap_or_default().to_owned();
-                let selected = self.audio_preferences.microphone_uid.as_ref() == Some(&uid);
-                tile(
-                    ("device", index),
-                    device["name"]
-                        .as_str()
-                        .unwrap_or("Unknown input")
-                        .to_owned(),
-                    (device["is_default"] == true).then(|| "Mac default".to_owned()),
-                    selected,
-                )
-                .disabled(recording || self.dictation_stop.is_some())
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    let uid = uid.clone();
-                    this.change_preferences(
-                        "Saving explicit microphone",
-                        "Selected microphone saved",
-                        move |p| p.microphone_uid = Some(uid.clone()),
-                        cx,
-                    );
-                }))
-                .into_any_element()
-            })
-            .collect();
-        view = view.child(grid(self.columns, tiles));
+        view = view.child(self.microphone_picker(cx));
         view = view.child(group(
             "After you stop",
             "The audio is always saved first. Switched-on steps then run by themselves.",
@@ -734,6 +783,13 @@ impl Workbench {
             )));
         }
         view = view.child(card);
+        view = view.child(group_action(
+            "Microphone",
+            "Dictation uses the same microphone as meetings.",
+            button("refresh-dictation-devices", "Refresh")
+                .on_click(cx.listener(|this, _, _, cx| this.navigate(Area::Dictation, cx))),
+        ));
+        view = view.child(self.microphone_picker(cx));
         if let Some(raw) = live["receipt"]["raw"].as_str().filter(|s| !s.is_empty()) {
             let text = raw.to_owned();
             view = view.child(
