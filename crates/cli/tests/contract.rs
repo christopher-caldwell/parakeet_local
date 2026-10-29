@@ -289,141 +289,22 @@ fn job_inspection_and_control_keep_read_only_and_mutating_commands_distinct() {
 }
 
 #[test]
-fn storage_inspection_is_read_only_and_policy_saves_require_an_explicit_revision() {
+fn storage_inspection_is_read_only() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("absent");
-    for args in [
-        &["storage", "usage"][..],
-        &["storage", "preview"][..],
-        &["storage", "policy"][..],
-    ] {
-        assert_ne!(run(&root, args).0, 0);
-        assert!(!root.exists());
-    }
+    assert_ne!(run(&root, &["storage", "usage"]).0, 0);
+    assert!(!root.exists());
     assert_eq!(run(&root, &["db", "create"]).0, 0);
     assert_eq!(run(&root, &["db", "migrate"]).0, 0);
-    let (code, p) = run(&root, &["storage", "policy"]);
+    let (code, usage) = run(&root, &["storage", "usage"]);
     assert_eq!(code, 0);
-    assert_eq!(p["data"]["revision"], 0);
-    assert!(p["data"]["policy"]["completed_scratch_after_days"].is_null());
-    let (code, p) = run(
-        &root,
-        &["storage", "preview", "--completed-scratch-days", "30"],
-    );
-    assert_eq!(code, 0);
-    assert_eq!(p["data"]["hypothetical"], true);
-    assert_eq!(p["data"]["automatic_cleanup"], false);
-    assert_eq!(p["data"]["execution_available"], false);
+    assert!(usage["data"]["owned_totals"]["files"].as_u64().unwrap() > 0);
     assert!(!root.join("models").exists());
-    assert_eq!(
-        run(
-            &root,
-            &[
-                "storage",
-                "set-policy",
-                "--completed-scratch-days",
-                "30",
-                "--expected-revision",
-                "0"
-            ]
-        )
-        .0,
-        0
-    );
-    assert_eq!(
-        run(
-            &root,
-            &[
-                "storage",
-                "set-policy",
-                "--keep-all",
-                "--expected-revision",
-                "0"
-            ]
-        )
-        .0,
-        5
-    );
-    assert_eq!(
-        run(
-            &root,
-            &[
-                "storage",
-                "set-policy",
-                "--completed-scratch-days",
-                "0",
-                "--expected-revision",
-                "1"
-            ]
-        )
-        .0,
-        2
-    );
-    let p = run(&root, &["storage", "policy"]).1;
-    assert_eq!(p["data"]["revision"], 1);
-    assert_eq!(p["data"]["policy"]["completed_scratch_after_days"], 30);
-    assert_eq!(
-        run(
-            &root,
-            &[
-                "storage",
-                "set-policy",
-                "--keep-all",
-                "--expected-revision",
-                "1"
-            ]
-        )
-        .0,
-        0
-    );
-    assert_eq!(
-        run(&root, &["storage", "preview"]).1["data"]["effective_policy"]["completed_scratch_after_days"],
-        Value::Null
-    );
+    let (code, archive) = run(&root, &["storage", "archive-audio", "--dry-run"]);
+    assert_eq!(code, 0);
+    assert_eq!(archive["data"]["dry_run"], true);
 }
 
-#[test]
-fn benchmark_import_respects_the_same_exclusive_storage_gate_as_library_import() {
-    let tmp = tempfile::tempdir().unwrap();
-    let root = tmp.path().join("app");
-    assert_eq!(run(&root, &["db", "create"]).0, 0);
-    assert_eq!(run(&root, &["db", "migrate"]).0, 0);
-    // Valid minimal PCM WAV, generated locally; no model install or inference.
-    let audio = tmp.path().join("synthetic.wav");
-    let mut wave = Vec::new();
-    wave.extend_from_slice(b"RIFF");
-    wave.extend_from_slice(&32036u32.to_le_bytes());
-    wave.extend_from_slice(b"WAVEfmt ");
-    wave.extend_from_slice(&16u32.to_le_bytes());
-    wave.extend_from_slice(&1u16.to_le_bytes());
-    wave.extend_from_slice(&1u16.to_le_bytes());
-    wave.extend_from_slice(&16000u32.to_le_bytes());
-    wave.extend_from_slice(&32000u32.to_le_bytes());
-    wave.extend_from_slice(&2u16.to_le_bytes());
-    wave.extend_from_slice(&16u16.to_le_bytes());
-    wave.extend_from_slice(b"data");
-    wave.extend_from_slice(&32000u32.to_le_bytes());
-    wave.extend_from_slice(&[0; 32000]);
-    std::fs::write(&audio, wave).unwrap();
-    let suite = tmp.path().join("suite.json");
-    std::fs::write(&suite,json!({"id":"gate-regression","dataset":"synthetic","split":"test","labels":"synthetic","entries":[{"id":"silence","audio":audio}],"models":["whisper-base.en"],"collar_ms":0,"score_overlap":true}).to_string()).unwrap();
-    let runtime = tokio::runtime::Runtime::new().unwrap();
-    let gate =
-        parakeet_infrastructure::storage_gate::StorageGate::for_database(&root.join("parakeet.db"))
-            .unwrap();
-    let guard = runtime.block_on(gate.acquire(true)).unwrap();
-    assert_ne!(
-        run(&root, &["benchmark", "run", suite.to_str().unwrap()]).0,
-        0
-    );
-    assert!(
-        run(&root, &["meetings", "list"]).1["data"]
-            .as_array()
-            .unwrap()
-            .is_empty()
-    );
-    drop(guard);
-}
 #[test]
 fn analysis_is_explicit_and_all_matching_thresholds_are_required() {
     let tmp = tempfile::tempdir().unwrap();

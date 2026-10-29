@@ -43,7 +43,7 @@ impl Workbench {
     pub(super) fn navigate(&mut self, area: Area, cx: &mut Context<Self>) {
         self.area = area;
         match area {
-            Area::Storage => self.preview_storage(None, cx),
+            Area::Storage => self.measure_storage(cx),
             Area::Jobs => {
                 let service = self.recovery.clone();
                 self.task(

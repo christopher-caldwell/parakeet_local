@@ -101,25 +101,6 @@ enum Storage {
     },
     /// Read-only file accounting, including referenced audio outside this root.
     Usage,
-    /// Read the saved preview policy; defaults to keep all.
-    Policy,
-    /// Preview candidates without changing policy or removing files.
-    Preview {
-        #[arg(long, conflicts_with = "keep_all")]
-        completed_scratch_days: Option<u16>,
-        #[arg(long)]
-        keep_all: bool,
-    },
-    /// Save a preview policy only. It never removes files.
-    #[command(group(clap::ArgGroup::new("choice").required(true).args(["completed_scratch_days","keep_all"])))]
-    SetPolicy {
-        #[arg(long, conflicts_with = "keep_all")]
-        completed_scratch_days: Option<u16>,
-        #[arg(long)]
-        keep_all: bool,
-        #[arg(long)]
-        expected_revision: u64,
-    },
 }
 #[derive(Subcommand)]
 enum Jobs {
@@ -607,7 +588,7 @@ fn writes(command: &Command) -> bool {
     matches!(
         command,
         Command::Storage {
-            command: Storage::SetPolicy { .. } | Storage::ArchiveAudio { dry_run: false }
+            command: Storage::ArchiveAudio { dry_run: false }
         } | Command::Jobs {
             command: Jobs::Recover | Jobs::Retry { .. } | Jobs::Cancel { .. }
         } | Command::Meetings {
@@ -870,20 +851,21 @@ async fn execute(cli: Cli) -> anyhow::Result<Value> {
         )
     })?;
     let store = Arc::new(SqliteStore::new(pool.clone()));
-    let guarded_audio = Arc::new(parakeet_infrastructure::storage_gate::GuardedAudioWrites {
-        gate: parakeet_infrastructure::storage_gate::StorageGate::for_database(&database)?,
-        library: store.clone(),
-        locations: store.clone(),
-    });
+    let validated_audio = Arc::new(
+        parakeet_infrastructure::audio_writes::ValidatedAudioWrites {
+            library: store.clone(),
+            locations: store.clone(),
+        },
+    );
     let archive = parakeet_application::audio_archive::AudioArchiveService::new(
         store.clone(),
         store.clone(),
         store.clone(),
-        guarded_audio.clone(),
+        validated_audio.clone(),
         Arc::new(parakeet_infrastructure::audio::LocalAudioIdentity),
         Arc::new(parakeet_infrastructure::archive::FfmpegArchiver),
     );
-    let library = LibraryService::new(store.clone(), guarded_audio.clone(), source.clone());
+    let library = LibraryService::new(store.clone(), validated_audio.clone(), source.clone());
     let engine = Arc::new(LocalSpeech::new(models.clone(), model_runtime_executable()));
     let ownership =
         Arc::new(parakeet_infrastructure::jobs::FileProcessingOwnership::for_database(&database)?);
@@ -915,7 +897,7 @@ async fn execute(cli: Cli) -> anyhow::Result<Value> {
     ));
     let locations = parakeet_application::audio_locations::AudioLocationService::new(
         store.clone(),
-        guarded_audio.clone(),
+        validated_audio.clone(),
         Arc::new(parakeet_infrastructure::audio::LocalAudioIdentity),
     );
     let analysis = Arc::new(
@@ -935,7 +917,7 @@ async fn execute(cli: Cli) -> anyhow::Result<Value> {
     let meeting = parakeet_application::meeting::MeetingService::new(
         Arc::new(parakeet_application::capture::CaptureService::new(
             native.clone(),
-            guarded_audio.clone(),
+            validated_audio.clone(),
         )),
         store.clone(),
         store.clone(),
@@ -945,7 +927,6 @@ async fn execute(cli: Cli) -> anyhow::Result<Value> {
     )
     .with_analysis(analysis.clone());
     let storage = parakeet_application::storage::StorageService::new(
-        store.clone(),
         store.clone(),
         Arc::new(parakeet_infrastructure::storage::LocalStorageInspection {
             root: root.clone(),
@@ -961,35 +942,6 @@ async fn execute(cli: Cli) -> anyhow::Result<Value> {
                 value(archive.archive_due(now, dry_run).await?)
             }
             Storage::Usage => value(storage.usage().await?),
-            Storage::Policy => value(storage.policy().await?),
-            Storage::Preview {
-                completed_scratch_days,
-                keep_all,
-            } => value(
-                storage
-                    .preview(if keep_all || completed_scratch_days.is_some() {
-                        Some(parakeet_domain::storage::RetentionPolicy {
-                            completed_scratch_after_days: completed_scratch_days,
-                        })
-                    } else {
-                        None
-                    })
-                    .await?,
-            ),
-            Storage::SetPolicy {
-                completed_scratch_days,
-                keep_all: _,
-                expected_revision,
-            } => value(
-                storage
-                    .save_policy(parakeet_application::storage::SaveRetentionPolicyInput {
-                        policy: parakeet_domain::storage::RetentionPolicy {
-                            completed_scratch_after_days: completed_scratch_days,
-                        },
-                        expected_revision,
-                    })
-                    .await?,
-            ),
         },
         Command::Jobs { command } => match command {
             Jobs::Show { id } => value(
@@ -1175,7 +1127,7 @@ async fn execute(cli: Cli) -> anyhow::Result<Value> {
         } => {
             let capture = Arc::new(parakeet_application::capture::CaptureService::new(
                 native.clone(),
-                guarded_audio.clone(),
+                validated_audio.clone(),
             ));
             let dictation = Arc::new(parakeet_application::dictation::DictationService::new(
                 capture,
@@ -1247,7 +1199,7 @@ async fn execute(cli: Cli) -> anyhow::Result<Value> {
         Command::Capture {
             command: Capture::Recover { directory },
         } => value(
-            parakeet_application::capture::CaptureService::new(native, guarded_audio.clone())
+            parakeet_application::capture::CaptureService::new(native, validated_audio.clone())
                 .recover(&directory)
                 .await?,
         ),
@@ -1611,7 +1563,7 @@ async fn execute(cli: Cli) -> anyhow::Result<Value> {
         Command::Media {
             command: Media::Import { url },
         } => value(
-            MediaService::new(media, guarded_audio.clone(), store)
+            MediaService::new(media, validated_audio.clone(), store)
                 .import(&url)
                 .await?,
         ),
@@ -1621,7 +1573,7 @@ async fn execute(cli: Cli) -> anyhow::Result<Value> {
             let receipt = MediaTranscriptionService::new(
                 Arc::new(MediaService::new(
                     media,
-                    guarded_audio.clone(),
+                    validated_audio.clone(),
                     store.clone(),
                 )),
                 processing.clone(),
@@ -1640,7 +1592,7 @@ async fn execute(cli: Cli) -> anyhow::Result<Value> {
                 root: root.join("evaluations"),
             }),
             source,
-            guarded_audio,
+            validated_audio,
             processing,
         )
         .run(&suite)
@@ -1675,9 +1627,6 @@ fn kind(error: &anyhow::Error) -> &'static str {
         classify!(
             parakeet_application::audio_archive::ArchiveAudioError,
             parakeet_application::storage::InspectStorageError,
-            parakeet_application::storage::ReadRetentionPolicyError,
-            parakeet_application::storage::SaveRetentionPolicyError,
-            parakeet_application::storage::PreviewRetentionError,
             ImportRecordingsError,
             parakeet_application::analysis::AnalyzeMeetingError,
             parakeet_application::analysis::ShowMeetingAnalysisError,

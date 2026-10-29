@@ -38,6 +38,9 @@ fn step(number: usize, title: &str, body: impl IntoElement) -> Div {
         )
 }
 
+/// Clips of the current voice the user has played: candidate id, next sample, ranges heard.
+pub(super) type HeardClips = (String, usize, Vec<(i64, i64)>);
+
 impl Workbench {
     /// Voices found in the open recording that nobody has named or skipped yet.
     pub(super) fn waiting_voices(&self) -> Vec<EnrollmentCandidate> {

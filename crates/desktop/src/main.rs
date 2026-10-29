@@ -82,8 +82,7 @@ enum Update {
     Dictations(Vec<DictationReceipt>),
     Message(String),
     Jobs(Vec<ProcessingRun>),
-    StoragePreview(Result<Arc<parakeet_application::storage::RetentionPreview>, String>),
-    StoragePolicySaved(Result<parakeet_application::storage::RetentionPolicySnapshot, String>),
+    StorageUsage(Result<Arc<parakeet_application::storage::StorageUsage>, String>),
     Recovered(
         parakeet_application::jobs::ProcessingRecoveryReport,
         Vec<ProcessingRun>,
@@ -116,9 +115,7 @@ struct Workbench {
     pending_jobs: Vec<ProcessingRun>,
     storage: Arc<parakeet_application::storage::StorageService>,
     archive: Arc<parakeet_application::audio_archive::AudioArchiveService>,
-    storage_preview: Option<Arc<parakeet_application::storage::RetentionPreview>>,
-    storage_policy: Option<parakeet_application::storage::RetentionPolicySnapshot>,
-    storage_days: Entity<InputState>,
+    storage_usage: Option<Arc<parakeet_application::storage::StorageUsage>>,
     storage_busy: bool,
     storage_show_warnings: bool,
     job_control: Arc<parakeet_application::processing_control::ProcessingControlService>,
@@ -191,8 +188,7 @@ struct Workbench {
     calibration: Option<parakeet_domain::calibration::CalibrationReport>,
     train_person: Option<String>,
     train_hint: Option<String>,
-    /// Clips of the current voice the user has played: candidate id, next sample, ranges heard.
-    train_heard: Option<(String, usize, Vec<(i64, i64)>)>,
+    train_heard: Option<train::HeardClips>,
     train_done: Vec<ClusterIdentification>,
     recording_shortcut: bool,
     model_list: Vec<ModelInfo>,
@@ -390,8 +386,7 @@ impl Workbench {
                                     Err(error) => this.dictation_feedback(format!("Could not check dictation readiness: {error}")),
                                 }
                             }
-                            Update::StoragePreview(result) => {this.storage_busy=false;match result {Ok(preview)=>{this.storage_policy=Some(preview.saved_policy.clone());this.storage_preview=Some(preview);},Err(error)=>{this.last_error=Some(error);this.status="Storage inspection failed; no files changed".into();cx.notify();return;}}},
-                            Update::StoragePolicySaved(result) => {this.storage_busy=false;match result {Ok(policy)=>{this.storage_policy=Some(policy);this.storage_preview=None;this.status="Preview policy saved. No files were removed; refresh to inspect it.".into();},Err(error)=>{this.last_error=Some(error);this.status="Preview policy could not be saved; refresh before retrying".into();}}cx.notify();return;},
+                            Update::StorageUsage(result) => {this.storage_busy=false;match result {Ok(usage)=>this.storage_usage=Some(usage),Err(error)=>{this.last_error=Some(error);this.status="Storage inspection failed; no files changed".into();cx.notify();return;}}},
                             Update::Jobs(jobs) => {this.pending_jobs = jobs;this.load_meeting_plans(cx);},
                             Update::MeetingPlans(plans) => this.meeting_plans = plans,
                             Update::MeetingFinalized(result, warning) => {
@@ -1654,7 +1649,6 @@ fn run() -> anyhow::Result<()> {
     let store = Arc::new(SqliteStore::new(pool));
     let storage = Arc::new(parakeet_application::storage::StorageService::new(
         store.clone(),
-        store.clone(),
         Arc::new(parakeet_infrastructure::storage::LocalStorageInspection {
             root: root.clone(),
             database: root.join("parakeet.db"),
@@ -1663,32 +1657,31 @@ fn run() -> anyhow::Result<()> {
     let source = Arc::new(MacParakeetArtifacts);
     let models = Arc::new(ModelFiles::new(root.join("models")));
     let engine = Arc::new(LocalSpeech::new(models.clone(), model_runtime_executable()));
-    let guarded_audio = Arc::new(parakeet_infrastructure::storage_gate::GuardedAudioWrites {
-        gate: parakeet_infrastructure::storage_gate::StorageGate::for_database(
-            &root.join("parakeet.db"),
-        )?,
-        library: store.clone(),
-        locations: store.clone(),
-    });
+    let validated_audio = Arc::new(
+        parakeet_infrastructure::audio_writes::ValidatedAudioWrites {
+            library: store.clone(),
+            locations: store.clone(),
+        },
+    );
     let archive = Arc::new(
         parakeet_application::audio_archive::AudioArchiveService::new(
             store.clone(),
             store.clone(),
             store.clone(),
-            guarded_audio.clone(),
+            validated_audio.clone(),
             Arc::new(parakeet_infrastructure::audio::LocalAudioIdentity),
             Arc::new(parakeet_infrastructure::archive::FfmpegArchiver),
         ),
     );
     let library = Arc::new(LibraryService::new(
         store.clone(),
-        guarded_audio.clone(),
+        validated_audio.clone(),
         source,
     ));
     let locations = Arc::new(
         parakeet_application::audio_locations::AudioLocationService::new(
             store.clone(),
-            guarded_audio.clone(),
+            validated_audio.clone(),
             Arc::new(parakeet_infrastructure::audio::LocalAudioIdentity),
         ),
     );
@@ -1771,7 +1764,7 @@ fn run() -> anyhow::Result<()> {
         Err(e) => format!("Clipboard recovery needs attention: {e}"),
     };
     let audio_inspection = Arc::new(AudioInspectionService::new(native.clone()));
-    let capture = Arc::new(CaptureService::new(native.clone(), guarded_audio.clone()));
+    let capture = Arc::new(CaptureService::new(native.clone(), validated_audio.clone()));
     let analysis = Arc::new(
         parakeet_application::analysis::MeetingAnalysisService::new(
             store.clone(),
@@ -1830,7 +1823,7 @@ fn run() -> anyhow::Result<()> {
                     }),
                 root: root.join("media"),
             }),
-            guarded_audio.clone(),
+            validated_audio.clone(),
             store.clone(),
         )),
         processing.clone(),
@@ -1885,7 +1878,6 @@ fn run() -> anyhow::Result<()> {
                             state
                         });
                         let reader_editor_focus = edit_text.focus_handle(cx);
-                        let storage_days = input(window, cx, "30", "Days, 1–3650");
                         let shortcut_key = input(window, cx, "", "Home, F6, etc.");
                         let import_path =
                             input(window, cx, "", "Local audio file or meeting folder");
@@ -1926,9 +1918,7 @@ fn run() -> anyhow::Result<()> {
                             pending_jobs: vec![],
                             storage,
                             archive,
-                            storage_preview: None,
-                            storage_policy: None,
-                            storage_days,
+                            storage_usage: None,
                             storage_busy: false,
                             storage_show_warnings: false,
                             job_control,

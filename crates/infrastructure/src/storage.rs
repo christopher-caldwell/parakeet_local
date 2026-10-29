@@ -182,7 +182,7 @@ impl LocalStorageInspection {
                     }
                 }
                 let relative = path.strip_prefix(&root).map_err(CapabilityError::new)?;
-                let (area, run_id, recognized) = classify(relative, &path, &database_paths);
+                let area = classify(relative, &path, &database_paths);
                 let key = identity(&meta);
                 files.push(StorageFileObservation {
                     relative_path: relative.to_string_lossy().into_owned(),
@@ -193,8 +193,6 @@ impl LocalStorageInspection {
                     inode: key.1,
                     hard_links: meta.nlink(),
                     ordinary_file: meta.is_file(),
-                    run_id,
-                    recognized_completed_scratch: recognized,
                     linked_audio_tracks: linked.get(&key).cloned().unwrap_or_default(),
                 });
             }
@@ -240,82 +238,48 @@ fn append_suffix(path: &Path, suffix: &str) -> PathBuf {
     s.push(suffix);
     s.into()
 }
-fn classify(
-    relative: &Path,
-    absolute: &Path,
-    database_paths: &[PathBuf; 3],
-) -> (StorageArea, Option<String>, bool) {
+fn classify(relative: &Path, absolute: &Path, database_paths: &[PathBuf; 3]) -> StorageArea {
     use StorageArea::*;
     if database_paths.iter().any(|p| p == absolute) {
-        return (Database, None, false);
+        return Database;
     }
     let Some(text) = relative.to_str() else {
-        return (Other, None, false);
+        return Other;
     };
     let parts: Vec<_> = text.split('/').collect();
-    let area = match parts.first().copied() {
+    match parts.first().copied() {
         Some("captures" | "media") => RecordedAudio,
         Some("models") if parts.get(1) == Some(&"work") => Processing,
         Some("models") => Models,
         Some("playback") => Playback,
-        Some("clipboard-recovery" | ".cleanup") => Recovery,
+        Some("clipboard-recovery") => Recovery,
         Some("evaluations") => Evaluations,
         _ => Other,
-    };
-    if area != Processing {
-        return (area, None, false);
     }
-    let run_id = parts
-        .get(2)
-        .and_then(|id| uuid::Uuid::parse_str(id).ok())
-        .map(|id| id.to_string())
-        .filter(|id| parts.get(2) == Some(&id.as_str()));
-    let recognized = run_id.is_some()
-        && match parts.as_slice() {
-            [_, _, _, "audio.f32" | "request.json"] => true,
-            [_, _, _, "whisper-chunks", name] => name
-                .strip_prefix("chunk-")
-                .and_then(|s| s.strip_suffix(".json"))
-                .is_some_and(|s| {
-                    s.len() == 4
-                        && s.bytes().all(|b| b.is_ascii_digit())
-                        && s.parse::<usize>().is_ok_and(|n| n < 120)
-                }),
-            _ => false,
-        };
-    (area, run_id, recognized)
 }
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
-    fn only_known_complete_artifact_layouts_are_recognized() {
-        let id = uuid::Uuid::new_v4().to_string();
+    fn files_are_grouped_by_area() {
         let db = [
             PathBuf::from("/db"),
             PathBuf::from("/db-wal"),
             PathBuf::from("/db-shm"),
         ];
-        for name in [
-            "audio.f32",
-            "request.json",
-            "whisper-chunks/chunk-0000.json",
+        for (path, area) in [
+            ("captures/x/microphone-raw.caf", StorageArea::RecordedAudio),
+            ("models/work/run/speech.f32", StorageArea::Processing),
+            ("models/whisper/model.bin", StorageArea::Models),
+            ("anything/else", StorageArea::Other),
         ] {
-            let p = PathBuf::from(format!("models/work/{id}/{name}"));
-            assert!(classify(&p, &p, &db).2);
+            let p = Path::new(path);
+            assert_eq!(classify(p, p, &db), area);
         }
-        for name in [
-            "audio.f32.partial",
-            "whisper-chunks/chunk-0000.json.partial",
-            "whisper-chunks/chunk-evil.json",
-            "original.m4a",
-            "nested/audio.f32",
-        ] {
-            let p = PathBuf::from(format!("models/work/{id}/{name}"));
-            assert!(!classify(&p, &p, &db).2);
-        }
-        let p = Path::new("models/work/not-a-run/audio.f32");
-        assert!(!classify(p, p, &db).2);
+        assert_eq!(
+            classify(Path::new("db"), Path::new("/db"), &db),
+            StorageArea::Database
+        );
     }
     #[tokio::test]
     async fn scanner_counts_files_links_and_external_references_without_following_root_symlinks() {
@@ -355,7 +319,7 @@ mod tests {
         let alias = observation
             .files
             .iter()
-            .find(|f| f.run_id.is_some())
+            .find(|f| f.area == StorageArea::Processing)
             .unwrap();
         assert_eq!(alias.linked_audio_tracks, vec!["track"]);
         assert_eq!(alias.hard_links, 2);

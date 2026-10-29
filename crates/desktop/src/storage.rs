@@ -1,6 +1,5 @@
 use super::*;
 use parakeet_application::storage::StorageArea;
-use parakeet_domain::storage::{RetentionPolicy, StorageProtection};
 fn size_label(bytes: u64) -> String {
     if bytes >= 1024 * 1024 * 1024 {
         format!("{:.2} GiB", bytes as f64 / (1024. * 1024. * 1024.))
@@ -11,11 +10,6 @@ fn size_label(bytes: u64) -> String {
     } else {
         format!("{bytes} bytes")
     }
-}
-fn policy_label(p: &RetentionPolicy) -> String {
-    p.completed_scratch_after_days
-        .map(|d| format!("Processing files from jobs completed at least {d} days ago"))
-        .unwrap_or_else(|| "Keep all processing files".into())
 }
 fn area_label(area: StorageArea) -> &'static str {
     match area {
@@ -29,36 +23,8 @@ fn area_label(area: StorageArea) -> &'static str {
         StorageArea::Other => "Other files",
     }
 }
-fn reason_label(reason: StorageProtection) -> &'static str {
-    use StorageProtection::*;
-    match reason {
-        EligibleCompletedScratch => "Completed processing files",
-        KeepAll => "Keep-all policy",
-        ActiveRun => "Active processing",
-        RecoverableRun => "Interrupted or failed processing",
-        UnknownRun => "Unknown processing ownership",
-        PendingMeeting => "Unfinished meeting transcription",
-        SpeakerReference => "Saved speaker examples",
-        ManualCorrection => "Manual corrections",
-        CompletionTimeUnknown => "Unknown completion time",
-        TooRecentOrFuture => "Recent work or clock discrepancy",
-        RecordedAudio => "Recording files",
-        Database => "Library database",
-        Models => "Local model data",
-        Recovery => "Recovery evidence",
-        Playback => "Playback may be active",
-        OtherFiles => "Other files",
-        UncertainArtifact => "Unrecognized or partial files",
-        LinkedAudio => "Referenced source audio",
-        MultipleHardLinks => "Files with multiple links",
-    }
-}
 impl Workbench {
-    pub(super) fn preview_storage(
-        &mut self,
-        policy: Option<RetentionPolicy>,
-        cx: &mut Context<Self>,
-    ) {
+    pub(super) fn measure_storage(&mut self, cx: &mut Context<Self>) {
         if self.storage_busy {
             return;
         }
@@ -67,13 +33,13 @@ impl Workbench {
         self.task(
             "Measuring local storage without changing files",
             async move {
-                let result = async {
-                    Ok(Arc::new(
-                        service.preview(policy).await.map_err(|e| e.to_string())?,
-                    ))
-                }
-                .await;
-                Ok(Update::StoragePreview(result))
+                Ok(Update::StorageUsage(
+                    service
+                        .usage()
+                        .await
+                        .map(Arc::new)
+                        .map_err(|e| e.to_string()),
+                ))
             },
             cx,
         );
@@ -83,14 +49,13 @@ impl Workbench {
             "Storage",
             "How much space Parakeet Local uses on this Mac.",
         ));
-        let Some(preview) = &self.storage_preview else {
+        let Some(usage) = &self.storage_usage else {
             return view.child(caption(if self.storage_busy {
                 "Measuring…"
             } else {
                 "Nothing measured yet."
             }));
         };
-        let usage = &preview.usage;
         let mut summary = panel().child(
             div()
                 .flex()
@@ -108,7 +73,7 @@ impl Workbench {
                 .child(
                     button("refresh-storage", "Measure again")
                         .disabled(self.storage_busy)
-                        .on_click(cx.listener(|this, _, _, cx| this.preview_storage(None, cx))),
+                        .on_click(cx.listener(|this, _, _, cx| this.measure_storage(cx))),
                 ),
         );
         summary = summary.child(caption(usage.root.clone()));
@@ -214,139 +179,7 @@ impl Workbench {
                 }
             )));
         }
-        if self.show_status_details {
-            view = view.child(self.storage_cleanup_preview(preview, cx));
-        }
         view
-    }
-    /// The processing-file retention preview. Nothing here deletes anything.
-    fn storage_cleanup_preview(
-        &self,
-        preview: &Arc<parakeet_application::storage::RetentionPreview>,
-        cx: &mut Context<Self>,
-    ) -> Div {
-        let mut view = div().flex().flex_col().gap_3().child(group(
-            "Processing-file retention (advanced)",
-            "Preview which finished processing files could be cleaned up. This never deletes anything.",
-        ));
-        if let Some(policy) = &self.storage_policy {
-            view = view.child(caption(format!(
-                "Saved: {} · revision {}",
-                policy_label(&policy.policy),
-                policy.revision
-            )));
-        }
-        view = view.child(
-            div()
-                .flex()
-                .gap_2()
-                .items_end()
-                .flex_wrap()
-                .child(
-                    button("preview-keep-all", "Preview keep all")
-                        .disabled(self.storage_busy)
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.preview_storage(Some(RetentionPolicy::default()), cx)
-                        })),
-                )
-                .child(
-                    div()
-                        .w(px(140.))
-                        .flex()
-                        .flex_col()
-                        .child(caption("Age in days"))
-                        .child(Input::new(&self.storage_days)),
-                )
-                .child(
-                    button("preview-storage-age", "Preview by age")
-                        .disabled(self.storage_busy)
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            match this.storage_days.read(cx).value().parse::<u16>() {
-                                Ok(days) => this.preview_storage(
-                                    Some(RetentionPolicy {
-                                        completed_scratch_after_days: Some(days),
-                                    }),
-                                    cx,
-                                ),
-                                Err(_) => {
-                                    this.last_error =
-                                        Some("Enter a whole number of days from 1 to 3650".into());
-                                    cx.notify();
-                                }
-                            }
-                        })),
-                ),
-        );
-        view = view.child(caption(format!(
-            "{}: {} potential completed files · {} file size · {} allocated blocks",
-            if preview.hypothetical {
-                "Hypothetical preview"
-            } else {
-                "Saved-policy preview"
-            },
-            preview.candidate_totals.files,
-            size_label(preview.candidate_totals.logical_bytes),
-            size_label(preview.candidate_totals.allocated_bytes)
-        )));
-        if preview.effective_policy != preview.saved_policy.policy {
-            let service = self.storage.clone();
-            let policy = preview.effective_policy.clone();
-            let revision = preview.saved_policy.revision;
-            view = view.child(
-                button("save-retention-policy", "Save this preview policy")
-                    .self_start()
-                    .disabled(self.storage_busy)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.storage_busy = true;
-                        let service = service.clone();
-                        let policy = policy.clone();
-                        this.task(
-                            "Saving preview policy only",
-                            async move {
-                                Ok(Update::StoragePolicySaved(
-                                    service
-                                        .save_policy(parakeet_application::storage::SaveRetentionPolicyInput{policy,expected_revision:revision})
-                                        .await
-                                        .map_err(|e| e.to_string()),
-                                ))
-                            },
-                            cx,
-                        );
-                    })),
-            );
-        }
-        for (reason, size) in &preview.protected {
-            view = view.child(caption(format!(
-                "Protected · {} · {} files · {}",
-                reason_label(*reason),
-                size.files,
-                size_label(size.logical_bytes)
-            )));
-        }
-        for candidate in preview.candidates.iter().take(40) {
-            view = view.child(caption(format!(
-                "{} · {}",
-                candidate.relative_path,
-                size_label(candidate.logical_bytes)
-            )));
-        }
-        let preview = preview.clone();
-        view.child(
-            quiet("copy-storage-preview", "Copy preview JSON")
-                .self_start()
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    let preview = preview.clone();
-                    this.task(
-                        "Preparing full storage preview",
-                        async move {
-                            Ok(Update::CopyText(serde_json::to_string_pretty(
-                                preview.as_ref(),
-                            )?))
-                        },
-                        cx,
-                    );
-                })),
-        )
     }
 }
 

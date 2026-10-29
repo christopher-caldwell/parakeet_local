@@ -664,7 +664,6 @@ async fn explicit_matching_can_suggest_fixture_identity_without_creating_more_ex
 }
 #[tokio::test]
 async fn wrong_model_role_refuses_capture_and_pending_analysis_protects_processing_files() {
-    use parakeet_application::storage::StorageQueries;
     let f = Fixture::new(false, false).await;
     f.models.wrong.store(true, Ordering::SeqCst);
     assert!(
@@ -715,14 +714,7 @@ async fn wrong_model_role_refuses_capture_and_pending_analysis_protects_processi
             .await
             .is_err()
     );
-    assert!(
-        f.store
-            .storage_runs()
-            .await
-            .unwrap()
-            .iter()
-            .all(|r| r.pending_meeting)
-    );
+    assert!(!f.meeting().pending().await.unwrap().is_empty());
     *f.engine.fail.lock().unwrap() = None;
     f.meeting()
         .finalize(FinalizeMeetingInput {
@@ -731,14 +723,7 @@ async fn wrong_model_role_refuses_capture_and_pending_analysis_protects_processi
         })
         .await
         .unwrap();
-    assert!(
-        f.store
-            .storage_runs()
-            .await
-            .unwrap()
-            .iter()
-            .all(|r| !r.pending_meeting)
-    );
+    assert!(f.meeting().pending().await.unwrap().is_empty());
 }
 #[tokio::test]
 async fn cancellation_settles_analysis_as_interrupted_and_resume_reuses_prior_work() {

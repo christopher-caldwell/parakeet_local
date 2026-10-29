@@ -1,6 +1,7 @@
 pub mod archive;
 pub mod artifacts;
 pub mod audio;
+pub mod audio_writes;
 pub mod jobs;
 pub mod media;
 pub mod models;
@@ -23,5 +24,3 @@ mod whisper;
 mod whisper_control;
 
 pub mod storage;
-
-pub mod storage_gate;
